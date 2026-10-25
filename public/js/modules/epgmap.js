@@ -12,12 +12,13 @@ import { escapeHtml } from './utils.js';
 import { ICONS } from './icons.js';
 
 const $ = (id) => document.getElementById(id);
-const OVERSCAN = 8; // rows drawn above and below the visible window, as in the guide
+const PAGE_SIZES = [10, 25, 50];
 
 let filter = 'none'; // 'none' (no guide data) | 'suggested' | 'manual' | 'all'
-let rows = []; // the filtered, sorted list; only the rows in view are in the DOM
-let rowH = 0; // measured from the first drawn row; rows have a fixed height
-let lastRange = '';
+let rows = []; // the filtered, sorted list; only the current page is in the DOM
+let page = 0;
+let pageSize = 25;
+try { const n = Number(localStorage.getItem('viniplay.epgPageSize')); if (PAGE_SIZES.includes(n)) pageSize = n; } catch { /* storage blocked */ }
 let selected = new Set(); // channel ids picked for a bulk action
 let optionsKey = '';
 let suggestions = new Map(); // channel id -> {epgId, names, sample, confidence, confident, via, aiDisagreed?}
@@ -95,26 +96,20 @@ function fillFilterMenus() {
     grpSel.innerHTML = opts(groups, `All groups (${groups.size})`, groups.has(grp) ? grp : '');
 }
 
-// Draws only the rows in view plus a margin, with spacer rows standing in for the rest.
-function drawWindow(force = false) {
-    const box = $('epg-map-scroll'), tbody = $('epg-map-tbody');
-    if (!rows.length) {
-        lastRange = '';
-        tbody.innerHTML = '<tr><td colspan="5" class="text-center text-gray-500 py-4">No channels to show.</td></tr>';
-        return;
-    }
-    const h = rowH || 64;
-    const top = Math.max(0, box.scrollTop - tbody.offsetTop);
-    const start = Math.max(0, Math.floor(top / h) - OVERSCAN);
-    const end = Math.min(rows.length, Math.ceil((top + box.clientHeight) / h) + OVERSCAN);
-    if (!force && `${start}-${end}` === lastRange) return;
-    lastRange = `${start}-${end}`;
-    const spacer = (n) => (n ? `<tr aria-hidden="true" style="height:${n * h}px"><td colspan="5" style="padding:0;border:0"></td></tr>` : '');
-    tbody.innerHTML = spacer(start) + rows.slice(start, end).map(rowHTML).join('') + spacer(rows.length - end);
-    if (!rowH) {
-        rowH = tbody.querySelector('tr[data-id]')?.offsetHeight || 0;
-        if (rowH && rowH !== h) drawWindow(true);
-    }
+const pageRows = () => rows.slice(page * pageSize, (page + 1) * pageSize);
+
+// Draws one page of rows and the pager under the table.
+function drawPage() {
+    const pages = Math.max(1, Math.ceil(rows.length / pageSize));
+    page = Math.min(page, pages - 1); // accepting the last rows of the last page shrinks the list
+    $('epg-map-tbody').innerHTML = pageRows().map(rowHTML).join('')
+        || '<tr><td colspan="5" class="text-center text-gray-500 py-4">No channels to show.</td></tr>';
+    const first = page * pageSize;
+    $('epg-map-range').textContent = rows.length
+        ? `${first + 1}–${Math.min(first + pageSize, rows.length)} of ${rows.length} · page ${page + 1} of ${pages}` : '';
+    $('epg-map-prev').disabled = page === 0;
+    $('epg-map-next').disabled = page >= pages - 1;
+    $('epg-map-size').value = String(pageSize);
 }
 
 function renderBulkBar() {
@@ -128,8 +123,9 @@ function renderBulkBar() {
     set('reject', 'Dismiss suggestions', withSug);
     set('clear', 'Remove assignments', withOverride);
     const all = $('epg-map-all');
-    all.checked = rows.length > 0 && rows.every((ch) => selected.has(ch.id));
-    all.indeterminate = !all.checked && rows.some((ch) => selected.has(ch.id));
+    const shown = pageRows();
+    all.checked = shown.length > 0 && shown.every((ch) => selected.has(ch.id));
+    all.indeterminate = !all.checked && shown.some((ch) => selected.has(ch.id));
 }
 
 export function renderEpgMap() {
@@ -138,7 +134,7 @@ export function renderEpgMap() {
     // Most-actionable rows first: strongest suggestion at the top, channels with nothing last.
     rows = matching().sort((a, b) => (suggestions.get(b.id)?.confidence ?? -1) - (suggestions.get(a.id)?.confidence ?? -1));
     const without = guideState.channels.filter((ch) => status(ch) === 'none').length;
-    drawWindow(true);
+    drawPage();
     $('epg-map-summary').textContent = `${without} of ${guideState.channels.length} channels have no guide data · ${suggestions.size} suggestions · showing ${rows.length}`;
     document.querySelectorAll('[data-epg-filter]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.epgFilter === filter)));
     document.querySelectorAll('[data-epg-count]').forEach((n) => {
@@ -259,7 +255,16 @@ export function setupEpgMap() {
     const debounced = (fn) => () => { clearTimeout(timer); timer = setTimeout(fn, 250); };
 
     // A new filter starts a new list: drop the old selection so a bulk action never hits rows you cannot see.
-    const refilter = () => { selected.clear(); $('epg-map-scroll').scrollTop = 0; renderEpgMap(); };
+    const refilter = () => { selected.clear(); page = 0; renderEpgMap(); };
+    // Likewise a new page is a new batch.
+    const turn = (to) => { selected.clear(); page = to; renderEpgMap(); };
+    $('epg-map-prev').addEventListener('click', () => turn(page - 1));
+    $('epg-map-next').addEventListener('click', () => turn(page + 1));
+    $('epg-map-size').addEventListener('change', (e) => {
+        pageSize = Number(e.target.value);
+        try { localStorage.setItem('viniplay.epgPageSize', String(pageSize)); } catch { /* storage blocked */ }
+        turn(0);
+    });
     document.querySelectorAll('[data-epg-filter]').forEach((b) => b.addEventListener('click', () => {
         filter = b.dataset.epgFilter;
         refilter();
@@ -267,19 +272,17 @@ export function setupEpgMap() {
     $('epg-map-search').addEventListener('input', debounced(refilter));
     $('epg-map-source').addEventListener('change', () => { $('epg-map-group').value = ''; refilter(); });
     $('epg-map-group').addEventListener('change', refilter);
-    let frame = 0;
-    $('epg-map-scroll').addEventListener('scroll', () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(() => drawWindow()); }, { passive: true });
 
     $('epg-map-all').addEventListener('change', (e) => {
-        if (e.target.checked) rows.forEach((ch) => selected.add(ch.id)); else selected.clear();
-        drawWindow(true);
+        if (e.target.checked) pageRows().forEach((ch) => selected.add(ch.id)); else selected.clear();
+        drawPage();
         renderBulkBar();
     });
     $('epg-map-bulk').addEventListener('click', (e) => {
         const act = e.target.closest('[data-bulk]')?.dataset.bulk;
         if (!act) return;
         const ids = [...selected];
-        if (act === 'none') { selected.clear(); drawWindow(true); return renderBulkBar(); }
+        if (act === 'none') { selected.clear(); drawPage(); return renderBulkBar(); }
         if (act === 'accept') {
             const set = {};
             ids.forEach((id) => { const s = suggestions.get(id); if (s) set[id] = s.epgId; });

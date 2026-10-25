@@ -950,11 +950,6 @@ body.modal-open {
     }
 }
 
-/* Channel EPG list is windowed: every row must be the same height. */
-#epg-map-tbody tr[data-id] {
-    height: 4rem;
-}
-
 /* Fixed columns so the list fits its card instead of scrolling sideways; long names end in "…". */
 #epg-map-scroll table {
     table-layout: fixed;
