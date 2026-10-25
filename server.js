@@ -28,13 +28,15 @@ const { cachedFile, writeFileAtomic } = require('./fileStore');
 const { sendJson } = require('./sendJson');
 const { createEpgPayload } = require('./epgPayload');
 const { applyProcessed } = require('./processedSettings');
+const { openMaybeGzip } = require('./compressedFile');
 const { validateJobWindow } = require('./dvrTime');
 const { findConflictingJobs } = require('./dvrConflict');
 const { planSourceRefreshes } = require('./sourceRefresh');
+const { isAllowedStreamUrl, isPlaylistUrl } = require('./streamProtocols');
+const { parseM3U, displayNameFromExtinf } = require('./m3uParser');
+const { parseEpgTime } = require('./epgTime');
 const { resolveStreamIdentity } = require('./streamAuth');
 const { allowedSourcesFromUser, isChannelAllowed } = require('./accessControl');
-const zlib = require('zlib');
-const { pipeline } = require('stream');
 const { pipeline: pipelineAsync } = require('stream/promises');
 const { forEachProgramme, forEachChannel } = require('./epgStream');
 const { buildTargets, createSuggester, bestMatch, CONFIDENT } = require('./epgMatch');
@@ -105,18 +107,6 @@ let detectedHardware = { nvidia: null, intel_qsv: null, intel_vaapi: null, radeo
 
 // Used to validate settings.
 const validFFmpegLogLevels = ["debug", "verbose", "info", "warning", "error"];
-
-// Protocols accepted as an FFmpeg input for /stream. Anything else (local paths, file:,
-// concat:, subfile:, pipe:, ...) would let a caller make FFmpeg read files from disk.
-const ALLOWED_STREAM_PROTOCOLS = ['http:', 'https:', 'rtmp:', 'rtmps:', 'rtsp:', 'rtsps:', 'rtp:', 'udp:', 'srt:', 'mms:', 'mmsh:'];
-
-function isAllowedStreamUrl(value) {
-    try {
-        return ALLOWED_STREAM_PROTOCOLS.includes(new URL(value).protocol);
-    } catch (e) {
-        return false;
-    }
-}
 
 /**
  * Builds an FFmpeg argv array from a profile command template.
@@ -1153,6 +1143,8 @@ function getSettings() {
         playerLogLevel: 'warning',
         dvrLogLevel: 'warning',
         searchScope: 'all_channels_unfiltered',
+        timeZone: null,
+        timezoneOffset: 0,
         notificationLeadTime: 10,
         sourcesLastUpdated: null,
         epgOverrides: {}, // channel id -> XMLTV channel id, set by an admin; wins over every automatic match
@@ -1296,6 +1288,16 @@ function getSettings() {
         if (settings.clientTelemetryEnabled === undefined) {
             console.log(`[SETTINGS_MIGRATE] Adding missing clientTelemetryEnabled setting.`);
             settings.clientTelemetryEnabled = defaultSettings.clientTelemetryEnabled;
+            needsSave = true;
+        }
+
+        if (settings.timeZone === undefined) {
+            console.log('[SETTINGS_MIGRATE] Adding missing timeZone setting.');
+            settings.timeZone = defaultSettings.timeZone;
+            needsSave = true;
+        }
+        if (settings.timezoneOffset === undefined) {
+            settings.timezoneOffset = defaultSettings.timezoneOffset;
             needsSave = true;
         }
 
@@ -1632,32 +1634,13 @@ function fetchUrlContent(url, options = {}, asStream = false) { // asStream reso
 
 
 // --- EPG Parsing and Caching Logic ---
-const parseEpgTime = (timeStr, offsetHours = 0) => {
-    const match = timeStr.match(/(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\s*(([+-])(\d{2})(\d{2}))?/);
-    if (!match) {
-        console.warn(`[EPG_PARSE] Invalid time format encountered: ${timeStr}`);
-        return new Date();
-    }
-
-    const [, year, month, day, hours, minutes, seconds, , sign, tzHours, tzMinutes] = match;
-    let date;
-    if (sign && tzHours && tzMinutes) {
-        const epgOffsetMinutes = (parseInt(tzHours) * 60 + parseInt(tzMinutes)) * (sign === '+' ? 1 : -1);
-        date = new Date(Date.UTC(year, parseInt(month) - 1, day, hours, minutes, seconds));
-        date.setUTCMinutes(date.getUTCMinutes() - epgOffsetMinutes);
-    } else {
-        date = new Date(Date.UTC(year, parseInt(month) - 1, day, hours, minutes, seconds));
-        date.setUTCHours(date.getUTCHours() - offsetHours);
-    }
-    return date;
-};
-
 // The EPG half of processAndMergeSources, on its own so a manual EPG assignment can re-merge the guides
 // without fetching the playlists again. `liveChannels`: prefixed channel id -> {originalId, name}.
 // Updates the status of the active EPG sources in `settings` and adds the ones that failed to `failedSources`.
 async function mergeEpg(req, settings, liveChannels, onlyIds, failedSources) {
     const activeEpgSources = settings.epgSources.filter(s => s.isActive);
     const mergedProgramData = {};
+    const timeZone = settings.timeZone || null;
     const timezoneOffset = settings.timezoneOffset || 0;
 
     if (activeEpgSources.length === 0) {
@@ -1669,9 +1652,8 @@ async function mergeEpg(req, settings, liveChannels, onlyIds, failedSources) {
     // re-merge it without downloading it again); the channel pass and the programme pass both read that file.
     const epgFiles = new Map();
     const openEpg = (source) => {
-        const stream = fs.createReadStream(epgFiles.get(source.id));
         // The guide is parsed as a stream: big ones don't fit in a single string.
-        return source.path.endsWith('.gz') ? pipeline(stream, zlib.createGunzip(), () => { }) : stream;
+        return openMaybeGzip(epgFiles.get(source.id));
     };
     const failEpg = (source, error) => {
         const errorMsg = `Failed to process source "${source.name}" from ${source.path}: ${error.message}`;
@@ -1763,8 +1745,8 @@ async function mergeEpg(req, settings, liveChannels, onlyIds, failedSources) {
 
                 const descNode = prog.desc && prog.desc._cdata ? prog.desc._cdata : (prog.desc?._text || '');
                 const entry = {
-                    start: parseEpgTime(prog._attributes.start, timezoneOffset).toISOString(),
-                    stop: parseEpgTime(prog._attributes.stop, timezoneOffset).toISOString(),
+                    start: parseEpgTime(prog._attributes.start, { timeZone, offsetHours: timezoneOffset }).toISOString(),
+                    stop: parseEpgTime(prog._attributes.stop, { timeZone, offsetHours: timezoneOffset }).toISOString(),
                     title: titleOf(prog),
                     desc: descNode.trim()
                 };
@@ -2014,7 +1996,7 @@ async function processAndMergeSources(req, onlyIds) {
                     continue;
                 }
 
-                if (line.startsWith('http') && currentExtInf) {
+                if (isPlaylistUrl(line) && currentExtInf) {
                     const streamUrl = line;
 
 
@@ -2033,9 +2015,8 @@ async function processAndMergeSources(req, onlyIds) {
                     let processedExtInf = currentExtInf;
                     const idMatch = currentExtInf.match(/tvg-id="([^"]*)"/); // Still needed for unique ID
                     const tvgNameMatch = currentExtInf.match(/tvg-name="([^"]*)"/);
-                    const commaIndex = currentExtInf.lastIndexOf(',');
                     const tvgName = (tvgNameMatch && tvgNameMatch[1]) || '';
-                    const name = (commaIndex !== -1) ? currentExtInf.substring(commaIndex + 1).trim() : 'Unknown';
+                    const name = displayNameFromExtinf(currentExtInf);
 
                     // Consistent Unique Channel ID Generation
                     // Treat an empty tvg-id="" the same as a missing attribute: otherwise
@@ -2645,7 +2626,7 @@ app.get('/api/config', requireAuth, async (req, res) => {
                             currentExtInf = null;
                         }
 
-                    } else if (line.startsWith('http') || (line.startsWith('/') && !line.startsWith('//'))) { // URL or local path
+                    } else if (isPlaylistUrl(line) || (line.startsWith('/') && !line.startsWith('//'))) { // URL or local path
                         if (currentExtInf) {
                             filteredLines.push(currentExtInf);
                             filteredLines.push(line);
@@ -3761,6 +3742,7 @@ app.post('/api/save/settings', requireAuth, requireAdmin, async (req, res) => {
         let currentSettings = getSettings();
 
         const oldTimezone = currentSettings.timezoneOffset;
+        const oldTimeZone = currentSettings.timeZone;
 
         const updatedSettings = { ...currentSettings };
         for (const key in req.body) {
@@ -3773,7 +3755,7 @@ app.post('/api/save/settings', requireAuth, requireAdmin, async (req, res) => {
 
         saveSettings(updatedSettings);
 
-        if (updatedSettings.timezoneOffset !== oldTimezone) {
+        if (updatedSettings.timezoneOffset !== oldTimezone || updatedSettings.timeZone !== oldTimeZone) {
             console.log("[API] Timezone setting changed, re-processing sources.");
             const result = await runSourceProcessing(null);
             saveProcessedSettings(result.updatedSettings);
@@ -6961,38 +6943,3 @@ detectHardwareAcceleration().then(() => {
 });
 
 // --- Helper Functions (Full Implementation) ---
-function parseM3U(data) {
-    if (!data) return [];
-    const lines = data.split('\n');
-    const channels = [];
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i].trim();
-        if (line.startsWith('#EXTINF:')) {
-            const nextLine = lines[i + 1]?.trim();
-            // Ensure the next line is a valid URL
-            if (nextLine && (nextLine.startsWith('http') || nextLine.startsWith('rtp'))) {
-                const idMatch = line.match(/tvg-id="([^"]*)"/);
-                const logoMatch = line.match(/tvg-logo="([^"]*)"/);
-                const nameMatch = line.match(/tvg-name="([^"]*)"/);
-                const groupMatch = line.match(/group-title="([^"]*)"/);
-                const chnoMatch = line.match(/tvg-chno="([^"]*)"/);
-                const sourceMatch = line.match(/vini-source="([^"]*)"/);
-                const commaIndex = line.lastIndexOf(',');
-                const displayName = (commaIndex !== -1) ? line.substring(commaIndex + 1).trim() : 'Unknown';
-
-                channels.push({
-                    id: idMatch ? idMatch[1] : `unknown-${Math.random()}`,
-                    logo: logoMatch ? logoMatch[1] : '',
-                    name: nameMatch ? nameMatch[1] : displayName,
-                    group: groupMatch ? groupMatch[1] : 'Uncategorized',
-                    chno: chnoMatch ? chnoMatch[1] : null,
-                    source: sourceMatch ? sourceMatch[1] : 'Default',
-                    displayName: displayName,
-                    url: nextLine
-                });
-                i++; // Skip the URL line in the next iteration
-            }
-        }
-    }
-    return channels;
-}

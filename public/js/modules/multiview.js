@@ -111,6 +111,13 @@ async function pauseAndClearAllPlayers() {
         }
     }
 
+    // Redirect streams have their own server sessions and heartbeats.
+    for (const historyId of redirectHistoryIds.values()) {
+        stopPromises.push(stopRedirectStream(historyId));
+    }
+    redirectHistoryIds.clear();
+    checkAndStopMultiviewHeartbeats();
+
     // Wait for all server stop requests to be sent
     await Promise.all(stopPromises);
     console.log('[MultiView] Tab Hide: All server streams have been requested to stop.');

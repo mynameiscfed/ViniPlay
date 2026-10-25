@@ -89,16 +89,22 @@ function stopRedirectHeartbeat() {
     }
 }
 
+/** Ends the server-side redirect session and invalidates any in-flight start. */
+function stopRedirectLogging() {
+    stopRedirectHeartbeat();
+    currentRedirectToken++;
+    if (currentRedirectHistoryId) {
+        stopRedirectStream(currentRedirectHistoryId);
+        currentRedirectHistoryId = null;
+    }
+}
+
 /**
  * Starts a redirect logging session and initiates periodic heartbeats.
  * Guards against race conditions if user switches streams before promise resolves.
  */
 function beginRedirectLogging(url, channelOrVodId, name, logo) {
-    if (currentRedirectHistoryId) {
-        stopRedirectStream(currentRedirectHistoryId);
-        currentRedirectHistoryId = null;
-    }
-    stopRedirectHeartbeat();
+    stopRedirectLogging();
 
     const token = ++currentRedirectToken;
 
@@ -680,15 +686,8 @@ export const stopAndCleanupPlayer = async () => { // MODIFIED: Made function asy
     // Flush watch progress before tearing down players
     flushWatchProgress();
 
-    // NEW: Stop redirect heartbeat and invalidate in-flight promises
-    stopRedirectHeartbeat();
-    currentRedirectToken++;
-
-    // If we were logging a redirect stream, tell the server it has stopped.
-    if (currentRedirectHistoryId) {
-        stopRedirectStream(currentRedirectHistoryId);
-        currentRedirectHistoryId = null;
-    }
+    // NEW: Stop redirect heartbeat, invalidate in-flight promises and close the session.
+    stopRedirectLogging();
 
     // NEW: Clear any scheduled retry attempt
     if (retryTimeout) {
@@ -917,6 +916,10 @@ export const playChannel = (url, name, channelId) => {
     if (!profile) {
         return showNotification("Stream profile not found.", true);
     }
+
+    // Any new play request replaces the old one, even when the new profile transcodes:
+    // otherwise a redirect heartbeat kept the old session alive forever.
+    stopRedirectLogging();
 
     // --- Activity Logging for Redirect Streams ---
     if (profile.command === 'redirect') {

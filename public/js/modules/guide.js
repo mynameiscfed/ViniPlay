@@ -8,7 +8,8 @@
 
 import { appState, guideState, UIElements, dvrState } from './state.js';
 import { saveUserSetting, getDeviceSetting, saveDeviceSetting } from './api.js';
-import { parseM3U, formatTimeWithOffset, escapeHtml, nowNext } from './utils.js';
+import { parseM3U, escapeHtml, nowNext } from './utils.js';
+import { formatTimeInZone, formatDateInZone, zoneDayStartUtc } from './time.js';
 import { playChannel } from './player.js';
 import { showNotification, openModal, closeModal } from './ui.js';
 import { addOrRemoveNotification, findNotificationForProgram } from './notification.js';
@@ -22,6 +23,8 @@ let rowHeight = 64; // Pixel height of one channel row. Measured from --row-h in
 const OVERSCAN_COUNT = 5; // Number of extra rows to render above and below the visible area for smooth scrolling
 const SEARCH_DEBOUNCE_MS = 250; // Delay between the last keystroke and re-filtering the guide
 
+const formatGuideTime = (date) => formatTimeInZone(date, guideState.settings.timeZone, guideState.settings.timezoneOffset || 0);
+
 // Program IDs that matched the current search, highlighted in the timeline.
 let searchMatchedProgramIds = new Set();
 
@@ -32,13 +35,7 @@ let searchMatchedProgramIds = new Set();
  */
 const getGuideStartUtc = () => {
     const selectedDate = new Date(guideState.currentDate);
-    const offsetMs = (guideState.settings.timezoneOffset || 0) * 3600000;
-    return new Date(Date.UTC(
-        selectedDate.getFullYear(),
-        selectedDate.getMonth(),
-        selectedDate.getDate(),
-        0, 0, 0, 0
-    ) - offsetMs);
+    return zoneDayStartUtc(selectedDate, guideState.settings.timeZone, guideState.settings.timezoneOffset || 0);
 };
 
 // Phones default to the now/next list, everything else to the timeline grid.
@@ -123,7 +120,7 @@ export function openProgramDetails(progItem) {
     const progStart = new Date(programData.start);
     const progStop = new Date(programData.stop);
     const offset = guideState.settings.timezoneOffset || 0;
-    if (detailsTime) detailsTime.textContent = `${formatTimeWithOffset(progStart, offset)} - ${formatTimeWithOffset(progStop, offset)}`;
+    if (detailsTime) detailsTime.textContent = `${formatGuideTime(progStart, offset)} - ${formatGuideTime(progStop, offset)}`;
     if (detailsDesc) detailsDesc.textContent = programData.desc || "No description available.";
 
     if (detailsPlayBtn) {
@@ -283,12 +280,7 @@ export async function handleGuideLoad(m3uContent, epgContent, shouldCenter = fal
  * @param {Date} date - The date to format.
  * @returns {string} The formatted date string.
  */
-const formatDateForInput = (date) => {
-    const year = date.getFullYear();
-    const month = (date.getMonth() + 1).toString().padStart(2, '0');
-    const day = date.getDate().toString().padStart(2, '0');
-    return `${year}-${month}-${day}`;
-};
+const formatDateForInput = (date) => formatDateInZone(date, guideState.settings.timeZone);
 
 
 /**
@@ -383,7 +375,7 @@ export const cardHTML = (channel) => {
         const pct = Math.min(100, Math.max(0, ((Date.now() - start) / (stop - start)) * 100));
         bar = `<div class="gc-bar"><i><b style="width:${pct}%"></b></i><span>${Math.max(1, Math.round((stop - Date.now()) / 60000))} min left</span></div>`;
     }
-    const nextHTML = next ? `<div class="gc-next">Next · ${escapeHtml(next.title)} ${formatTimeWithOffset(new Date(next.start), offset)}</div>` : '';
+    const nextHTML = next ? `<div class="gc-next">Next · ${escapeHtml(next.title)} ${formatGuideTime(new Date(next.start), offset)}</div>` : '';
     return `<div class="channel-info gcard" ${channelAttrs(channel)}>${logoHTML(channel)}<div class="gc-main"><div class="gc-top"><span class="ch-no">${escapeHtml(channel.chno || '')}</span><span>${escapeHtml(channel.displayName || channel.name)}</span></div><div class="gc-now">${escapeHtml(now ? now.title : 'No guide data')}</div>${bar}${nextHTML}</div>${starHTML(channel)}</div>`;
 };
 
@@ -424,7 +416,7 @@ const timelineHTML = (channel, guideStartUtc, timelineWidth) => {
         ].filter(Boolean).join(' ');
         const pct = isLive ? `;--p:${(((now - progStart) / durationMs) * 100).toFixed(1)}%` : '';
 
-        cells += `<div class="programme-item ${state}" tabindex="-1" role="button" data-longpress title="${escapeHtml(prog.title)}" style="left:${left}px;width:${Math.max(0, width - 2)}px${pct}" data-channel-url="${escapeHtml(channel.url)}" data-channel-id="${escapeHtml(channel.id)}" data-channel-name="${escapeHtml(channel.displayName || channel.name)}" data-prog-title="${escapeHtml(prog.title)}" data-prog-desc="${escapeHtml(prog.desc)}" data-prog-start="${progStart.toISOString()}" data-prog-stop="${progStop.toISOString()}" data-prog-id="${escapeHtml(id)}"><span class="fl">${flags}</span><span class="prog-title">${escapeHtml(prog.title)}</span><span class="prog-time">${formatTimeWithOffset(progStart, offset)} - ${formatTimeWithOffset(progStop, offset)}</span></div>`;
+        cells += `<div class="programme-item ${state}" tabindex="-1" role="button" data-longpress title="${escapeHtml(prog.title)}" style="left:${left}px;width:${Math.max(0, width - 2)}px${pct}" data-channel-url="${escapeHtml(channel.url)}" data-channel-id="${escapeHtml(channel.id)}" data-channel-name="${escapeHtml(channel.displayName || channel.name)}" data-prog-title="${escapeHtml(prog.title)}" data-prog-desc="${escapeHtml(prog.desc)}" data-prog-start="${progStart.toISOString()}" data-prog-stop="${progStop.toISOString()}" data-prog-id="${escapeHtml(id)}"><span class="fl">${flags}</span><span class="prog-title">${escapeHtml(prog.title)}</span><span class="prog-time">${formatGuideTime(progStart, offset)} - ${formatGuideTime(progStop, offset)}</span></div>`;
     });
 
     return `<div class="timeline-row" style="width: ${timelineWidth}px;">${cells}</div>`;
@@ -454,7 +446,7 @@ const renderPreview = () => {
     UIElements.gpChannel.textContent = d.channelName;
     UIElements.gpTags.textContent = [channel.group, guideState.channelSources.size > 1 && channel.source].filter(Boolean).join(' · ');
     UIElements.gpTitle.textContent = d.progTitle;
-    UIElements.gpTime.textContent = `${formatTimeWithOffset(start, offset)} - ${formatTimeWithOffset(stop, offset)}`;
+    UIElements.gpTime.textContent = `${formatGuideTime(start, offset)} - ${formatGuideTime(stop, offset)}`;
     UIElements.gpBarFill.style.width = `${live ? ((now - start) / (stop - start)) * 100 : 0}%`;
     UIElements.gpBarFill.parentNode.style.visibility = live ? '' : 'hidden';
     UIElements.gpLeft.textContent = live ? `${minutesText(mins)} left` : now < start ? `Starts in ${minutesText(mins)}` : 'Ended';
@@ -469,7 +461,7 @@ const renderPreview = () => {
     const at = programs.findIndex(p => new Date(p.start).toISOString() === d.progStart);
     const upcoming = at < 0 ? [] : programs.slice(at + 1, at + 3);
     UIElements.gpNextList.innerHTML = upcoming.map(p =>
-        `<div class="row"><span>${escapeHtml(p.title)}</span><time>${formatTimeWithOffset(new Date(p.start), offset)}</time></div>`
+        `<div class="row"><span>${escapeHtml(p.title)}</span><time>${formatGuideTime(new Date(p.start), offset)}</time></div>`
     ).join('') || '<div class="row"><span>Nothing scheduled</span></div>';
 };
 
@@ -557,7 +549,7 @@ const renderGuide = (channelsToRender, resetScroll = false, shouldCenter = false
         const timeBar = guideGrid.querySelector('.time-bar-cell');
         const offset = guideState.settings.timezoneOffset || 0;
         timeBar.innerHTML = Array.from({ length: guideState.guideDurationHours }, (_, i) =>
-            `<div class="tk" style="left:${i * guideState.hourWidthPixels}px;width:${guideState.hourWidthPixels}px">${formatTimeWithOffset(new Date(guideStartUtc.getTime() + i * 3600 * 1000), offset)}</div>`
+            `<div class="tk" style="left:${i * guideState.hourWidthPixels}px;width:${guideState.hourWidthPixels}px">${formatGuideTime(new Date(guideStartUtc.getTime() + i * 3600 * 1000), offset)}</div>`
         ).join('');
         timeBar.style.width = `${timelineWidth}px`;
 
@@ -659,7 +651,7 @@ const updateNowLine = (guideStartUtc, shouldScroll = false) => {
     if (nowValue >= guideStartUtc.getTime() && nowValue <= guideEnd.getTime()) {
         const leftOffsetInScrollableArea = ((nowValue - guideStartUtc.getTime()) / 3600000) * guideState.hourWidthPixels;
         nowLineEl.style.left = `${channelInfoColWidth + leftOffsetInScrollableArea}px`;
-        nowLineEl.firstElementChild.textContent = formatTimeWithOffset(now, guideState.settings.timezoneOffset || 0);
+        nowLineEl.firstElementChild.textContent = formatGuideTime(now, guideState.settings.timezoneOffset || 0);
         nowLineEl.classList.remove('hidden');
         if (shouldScroll) {
             setTimeout(() => {

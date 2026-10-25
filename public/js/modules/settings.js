@@ -14,6 +14,7 @@ import { ICONS } from './icons.js';
 import { escapeHtml } from './utils.js';
 import { renderEpgMap, setupEpgMap } from './epgmap.js';
 import { renderEpgAi, setupEpgAi } from './epgai.js';
+import { zoneOffsetHours } from './time.js';
 
 let currentSourceTypeForEditor = 'url';
 let hardwareChecked = false; // Flag to prevent re-checking hardware on every UI update
@@ -627,11 +628,32 @@ const switchGroupFilterTab = (type) => {
 /**
  * Populates the timezone selector dropdown.
  */
+const FALLBACK_TIME_ZONES = [
+    'UTC', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
+    'America/Sao_Paulo', 'Europe/London', 'Europe/Berlin', 'Europe/Paris', 'Europe/Madrid',
+    'Europe/Rome', 'Europe/Warsaw', 'Europe/Moscow', 'Africa/Cairo', 'Africa/Johannesburg',
+    'Asia/Dubai', 'Asia/Karachi', 'Asia/Kolkata', 'Asia/Dhaka', 'Asia/Bangkok',
+    'Asia/Shanghai', 'Asia/Tokyo', 'Asia/Seoul', 'Australia/Sydney', 'Pacific/Auckland',
+];
+
 export const populateTimezoneSelector = () => {
-    UIElements.timezoneOffsetSelect.innerHTML = '';
-    for (let i = 14; i >= -12; i--) {
-        UIElements.timezoneOffsetSelect.innerHTML += `<option value="${i}">UTC${i >= 0 ? '+' : ''}${i}:00</option>`;
+    const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    const current = guideState.settings.timeZone || browserZone;
+    let zones = [];
+    try {
+        zones = Intl.supportedValuesOf ? Intl.supportedValuesOf('timeZone') : FALLBACK_TIME_ZONES;
+    } catch (e) {
+        zones = FALLBACK_TIME_ZONES;
     }
+    if (!zones.includes(current)) zones = [current, ...zones];
+
+    UIElements.timezoneOffsetSelect.innerHTML = '';
+    zones.forEach((zone) => {
+        const option = document.createElement('option');
+        option.value = zone;
+        option.textContent = zone;
+        UIElements.timezoneOffsetSelect.appendChild(option);
+    });
 };
 
 /**
@@ -704,26 +726,22 @@ export const updateUIFromSettings = async () => {
     // Run hardware detection which may add new profiles to the state
     const hardware = await handleHardwareDetection();
 
-    // One-time timezone auto-detection and setting.
-    const timezoneSetFlag = localStorage.getItem('vini_timezone_auto_set');
-    if (!timezoneSetFlag) {
-        const browserOffset = Math.round(-(new Date().getTimezoneOffset() / 60));
+    // First run (or a settings file from before IANA zones): store the browser zone.
+    // The numeric offset stays as a fallback for old clients and EPG sources without one.
+    const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    const browserOffset = -(new Date().getTimezoneOffset() / 60);
+    if (!settings.timeZone) {
+        settings.timeZone = browserZone;
         settings.timezoneOffset = browserOffset;
-        console.log(`[SETTINGS] First-run timezone detection. Setting to browser offset: ${browserOffset} and saving.`);
-        if (appState.currentUser?.isAdmin) saveGlobalSetting({ timezoneOffset: browserOffset }); // global setting: admin-only on the server
-        localStorage.setItem('vini_timezone_auto_set', 'true');
+        console.log(`[SETTINGS] First-run timezone detection. Setting to ${browserZone} (UTC${browserOffset >= 0 ? '+' : ''}${browserOffset}) and saving.`);
+        if (appState.currentUser?.isAdmin) saveGlobalSetting({ timeZone: browserZone, timezoneOffset: browserOffset });
     } else {
-        settings.timezoneOffset = settings.timezoneOffset ?? Math.round(-(new Date().getTimezoneOffset() / 60));
+        settings.timezoneOffset = settings.timezoneOffset ?? browserOffset;
     }
 
-    try {
-        const userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-        if (userTimezone && UIElements.detectedTimezoneInfo) {
-            UIElements.detectedTimezoneInfo.textContent = `We've pre-selected your browser's timezone (${userTimezone}).`;
-            UIElements.detectedTimezoneInfo.classList.remove('hidden');
-        }
-    } catch (e) {
-        console.warn("Could not detect user's IANA timezone.", e);
+    if (UIElements.detectedTimezoneInfo) {
+        UIElements.detectedTimezoneInfo.textContent = `Guide times use ${settings.timeZone}.`;
+        UIElements.detectedTimezoneInfo.classList.remove('hidden');
     }
 
     settings.searchScope = settings.searchScope || 'all_channels_unfiltered';
@@ -738,7 +756,7 @@ export const updateUIFromSettings = async () => {
     settings.dvr.autoDeleteDays = settings.dvr.autoDeleteDays ?? 0;
 
     // Update dropdowns and inputs
-    UIElements.timezoneOffsetSelect.value = settings.timezoneOffset;
+    UIElements.timezoneOffsetSelect.value = settings.timeZone;
     fetchAndDisplayPublicIp();
     fetchAndDisplayAppVersion();
     UIElements.searchScopeSelect.value = settings.searchScope;
@@ -1463,7 +1481,10 @@ export function setupSettingsEventListeners() {
     UIElements.epgSourcesTbody.addEventListener('click', (e) => handleSourceTableClick(e, 'epg'));
 
     // --- General Settings Inputs ---
-    UIElements.timezoneOffsetSelect.addEventListener('change', (e) => saveSettingAndNotify(saveGlobalSetting, { timezoneOffset: parseInt(e.target.value, 10) }));
+    UIElements.timezoneOffsetSelect.addEventListener('change', (e) => {
+        const timeZone = e.target.value;
+        saveSettingAndNotify(saveGlobalSetting, { timeZone, timezoneOffset: zoneOffsetHours(new Date(), timeZone) });
+    });
     UIElements.searchScopeSelect.addEventListener('change', (e) => saveSettingAndNotify(saveGlobalSetting, { searchScope: e.target.value }));
     UIElements.playerLogLevelSelect.addEventListener('change', (e) => saveSettingAndNotify(saveGlobalSetting, { playerLogLevel: e.target.value }));
     UIElements.dvrLogLevelSelect.addEventListener('change', (e) => saveSettingAndNotify(saveGlobalSetting, { dvrLogLevel: e.target.value }));

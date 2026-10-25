@@ -749,7 +749,7 @@ export async function refreshGuideAfterProcessing() {
     // Do NOT render yet - just parse and store
     if (config?.m3uContent) {
         console.log('[UI_PROCESS_DEBUG] About to parse guide data (no render yet)...');
-        await guideState.settings.timezoneOffset; // Ensure timezone is set before parsing
+
 
         // Parse the M3U and store in guideState (from handleGuideLoad logic)
         const { parseM3U } = await import('./utils.js');

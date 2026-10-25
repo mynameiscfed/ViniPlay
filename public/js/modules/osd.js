@@ -7,7 +7,8 @@
 
 import { guideState } from './state.js';
 import { playChannel } from './player.js';
-import { escapeHtml, formatTimeWithOffset, nowNext } from './utils.js';
+import { escapeHtml, nowNext } from './utils.js';
+import { formatTimeInZone } from './time.js';
 import { focusEl } from './focus.js';
 
 const IDLE_MS = 3500;
@@ -47,7 +48,7 @@ const renderOsd = () => {
     $('osd-chno').textContent = channel.chno || '';
     $('osd-channel').textContent = channel.displayName || channel.name;
     $('osd-now').textContent = now ? now.title : 'No guide data';
-    $('osd-next').textContent = next ? `Next · ${next.title} ${formatTimeWithOffset(new Date(next.start), guideState.settings.timezoneOffset || 0)}` : '';
+    $('osd-next').textContent = next ? `Next · ${next.title} ${formatTimeInZone(new Date(next.start), guideState.settings.timeZone, guideState.settings.timezoneOffset || 0)}` : '';
     const bar = $('osd-bar-fill').closest('.osd-bar');
     bar.style.visibility = now ? '' : 'hidden';
     if (now) {
