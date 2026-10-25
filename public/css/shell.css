@@ -326,6 +326,38 @@
     display: none;
 }
 
+/* Settings > AI Matching: the searchable model list under its field. */
+.model-menu {
+    left: 0;
+    right: 0;
+    top: calc(100% + .3em);
+    width: auto;
+    max-height: 22em;
+    overflow-y: auto;
+}
+
+.model-menu .mi {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+    padding-block: .45em;
+}
+
+.model-menu .mi[aria-selected="true"] {
+    background: var(--s3);
+}
+
+.model-menu .mi small {
+    font-weight: 400;
+    color: var(--tx3);
+}
+
+.model-menu .count {
+    padding: .4em .8em;
+    font-size: .8em;
+    color: var(--tx3);
+}
+
 .menu-row {
     display: flex;
     align-items: center;

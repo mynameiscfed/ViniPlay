@@ -826,23 +826,7 @@
                                     Add M3U
                                 </button>
                             </div>
-                            <div class="overflow-x-auto bg-gray-900/50 rounded-lg">
-                                <table class="min-w-full sources-table">
-                                    <thead>
-                                        <tr>
-                                            <th>Name</th>
-                                            <th>Type</th>
-                                            <th>URL / File Path</th>
-                                            <th>Status</th>
-                                            <th>Last Updated</th>
-                                            <th>Refresh</th>
-                                            <th>Active</th>
-                                            <th class="text-right">Actions</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody id="m3u-sources-tbody"></tbody>
-                                </table>
-                            </div>
+                            <div id="m3u-sources-tbody" class="grid gap-3" style="grid-template-columns:repeat(auto-fill,minmax(min(100%,20rem),1fr))"></div>
                         </div>
                         <div>
                             <div class="flex justify-between items-center mb-3">
@@ -853,23 +837,7 @@
                                     Add EPG
                                 </button>
                             </div>
-                            <div class="overflow-x-auto bg-gray-900/50 rounded-lg">
-                                <table class="min-w-full sources-table">
-                                    <thead>
-                                        <tr>
-                                            <th>Name</th>
-                                            <th>Type</th>
-                                            <th>URL / File Path</th>
-                                            <th>Status</th>
-                                            <th>Last Updated</th>
-                                            <th>Refresh</th>
-                                            <th>Active</th>
-                                            <th class="text-right">Actions</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody id="epg-sources-tbody"></tbody>
-                                </table>
-                            </div>
+                            <div id="epg-sources-tbody" class="grid gap-3" style="grid-template-columns:repeat(auto-fill,minmax(min(100%,20rem),1fr))"></div>
                         </div>
                     </div>
 
@@ -897,6 +865,8 @@
                         </div>
                         <div class="flex flex-wrap items-center justify-between gap-2 mb-2 text-sm text-gray-400">
                             <span id="epg-map-summary"></span>
+                            <button type="button" id="epg-map-reset-btn"
+                                class="hidden ml-auto bg-gray-600 hover:bg-gray-500 disabled:opacity-50 text-white text-sm font-bold py-1 px-3 rounded-md"></button>
                             <button type="button" id="epg-map-accept-btn"
                                 class="hidden bg-green-600 hover:bg-green-700 disabled:bg-green-800 text-white text-sm font-bold py-1 px-3 rounded-md"></button>
                         </div>
@@ -907,11 +877,22 @@
                             <button type="button" data-bulk="clear" class="bg-gray-600 hover:bg-gray-500 disabled:opacity-50 text-white font-bold py-1 px-3 rounded-md"></button>
                             <button type="button" data-bulk="none" class="text-gray-300 hover:text-white py-1 px-2">Clear selection</button>
                         </div>
-                        <div id="epg-map-scroll" class="overflow-auto bg-gray-900/50 rounded-lg" style="max-height:65vh">
+                        <div class="flex flex-wrap items-center justify-between gap-3 mb-2 text-sm text-gray-400">
+                            <label class="flex items-center gap-2">Rows per page
+                                <select id="epg-map-size" class="bg-gray-700 border border-gray-600 rounded-md px-2 py-1 text-white">
+                                    <option>10</option><option>25</option><option>50</option>
+                                </select></label>
+                            <span id="epg-map-range"></span>
+                            <div class="flex items-center gap-2">
+                                <button type="button" id="epg-map-prev" class="bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-white font-bold py-1 px-3 rounded-md">‹ Previous</button>
+                                <button type="button" id="epg-map-next" class="bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-white font-bold py-1 px-3 rounded-md">Next ›</button>
+                            </div>
+                        </div>
+                        <div id="epg-map-scroll" class="bg-gray-900/50 rounded-lg">
                             <table class="min-w-full sources-table">
-                                <thead class="sticky top-0 z-10 bg-gray-800">
+                                <thead>
                                     <tr>
-                                        <th class="w-8"><input type="checkbox" id="epg-map-all" aria-label="Select every channel in this list"></th>
+                                        <th class="w-8"><input type="checkbox" id="epg-map-all" aria-label="Select every channel on this page"></th>
                                         <th>Channel</th>
                                         <th>Guide data</th>
                                         <th>Suggestion</th>
@@ -935,12 +916,12 @@
                                 <input type="password" id="epg-ai-key" autocomplete="new-password" placeholder="sk-or-..."
                                     class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-white focus:ring-blue-500 focus:border-blue-500">
                             </div>
-                            <div>
+                            <div class="relative">
                                 <label for="epg-ai-model" class="block text-sm font-medium text-gray-400 mb-2">Model</label>
-                                <input type="text" id="epg-ai-model" list="epg-ai-models" autocomplete="off"
-                                    placeholder="Search OpenRouter models..."
+                                <input type="text" id="epg-ai-model" autocomplete="off" role="combobox" aria-expanded="false"
+                                    aria-controls="epg-ai-models" aria-autocomplete="list" placeholder="Search OpenRouter models..."
                                     class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-white focus:ring-blue-500 focus:border-blue-500">
-                                <datalist id="epg-ai-models"></datalist>
+                                <div id="epg-ai-models" class="menu model-menu hidden" role="listbox" aria-label="OpenRouter models"></div>
                             </div>
                         </div>
                         <div class="flex flex-wrap items-center gap-3 mt-4">
@@ -1295,10 +1276,16 @@
                                 </div>
                             </div>
                             <div class="border-t border-red-700/50 pt-4">
-                                <p class="text-sm text-gray-400 mb-2">This permanently deletes all saved application
-                                    data from the server and your browser cache. The page will reload.</p>
-                                <button id="clear-data-btn"
-                                    class="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-4 rounded-md flex items-center justify-center gap-2">
+                                <p class="text-sm text-gray-400 mb-2">This permanently deletes everything ViniPlay saved on
+                                    this server: sources and channels, profiles and settings, <strong>all recordings and
+                                    scheduled recordings</strong>, and the push keys, so every device must turn reminders on
+                                    again. Export your settings first. The page reloads afterwards.</p>
+                                <label for="clear-data-confirm" class="block text-sm text-gray-400 mb-1">Type
+                                    <strong>RESET</strong> to continue</label>
+                                <input type="text" id="clear-data-confirm" autocomplete="off"
+                                    class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-white mb-2">
+                                <button id="clear-data-btn" disabled
+                                    class="w-full disabled:opacity-50 bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-4 rounded-md flex items-center justify-center gap-2">
                                     <span data-icon="trash"></span>
                                     <span>Clear All Data & Reset</span>
                                 </button>

@@ -22,6 +22,14 @@ const BACK_KEYS = new Set(['Escape', 'BrowserBack', 'XF86Back', 'GoBack']);
 const root = document.documentElement;
 const isTv = () => root.classList.contains('tv');
 const typing = (el) => !!el && el.matches?.(TEXT_ENTRY);
+// Fields a remote can change without a keyboard: Left and Right change the value, Up and Down move on.
+const REMOTE_FIELD = 'select,input[type="number"]';
+const settleTimers = new WeakMap();
+// One change event once the value stops moving, so a run of presses saves once.
+const settle = (el) => {
+    clearTimeout(settleTimers.get(el));
+    settleTimers.set(el, setTimeout(() => el.dispatchEvent(new Event('change', { bubbles: true })), 600));
+};
 
 /** The part of the page that currently owns focus: an open dialog, the account menu, or everything. */
 function scope() {
@@ -134,7 +142,16 @@ function onKeyDown(e) {
         return;
     }
 
-    if (typing(target)) return;
+    if (isTv() && ARROWS[e.key] && target.matches?.(REMOTE_FIELD)) {
+        if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+            e.preventDefault();
+            const step = e.key === 'ArrowRight' ? 1 : -1;
+            if (target.tagName === 'SELECT') target.selectedIndex = Math.max(0, Math.min(target.options.length - 1, target.selectedIndex + step));
+            else if (step > 0) target.stepUp(); else target.stepDown();
+            settle(target);
+            return;
+        }
+    } else if (typing(target)) return;
 
     if (ARROWS[e.key]) {
         root.classList.add('kb');
