@@ -6,7 +6,21 @@ require('dotenv').config();
 
 const express = require('express');
 const crypto = require('crypto');
-const { spawn, exec } = require('child_process');
+const dns = require('dns');
+const net = require('net');
+const { spawn, exec, execFile } = require('child_process');
+const { safeGet, assertSafeUrl, assertSafeStreamUrl, blockedReason, isExemptHost, SsrfBlockedError } = require('./ssrfGuard');
+const {
+    normalizeDvrSettings,
+    normalizeDownloadsSettings,
+    normalizeLiveRewindSettings,
+    validateRecordingWindow,
+    overlappingJobs,
+    matchingSeriesPrograms,
+    isRecordingFileUsable,
+    sanitizeDownloadFilename,
+    liveBufferSegmentCount,
+} = require('./recordingPolicy');
 const http = require('http');
 const https = require('https');
 const fs = require('fs');
@@ -17,14 +31,34 @@ const session = require('express-session');
 const bcrypt = require('bcrypt');
 const sqlite3 = require('sqlite3').verbose();
 const SQLiteStore = require('connect-sqlite3')(session);
-const xmlJS = require('xml-js');
-const zlib = require('zlib');
+const { configureConnection, INDEX_DDL, ORPHAN_CLEANUP_SQL } = require('./dbConfig');
+const { throttleSessionTouch } = require('./sessionTouch');
+const { createLoginLimiter } = require('./loginRateLimit');
+const { createUserCache } = require('./userCache');
+const { createVodStore } = require('./vodStore');
+const { createLibraryCache } = require('./vodLibraryCache');
+const { cachedFile, writeFileAtomic } = require('./fileStore');
+const { sendJson } = require('./sendJson');
+const { createEpgPayload } = require('./epgPayload');
+const { applyProcessed } = require('./processedSettings');
+const { openMaybeGzip } = require('./compressedFile');
+const { planSourceRefreshes } = require('./sourceRefresh');
+const { ALLOWED_STREAM_PROTOCOLS, isAllowedStreamUrl, isPlaylistUrl } = require('./streamProtocols');
+const { parseM3U, displayNameFromExtinf } = require('./m3uParser');
+const { parseEpgTime } = require('./epgTime');
+const { resolveStreamIdentity } = require('./streamAuth');
+const { allowedSourcesFromUser, isChannelAllowed } = require('./accessControl');
+const { pipeline: pipelineAsync } = require('stream/promises');
+const { forEachProgramme, forEachChannel } = require('./epgStream');
+const { buildTargets, createSuggester, bestMatch, CONFIDENT } = require('./epgMatch');
+const { createSuggestStore, suggestChunk, runMatchJob } = require('./epgSuggest');
+const { chat, pickWithLlm, listModels, searchModels, aiStatus, updateAiConfig } = require('./epgLlm');
 const webpush = require('web-push');
 const schedule = require('node-schedule');
 const disk = require('diskusage');
 const si = require('systeminformation'); // NEW: For system health monitoring
 //vod processor
-const { refreshVodContent, processM3uVod } = require('./vodProcessor');
+const { refreshVodContent } = require('./vodProcessor');
 const XtreamClient = require('./xtreamClient');
 
 
@@ -33,14 +67,176 @@ const activeRedirectStreams = new Map(); // Tracks live redirect streams for the
 
 const app = express();
 const port = 8998;
+
+// Headers that cost nothing and close a few browser-side holes. The CSP deliberately
+// only covers framing/base/plugins: the app still ships inline handlers and CDN scripts,
+// so a resource CSP would need a larger frontend change.
+app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Content-Security-Policy', "frame-ancestors 'none'; base-uri 'self'; object-src 'none'");
+    next();
+});
+
+// Only trust X-Forwarded-For when the operator explicitly says a reverse proxy sits in front.
+// TRUST_PROXY accepts anything Express's 'trust proxy' does (e.g. "1", "loopback", "10.0.0.5").
+// Unset = forwarded headers are ignored and req.ip is the real socket address.
+const TRUST_PROXY = process.env.TRUST_PROXY;
+if (TRUST_PROXY) {
+    app.set('trust proxy', /^\d+$/.test(TRUST_PROXY) ? parseInt(TRUST_PROXY, 10) : TRUST_PROXY);
+}
 const saltRounds = 10;
+const MIN_PASSWORD_LENGTH = 12;
+const passwordProblem = (password) => (
+    typeof password !== 'string' || password.length < MIN_PASSWORD_LENGTH
+        ? `Password must be at least ${MIN_PASSWORD_LENGTH} characters.`
+        : null
+);
+// Compared against when the username does not exist, so a missing user takes as long as a
+// wrong password. Without it, response time tells an attacker which usernames are real.
+const DUMMY_PASSWORD_HASH = bcrypt.hashSync(crypto.randomBytes(16).toString('hex'), saltRounds);
+const loginLimiter = createLoginLimiter();
+
+// A URL can carry provider credentials in its path or query. Log only the origin.
+const safeUrlForLog = (value) => {
+    try {
+        return new URL(value).origin;
+    } catch (e) {
+        return '[invalid url]';
+    }
+};
+
+// Like safeUrlForLog but keeps path and query keys for diagnosing provider requests. Query values are masked,
+// and so are the credential segments of /live|movie|series/<user>/<pass>/<id> stream paths.
+const redactUrlForLog = (value) => {
+    try {
+        const u = new URL(value);
+        const segs = u.pathname.split('/');
+        if (['live', 'movie', 'series'].includes(segs[1])) segs.splice(2, 2, '***', '***');
+        const keys = [...new Set(u.searchParams.keys())].map(k => `${k}=***`).join('&');
+        return `${u.origin}${segs.join('/')}${keys ? `?${keys}` : ''}`;
+    } catch (e) {
+        return '[invalid url]';
+    }
+};
+// A source path is a URL (may carry credentials) or a local file path.
+const sourcePathForLog = (p) => (/^https?:/i.test(p) ? redactUrlForLog(p) : p);
+const SENSITIVE_HEADER = /^(authorization|cookie|set-cookie|proxy-authorization|x-api-key)$/i;
+const redactHeaders = (headers = {}) => Object.fromEntries(
+    Object.entries(headers).map(([k, v]) => [k, SENSITIVE_HEADER.test(k) ? '[redacted]' : v]));
+// The bits of a Node network error that say why it failed (ECONNRESET, ETIMEDOUT, ENOTFOUND, ...). Nested
+// causes (AggregateError from happy-eyeballs, undici's `cause`) are included.
+const describeNetError = (err) => {
+    const e = err?.cause || err;
+    return `code=${err?.code || e?.code || 'n/a'} syscall=${e?.syscall || 'n/a'} errno=${e?.errno ?? 'n/a'} `
+        + `address=${e?.address || 'n/a'}:${e?.port ?? 'n/a'} hostname=${e?.hostname || 'n/a'} message="${err?.message}"`
+        + (e !== err ? ` cause="${e?.message}"` : '')
+        + (err?.errors?.length ? ` errors=[${err.errors.map(x => `${x.code}@${x.address}:${x.port}`).join(', ')}]` : '');
+};
+
+// Stable, non-reversible stream identity. Also used inside activeStreamProcesses keys, so
+// the provider URL (and its credentials) never lands in a log line or the admin activity feed.
+const streamUrlKey = (url) => crypto.createHash('sha256').update(String(url)).digest('hex').slice(0, 32);
 // Initialize global variables at the top-level scope
 let notificationCheckInterval = null;
 const sourceRefreshTimers = new Map();
+let sourceProcessing = Promise.resolve();
 let detectedHardware = { nvidia: null, intel_qsv: null, intel_vaapi: null, radeon_vaapi: null }; // MODIFIED: To store specific Intel GPU info
 
 // Used to validate settings.
 const validFFmpegLogLevels = ["debug", "verbose", "info", "warning", "error"];
+
+/**
+ * Resolves a hostname and refuses private/reserved addresses. The same environment
+ * escape hatches as the image proxy apply, so LAN IPTV sources keep working.
+ */
+async function assertPublicHost(hostname) {
+    const bare = String(hostname || '').replace(/^\[|\]$/g, '');
+    if (!bare || isExemptHost(bare)) return;
+    if (net.isIP(bare)) {
+        const reason = blockedReason(bare);
+        if (reason) throw new SsrfBlockedError(`Refusing to use ${bare}: ${reason}.`);
+        return;
+    }
+    let addresses = [];
+    try {
+        addresses = await dns.promises.lookup(bare, { all: true });
+    } catch (e) {
+        throw new SsrfBlockedError(`Could not resolve ${bare}.`);
+    }
+    for (const { address } of addresses) {
+        const reason = blockedReason(address);
+        if (reason) throw new SsrfBlockedError(`Refusing to use ${bare} (${address}): ${reason}.`);
+    }
+}
+
+/** Guards an FFmpeg/ffprobe URL before the process is spawned. */
+async function assertSafeMediaUrl(rawUrl, protocols = ALLOWED_STREAM_PROTOCOLS) {
+    let parsed;
+    try {
+        parsed = new URL(rawUrl);
+    } catch (e) {
+        throw new SsrfBlockedError('Invalid media URL.');
+    }
+    if (!protocols.includes(parsed.protocol)) {
+        throw new SsrfBlockedError(`Unsupported media protocol "${parsed.protocol}".`);
+    }
+    await assertPublicHost(parsed.hostname);
+}
+
+async function assertSafeMediaStreamUrl(rawUrl) {
+    if (!isAllowedStreamUrl(rawUrl)) throw new SsrfBlockedError('Unsupported stream URL protocol.');
+    const protocol = new URL(rawUrl).protocol;
+    // HTTP(S) is the path a browser/FFmpeg can use to reach internal web services.
+    if (protocol === 'http:' || protocol === 'https:') {
+        await assertSafeMediaUrl(rawUrl, ['http:', 'https:']);
+    }
+}
+
+/** Returns free megabytes on /dvr, or null when the platform cannot report it. */
+function getDvrFreeMb() {
+    return new Promise((resolve) => {
+        disk.check(DVR_DIR, (err, info) => {
+            if (err) {
+                console.warn('[DVR_STORAGE] Could not check free space:', err.message);
+                return resolve(null);
+            }
+            resolve(info.free / (1024 * 1024));
+        });
+    });
+}
+
+async function assertDvrFreeSpace(settings) {
+    const freeMb = await getDvrFreeMb();
+    const reserveMb = settings?.dvr?.minFreeDiskMb || 0;
+    if (freeMb !== null && freeMb < reserveMb) {
+        return {
+            ok: false,
+            error: `DVR storage is low (${Math.round(freeMb)} MB free; ${reserveMb} MB required).`,
+        };
+    }
+    return { ok: true };
+}
+
+/**
+ * Builds an FFmpeg argv array from a profile command template.
+ * The template is split into arguments BEFORE placeholders are substituted, so values
+ * such as a stream URL or user agent always land inside a single argument and can never
+ * inject extra FFmpeg options, however many spaces or quotes they contain.
+ * @param {string} template - Profile command, e.g. '-i "{streamUrl}" -c copy -f mpegts pipe:1'.
+ * @param {Object<string, string>} values - Placeholder name (without braces) to value.
+ * @param {string} logLevel - FFmpeg log level; falls back to 'warning' if not recognised.
+ * @returns {string[]}
+ */
+function buildFfmpegArgs(template, values, logLevel) {
+    const level = validFFmpegLogLevels.includes(logLevel) ? logLevel : 'warning';
+    const tokens = (String(template || '').match(/(?:[^\s"]+|"[^"]*")+/g) || []).map(arg => arg.replace(/^"|"$/g, ''));
+    const substituted = tokens.map(arg => arg.replace(/\{(\w+)\}/g, (match, name) =>
+        Object.prototype.hasOwnProperty.call(values, name) ? String(values[name]) : match
+    ));
+    return ['-v', `level+${level}`, ...substituted];
+}
 
 // --- ENHANCEMENT: For Server-Sent Events (SSE) ---
 // This map will store active client connections for real-time updates.
@@ -54,6 +250,57 @@ const activeCastTokens = new Map(); // token -> { userId, streamUrl, expiresAt }
 const activeDvrJobs = new Map(); // Stores active node-schedule jobs
 const runningFFmpegProcesses = new Map(); // Stores PIDs of running ffmpeg recordings
 const activeDvrSupervisors = new Map(); // Stores active DvrSupervisor instances
+const activeLiveBuffers = new Map(); // channelId -> rolling HLS rewind session
+
+// Track discovery is cached briefly: probing every channel zap is expensive.
+const streamTrackCache = new Map();
+const STREAM_TRACK_CACHE_MS = 5 * 60 * 1000;
+
+function probeStreamTracks(url, userAgent) {
+    const key = `${url}\n${userAgent || ''}`;
+    const hit = streamTrackCache.get(key);
+    if (hit && hit.expires > Date.now()) return Promise.resolve(hit.value);
+    return new Promise((resolve, reject) => {
+        const args = ['-v', 'error'];
+        if (userAgent) args.push('-user_agent', userAgent);
+        args.push('-show_entries', 'stream=index,codec_type,codec_name:stream_tags=language,title', '-of', 'json', url);
+        execFile('ffprobe', args, { timeout: 10000 }, (error, stdout) => {
+            if (error) return reject(error);
+            try {
+                const parsed = JSON.parse(stdout);
+                let audioOrdinal = 0;
+                let subtitleOrdinal = 0;
+                const audio = [];
+                const subtitle = [];
+                for (const stream of parsed.streams || []) {
+                    if (stream.codec_type === 'audio') {
+                        audio.push({
+                            ordinal: audioOrdinal++,
+                            index: stream.index,
+                            codec: stream.codec_name || '',
+                            language: stream.tags?.language || '',
+                            title: stream.tags?.title || '',
+                        });
+                    } else if (stream.codec_type === 'subtitle') {
+                        subtitle.push({
+                            ordinal: subtitleOrdinal++,
+                            index: stream.index,
+                            codec: stream.codec_name || '',
+                            language: stream.tags?.language || '',
+                            title: stream.tags?.title || '',
+                        });
+                    }
+                }
+                const value = { audio, subtitle };
+                streamTrackCache.set(key, { value, expires: Date.now() + STREAM_TRACK_CACHE_MS });
+                if (streamTrackCache.size > 500) streamTrackCache.delete(streamTrackCache.keys().next().value);
+                resolve(value);
+            } catch (e) {
+                reject(e);
+            }
+        });
+    });
+}
 
 // --- MODIFIED: Active Stream Management ---
 // Now maps a unique stream key (URL + UserID) to its process info
@@ -64,11 +311,22 @@ const REDIRECT_HEARTBEAT_TIMEOUT = 75000; // 75 seconds without heartbeat to rea
 // --- Configuration ---
 const DATA_DIR = '/data';
 const DVR_DIR = '/dvr';
+const LIVE_BUFFER_DIR = path.join(DVR_DIR, '.livebuffer');
 const LOGS_DIR = path.join(DATA_DIR, 'logs'); // NEW: Log management directory
 const VAPID_KEYS_PATH = path.join(DATA_DIR, 'vapid.json');
+// The OpenRouter key and model ({apiKey, model}). A secret, so not in settings.json: /api/config sends every setting to every user.
+const OPENROUTER_PATH = path.join(DATA_DIR, 'openrouter.json');
 const SOURCES_DIR = path.join(DATA_DIR, 'sources');
 const RAW_CACHE_DIR = path.join(SOURCES_DIR, 'raw_cache');
 const IMAGE_CACHE_DIR = path.join(DATA_DIR, 'image_cache'); // NEW: VOD poster image cache
+const IMAGE_PROXY_MAX_BYTES = 10 * 1024 * 1024; // Largest poster/logo the image proxy will fetch
+// SVG is deliberately absent: it can carry script and would run on our origin.
+const IMAGE_PROXY_TYPES = new Set([
+    'image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/avif', 'image/bmp', 'image/x-icon', 'image/vnd.microsoft.icon',
+]);
+// Posters are ~30-100 KB, so this holds tens of thousands. Oldest first out; the cache used to hold only 1000 images.
+const IMAGE_CACHE_MAX_BYTES = 1024 * 1024 * 1024;
+const IMAGE_CACHE_CONTROL = 'public, max-age=2592000, immutable'; // 30 days; the /api middleware's no-cache must not apply to posters
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const DB_PATH = path.join(DATA_DIR, 'viniplay.db');
 const LIVE_CHANNELS_M3U_PATH = path.join(DATA_DIR, 'live_channels.m3u'); // Renamed
@@ -76,34 +334,43 @@ const LIVE_EPG_JSON_PATH = path.join(DATA_DIR, 'epg.json'); // Renamed
 const VOD_MOVIES_JSON_PATH = path.join(DATA_DIR, 'vod_movies.json'); // New
 const VOD_SERIES_JSON_PATH = path.join(DATA_DIR, 'vod_series.json'); // New
 const SETTINGS_PATH = path.join(DATA_DIR, 'settings.json');
+const writeSettings = (settings) => writeFileAtomic(SETTINGS_PATH, JSON.stringify(settings, null, 2));
+// Parsed once per change of the file instead of on every request; callers must not modify what they get.
+const readChannels = cachedFile(LIVE_CHANNELS_M3U_PATH, parseM3U);
+const epgPayload = createEpgPayload(cachedFile(LIVE_EPG_JSON_PATH, (text) => text));
+// What the guides declare ([{id, names, sample}]), written by mergeEpg; the manual EPG picker and the suggestions search it.
+const EPG_CHANNELS_JSON_PATH = path.join(DATA_DIR, 'epg_channels.json');
+const readEpgChannels = cachedFile(EPG_CHANNELS_JSON_PATH, JSON.parse);
+const NO_EPG_CHANNELS = [];
+const readAiConfig = cachedFile(OPENROUTER_PATH, JSON.parse);
+const AI_UNSET = 'AI matching is not set up: add your OpenRouter key and model in Settings > AI Matching.';
+// Pending match suggestions survive refresh and restart; accept/reject mutate this same store.
+const EPG_SUGGESTIONS_PATH = path.join(DATA_DIR, 'epg_suggestions.json');
+const suggestStore = createSuggestStore(
+    cachedFile(EPG_SUGGESTIONS_PATH, (text) => text),
+    (data) => writeFileAtomic(EPG_SUGGESTIONS_PATH, data),
+);
+// Channel ids that already have guide data, for the match job's "unresolved" filter; parsed once per merge.
+const readEpgKeys = cachedFile(LIVE_EPG_JSON_PATH, (text) => { try { return Object.keys(JSON.parse(text)); } catch (e) { return []; } });
+const readEpgGuide = cachedFile(LIVE_EPG_JSON_PATH, (text) => { try { return JSON.parse(text); } catch (e) { return {}; } });
+let epgSuggester; // [the list it was built from, its search]; rebuilt only when the file changes
+const suggestEpg = (name, k) => {
+    const list = readEpgChannels() || NO_EPG_CHANNELS;
+    if (epgSuggester?.[0] !== list) epgSuggester = [list, createSuggester(list)];
+    return epgSuggester[1](name, k);
+};
 
 console.log(`[INIT] Application starting. Data directory: ${DATA_DIR}, Public directory: ${PUBLIC_DIR}`);
 
-// --- Automatic VAPID Key Generation ---
-let vapidKeys = {};
-try {
-    if (fs.existsSync(VAPID_KEYS_PATH)) {
-        console.log('[Push] Loading existing VAPID keys...');
-        vapidKeys = JSON.parse(fs.readFileSync(VAPID_KEYS_PATH, 'utf-8'));
-    } else {
-        console.log('[Push] VAPID keys not found. Generating new keys...');
-        vapidKeys = webpush.generateVAPIDKeys();
-        fs.writeFileSync(VAPID_KEYS_PATH, JSON.stringify(vapidKeys, null, 2));
-        console.log('[Push] New VAPID keys generated and saved.');
-    }
-    const vapidContactEmail = process.env.VAPID_CONTACT_EMAIL || 'mailto:admin@example.com';
-    console.log(`[Push] Setting VAPID contact to: ${vapidContactEmail}`);
-    webpush.setVapidDetails(vapidContactEmail, vapidKeys.publicKey, vapidKeys.privateKey);
-} catch (error) {
-    console.error('[Push] FATAL: Could not load or generate VAPID keys.', error);
-}
-
-// Ensure the data and dvr directories exist.
+// Ensure the data and dvr directories exist before anything writes to them (VAPID keys,
+// the session secret, the database). Docker creates /data as a volume; a bare `npm start`
+// does not.
 try {
     if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
     if (!fs.existsSync(PUBLIC_DIR)) fs.mkdirSync(PUBLIC_DIR, { recursive: true });
     if (!fs.existsSync(SOURCES_DIR)) fs.mkdirSync(SOURCES_DIR, { recursive: true });
     if (!fs.existsSync(DVR_DIR)) fs.mkdirSync(DVR_DIR, { recursive: true });
+    if (!fs.existsSync(LIVE_BUFFER_DIR)) fs.mkdirSync(LIVE_BUFFER_DIR, { recursive: true });
     if (!fs.existsSync(RAW_CACHE_DIR)) fs.mkdirSync(RAW_CACHE_DIR, { recursive: true });
     if (!fs.existsSync(LOGS_DIR)) fs.mkdirSync(LOGS_DIR, { recursive: true });
     if (!fs.existsSync(IMAGE_CACHE_DIR)) fs.mkdirSync(IMAGE_CACHE_DIR, { recursive: true });
@@ -113,8 +380,34 @@ try {
     process.exit(1);
 }
 
+// --- Automatic VAPID Key Generation ---
+let vapidKeys = {};
+try {
+    if (fs.existsSync(VAPID_KEYS_PATH)) {
+        console.log('[Push] Loading existing VAPID keys...');
+        vapidKeys = JSON.parse(fs.readFileSync(VAPID_KEYS_PATH, 'utf-8'));
+        try { fs.chmodSync(VAPID_KEYS_PATH, 0o600); } catch (e) { /* best effort */ }
+    } else {
+        console.log('[Push] VAPID keys not found. Generating new keys...');
+        vapidKeys = webpush.generateVAPIDKeys();
+        fs.writeFileSync(VAPID_KEYS_PATH, JSON.stringify(vapidKeys, null, 2), { mode: 0o600 });
+        console.log('[Push] New VAPID keys generated and saved.');
+    }
+    const vapidContactEmail = process.env.VAPID_CONTACT_EMAIL || 'mailto:admin@example.com';
+    console.log(`[Push] Setting VAPID contact to: ${vapidContactEmail}`);
+    webpush.setVapidDetails(vapidContactEmail, vapidKeys.publicKey, vapidKeys.privateKey);
+} catch (error) {
+    console.error('[Push] FATAL: Could not load or generate VAPID keys.', error);
+}
 
 // --- Database Setup ---
+// Resolves to the journal mode in effect once the main connection is configured. The
+// session store opens its own connection and waits on this before tuning itself.
+let resolveDbConfigured;
+const dbConfigured = new Promise((resolve) => { resolveDbConfigured = resolve; });
+let resolveSchemaReady;
+const schemaReady = new Promise((resolve) => { resolveSchemaReady = resolve; });
+
 const db = new sqlite3.Database(DB_PATH, (err) => {
     if (err) {
         console.error("[DB] Error opening database:", err.message);
@@ -122,13 +415,19 @@ const db = new sqlite3.Database(DB_PATH, (err) => {
     } else {
         console.log("[DB] Connected to the SQLite database.");
         db.serialize(() => {
+            // WAL + synchronous=NORMAL, a 5 s busy timeout, and a larger page cache (see dbConfig.js).
+            // Issued first so the journal mode is switched before the schema statements run.
+            configureConnection(db, { label: 'main' }).then(resolveDbConfigured);
             db.run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE, password TEXT, isAdmin INTEGER DEFAULT 0, canUseDvr INTEGER DEFAULT 0, allowed_sources TEXT)`, (err) => {
                 if (err) {
                     console.error("[DB] Error creating 'users' table:", err.message);
                 } else {
                     db.run("ALTER TABLE users ADD COLUMN canUseDvr INTEGER DEFAULT 0", () => { });
                     db.run("ALTER TABLE users ADD COLUMN allowed_sources TEXT", () => { });
-                    db.run("UPDATE users SET allowed_sources = NULL WHERE allowed_sources = '{}' OR isAdmin = 1 OR id = 1", () => { });
+                    // Admins bypass source filtering entirely, so their stored whitelist is
+                    // irrelevant. Do NOT clear '{}': an empty whitelist now means "no sources",
+                    // and turning it into NULL on boot would grant full access by accident.
+                    db.run("UPDATE users SET allowed_sources = NULL WHERE isAdmin = 1", () => { });
                 }
             });
             db.run(`CREATE TABLE IF NOT EXISTS user_settings (user_id INTEGER NOT NULL, key TEXT NOT NULL, value TEXT, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE, PRIMARY KEY (user_id, key))`);
@@ -139,7 +438,9 @@ const db = new sqlite3.Database(DB_PATH, (err) => {
             db.run(`CREATE TABLE IF NOT EXISTS dvr_jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, channelId TEXT NOT NULL, channelName TEXT NOT NULL, programTitle TEXT NOT NULL, startTime TEXT NOT NULL, endTime TEXT NOT NULL, status TEXT NOT NULL, ffmpeg_pid INTEGER, filePath TEXT, profileId TEXT, userAgentId TEXT, preBufferMinutes INTEGER, postBufferMinutes INTEGER, errorMessage TEXT, isConflicting INTEGER DEFAULT 0, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)`);
             db.run("ALTER TABLE dvr_jobs ADD COLUMN programStart TEXT", () => { });
             db.run("ALTER TABLE dvr_jobs ADD COLUMN actualStartTime TEXT", () => { });
+            db.run("ALTER TABLE dvr_jobs ADD COLUMN series_rule_id INTEGER", () => { });
             db.run(`CREATE TABLE IF NOT EXISTS dvr_recordings (id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER, user_id INTEGER NOT NULL, channelName TEXT NOT NULL, programTitle TEXT NOT NULL, startTime TEXT NOT NULL, durationSeconds INTEGER, fileSizeBytes INTEGER, filePath TEXT UNIQUE NOT NULL, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (job_id) REFERENCES dvr_jobs(id) ON DELETE SET NULL)`);
+            db.run(`CREATE TABLE IF NOT EXISTS dvr_series_rules (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, channelId TEXT NOT NULL, channelName TEXT NOT NULL, programTitle TEXT NOT NULL, enabled INTEGER DEFAULT 1, createdAt TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(user_id, channelId, programTitle), FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)`);
 
             // --- NEW: VOD Tables ---
             db.run(`CREATE TABLE IF NOT EXISTS movies (
@@ -284,6 +585,33 @@ const db = new sqlite3.Database(DB_PATH, (err) => {
             )`, (err) => {
                 if (err) console.error("[DB] Error creating 'watch_progress' table:", err.message);
             });
+
+            // --- Secondary indexes (idempotent; see dbConfig.js for what each one serves) ---
+            INDEX_DDL.forEach((ddl) => {
+                db.run(ddl, (indexErr) => {
+                    if (indexErr) console.error(`[DB] Error creating index (${ddl}):`, indexErr.message);
+                });
+            });
+            // Refresh planner statistics so the new indexes are picked correctly.
+            db.run('PRAGMA optimize');
+            // vodStore.ready() adds the unique keys the VOD upserts rely on (and removes duplicate episodes first).
+            // The callback fires once every statement above has run, so all tables exist: a statement queued
+            // here directly can be prepared before the CREATE TABLE ahead of it has executed (fresh databases).
+            db.run('SELECT 1', () => {
+                resolveSchemaReady();
+                vodStore.ready().catch(() => { });
+                ORPHAN_CLEANUP_SQL.forEach((sql) => {
+                    db.run(sql, (cleanupErr) => {
+                        if (cleanupErr) console.error(`[DB] Orphan cleanup failed (${sql}):`, cleanupErr.message);
+                    });
+                });
+                // Nothing is streaming right after a start, so 'playing' rows are left over from a crash or restart.
+                // The real end is unknown, so they are closed with zero length.
+                db.run("UPDATE stream_history SET status = 'stopped', end_time = start_time, duration_seconds = 0 WHERE status = 'playing'", (reconcileErr) => {
+                    if (reconcileErr) console.error('[DB] Could not close stale stream_history rows:', reconcileErr.message);
+                });
+            });
+
             // --- DVR Job Loading, Scheduling and Restart Recovery ---
             console.log('[DVR] Checking and recovering pending/active DVR jobs from database...');
             db.all("SELECT * FROM dvr_jobs WHERE status IN ('recording', 'reconnecting')", [], (err, activeJobs) => {
@@ -303,10 +631,10 @@ const db = new sqlite3.Database(DB_PATH, (err) => {
                             if (job.filePath && fs.existsSync(job.filePath)) {
                                 try { stats = fs.statSync(job.filePath); } catch (e) { }
                             }
-                            if (stats && stats.size > 2 * 1024 * 1024) {
+                            let durationSeconds = stats ? await getMediaDurationSeconds(job.filePath) : null;
+                            if (stats && isRecordingFileUsable(stats.size, durationSeconds)) {
                                 let finalFilePath = job.filePath;
                                 let finalSizeBytes = stats.size;
-                                let durationSeconds = await getMediaDurationSeconds(job.filePath);
                                 const wallClockDuration = Math.max(1, Math.round((endTime - new Date(job.startTime).getTime()) / 1000));
 
                                 if (job.filePath.endsWith('.ts')) {
@@ -424,48 +752,70 @@ app.use(express.static(PUBLIC_DIR, {
         }
     }
 }));
-app.use(bodyParser.json());
+
+// CSRF: SameSite=Lax (below) is the main defence. This also rejects a state-changing
+// request whose Origin names another site. Requests without an Origin (curl, native
+// clients) are left alone, as they do not carry a browser session automatically.
+app.use((req, res, next) => {
+    if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
+    const origin = req.get('origin');
+    if (!origin) return next();
+    let originHost;
+    try {
+        originHost = new URL(origin).host;
+    } catch (e) {
+        return res.status(403).json({ error: 'Invalid Origin header.' });
+    }
+    const forwardedHost = TRUST_PROXY ? String(req.get('x-forwarded-host') || '').split(',')[0].trim() : '';
+    const expectedHost = forwardedHost || req.get('host');
+    if (originHost !== expectedHost) {
+        return res.status(403).json({ error: 'Cross-origin request blocked.' });
+    }
+    next();
+});
+
+app.use(bodyParser.json({ limit: '2mb' })); // the default 100kb is too small for accepting thousands of EPG matches at once
 app.use(bodyParser.urlencoded({ extended: true }));
 
 const updateAndScheduleSourceRefreshes = () => {
     console.log('[SCHEDULER] Updating and scheduling all source refreshes...');
-    const settings = getSettings();
-    const allSources = [...(settings.m3uSources || []), ...(settings.epgSources || [])];
-    const activeUrlSources = new Set();
+    const plan = planSourceRefreshes(getSettings());
+    const activeSourceIds = new Set();
 
-    allSources.forEach(source => {
-        if (source.type === 'url' && source.isActive && source.refreshHours > 0) {
-            activeUrlSources.add(source.id);
-            if (sourceRefreshTimers.has(source.id)) {
-                clearTimeout(sourceRefreshTimers.get(source.id));
-            }
-
-            console.log(`[SCHEDULER] Scheduling refresh for "${source.name}" (ID: ${source.id}) every ${source.refreshHours} hours.`);
-
-            const scheduleNext = () => {
-                const timeoutId = setTimeout(async () => {
-                    console.log(`[SCHEDULER_RUN] Auto-refresh triggered for "${source.name}".`);
-                    try {
-                        const result = await processAndMergeSources();
-                        if (result.success) {
-                            fs.writeFileSync(SETTINGS_PATH, JSON.stringify(result.updatedSettings, null, 2));
-                            console.log(`[SCHEDULER_RUN] Successfully refreshed and processed sources for "${source.name}".`);
-                        }
-                    } catch (error) {
-                        console.error(`[SCHEDULER_RUN] Auto-refresh for "${source.name}" failed:`, error.message);
-                    }
-                    scheduleNext();
-                }, source.refreshHours * 3600 * 1000);
-
-                sourceRefreshTimers.set(source.id, timeoutId);
-            };
-
-            scheduleNext();
+    plan.forEach((source) => {
+        activeSourceIds.add(source.id);
+        if (sourceRefreshTimers.has(source.id)) {
+            clearTimeout(sourceRefreshTimers.get(source.id));
         }
+
+        console.log(`[SCHEDULER] Scheduling refresh for "${source.name}" (ID: ${source.id}) every ${source.hours} hours.`);
+
+        const scheduleNext = () => {
+            const timeoutId = setTimeout(async () => {
+                if (sourceRefreshTimers.get(source.id) !== timeoutId) return;
+                console.log(`[SCHEDULER_RUN] Auto-refresh triggered for "${source.name}".`);
+                try {
+                    const result = await runSourceProcessing(null, source.onlyIds);
+                    saveProcessedSettings(result.updatedSettings);
+                    if (result.success) {
+                        console.log(`[SCHEDULER_RUN] Successfully refreshed and processed "${source.name}".`);
+                    } else {
+                        console.warn(`[SCHEDULER_RUN] ${result.message}`);
+                    }
+                } catch (error) {
+                    console.error(`[SCHEDULER_RUN] Auto-refresh for "${source.name}" failed:`, error.message);
+                }
+                if (sourceRefreshTimers.get(source.id) === timeoutId) scheduleNext();
+            }, source.hours * 3600 * 1000);
+
+            sourceRefreshTimers.set(source.id, timeoutId);
+        };
+
+        scheduleNext();
     });
 
     for (const [sourceId, timeoutId] of sourceRefreshTimers.entries()) {
-        if (!activeUrlSources.has(sourceId)) {
+        if (!activeSourceIds.has(sourceId)) {
             console.log(`[SCHEDULER] Clearing obsolete refresh timer for source ID: ${sourceId}`);
             clearTimeout(timeoutId);
             sourceRefreshTimers.delete(sourceId);
@@ -474,9 +824,19 @@ const updateAndScheduleSourceRefreshes = () => {
     console.log(`[SCHEDULER] Finished scheduling. Active timers: ${sourceRefreshTimers.size}`);
 };
 
+const saveProcessedSettings = (processed) => writeSettings(applyProcessed(getSettings(), processed));
+
 function saveSettings(settings) {
     try {
-        fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2));
+        settings.dvr = normalizeDvrSettings(settings.dvr || {});
+        settings.downloads = normalizeDownloadsSettings(settings.downloads || {});
+        settings.liveRewind = normalizeLiveRewindSettings(settings.liveRewind || {});
+        const profileIds = new Set((settings.streamProfiles || []).map(profile => profile.id));
+        if (settings.playerFallbackProfileId && !profileIds.has(settings.playerFallbackProfileId)) {
+            settings.playerFallbackProfileId = null;
+        }
+        settings.allowUserQualitySwitch = settings.allowUserQualitySwitch === true;
+        writeSettings(settings);
         console.log('[SETTINGS] Settings saved successfully.');
         updateAndScheduleSourceRefreshes();
     } catch (e) {
@@ -485,71 +845,127 @@ function saveSettings(settings) {
 }
 
 // --- Session Management ---
-let sessionSecret = process.env.SESSION_SECRET;
+// The secret never lives in settings.json: that file is sent to every user by /api/config
+// and included in settings backups. A weak or missing SESSION_SECRET is replaced with a
+// random secret persisted under /data, so a default install does not run on a public value.
+const SESSION_SECRET_PATH = path.join(DATA_DIR, 'session-secret');
+const isWeakSecret = (value) => (
+    typeof value !== 'string'
+    || value.trim().length < 32
+    || /replace_this|your_super_secret|changeme/i.test(value)
+);
 
-if (!sessionSecret) {
-    console.log('[SECURITY] SESSION_SECRET not found in environment. Checking settings.json...');
-    let settings = getSettings();
-    if (settings.generatedSessionSecret) {
-        console.log('[SECURITY] Found existing session secret in settings.json.');
-        sessionSecret = settings.generatedSessionSecret;
-    } else {
-        console.log('[SECURITY] No secret in settings.json. Generating a new one...');
-        sessionSecret = crypto.randomBytes(64).toString('hex');
-        settings.generatedSessionSecret = sessionSecret;
-        saveSettings(settings);
-        console.log('[SECURITY] New session secret generated and saved to settings.json.');
+function resolveSessionSecret() {
+    const fromEnv = process.env.SESSION_SECRET;
+    let legacy = '';
+    try {
+        const settings = getSettings();
+        if (settings.generatedSessionSecret) {
+            legacy = settings.generatedSessionSecret;
+            delete settings.generatedSessionSecret;
+            writeSettings(settings);
+            console.log('[SECURITY] Removed the legacy session secret from settings.json.');
+        }
+    } catch (e) {
+        console.error('[SECURITY] Could not migrate the legacy session secret:', e.message);
     }
-} else {
-    console.log('[SECURITY] Loaded SESSION_SECRET from environment variable.');
+    if (fromEnv && !isWeakSecret(fromEnv)) {
+        console.log('[SECURITY] Loaded SESSION_SECRET from environment variable.');
+        return fromEnv;
+    }
+    if (fromEnv) {
+        console.warn('[SECURITY] Ignoring weak or default SESSION_SECRET from the environment.');
+    }
+    try {
+        let secret = legacy;
+        if (isWeakSecret(secret) && fs.existsSync(SESSION_SECRET_PATH)) {
+            secret = fs.readFileSync(SESSION_SECRET_PATH, 'utf-8').trim();
+        }
+        if (!isWeakSecret(secret)) {
+            try { fs.chmodSync(SESSION_SECRET_PATH, 0o600); } catch (e) { /* best effort */ }
+            return secret;
+        }
+        secret = crypto.randomBytes(64).toString('hex');
+        writeFileAtomic(SESSION_SECRET_PATH, secret, 0o600);
+        console.log(`[SECURITY] Generated a session secret and saved it to ${SESSION_SECRET_PATH}.`);
+        return secret;
+    } catch (e) {
+        console.error('[SECURITY] Could not read or write the session secret file, using an in-memory secret:', e.message);
+        return crypto.randomBytes(64).toString('hex');
+    }
 }
 
-if (sessionSecret.includes('replace_this')) {
-    console.warn('[SECURITY] Using a weak or default SESSION_SECRET. Please replace it.');
-}
+const sessionSecret = resolveSessionSecret();
+
+// connect-sqlite3 opens its own connection to viniplay.db. Give it the same busy timeout
+// (and synchronous=NORMAL once WAL is confirmed) so session writes do not fail with
+// SQLITE_BUSY while the main connection is busy, and stop it from writing on every request.
+const sessionStore = new SQLiteStore({ db: 'viniplay.db', dir: DATA_DIR, table: 'sessions' });
+dbConfigured.then(() => configureConnection(sessionStore.db, { label: 'session-store', setJournalMode: false, tuneCache: false }));
+throttleSessionTouch(sessionStore);
 
 app.use(
     session({
-        store: new SQLiteStore({ db: 'viniplay.db', dir: DATA_DIR, table: 'sessions' }),
+        store: sessionStore,
         secret: sessionSecret,
         resave: false,
         saveUninitialized: false,
-        cookie: { maxAge: 30 * 24 * 60 * 60 * 1000, httpOnly: true, secure: process.env.NODE_ENV === 'production' },
+        cookie: {
+            maxAge: 30 * 24 * 60 * 60 * 1000,
+            httpOnly: true,
+            sameSite: 'lax',
+            secure: 'auto',
+        },
     })
 );
 
 app.use((req, res, next) => {
     // Add client IP to the request object for logging
-    req.clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+    req.clientIp = req.ip || req.socket.remoteAddress;
 
     if (req.path === '/api/events') {
         return next();
     }
     const user_info = req.session.userId ? `User ID: ${req.session.userId}, Admin: ${req.session.isAdmin}, DVR: ${req.session.canUseDvr}` : 'No session';
-    console.log(`[HTTP_TRACE] ${req.method} ${req.originalUrl} - IP: ${req.clientIp} - Session: [${user_info}]`);
+    // Path only: query strings on /stream carry provider usernames and passwords.
+    console.log(`[HTTP_TRACE] ${req.method} ${req.path} - IP: ${req.clientIp} - Session: [${user_info}]`);
     next();
 });
 
-// MODIFIED: requireAuth now checks if the user still exists in the database on every request.
-const requireAuth = (req, res, next) => {
+// User rows are cached for a few seconds (and invalidated on update/delete) so requireAuth
+// and the endpoints that need allowed_sources do not each hit the database.
+const userCache = createUserCache({
+    load: (id) => dbGet(db, "SELECT id, username, isAdmin, canUseDvr, allowed_sources FROM users WHERE id = ?", [id]),
+});
+
+// requireAuth checks that the user still exists, and keeps the role flags in the session in
+// sync with the database so a promotion or demotion takes effect without logging in again.
+const requireAuth = async (req, res, next) => {
     if (!req.session || !req.session.userId) {
         return res.status(401).json({ error: 'Authentication required.' });
     }
 
-    db.get("SELECT id FROM users WHERE id = ?", [req.session.userId], (err, user) => {
-        if (err) {
-            console.error('[AUTH_MIDDLEWARE] DB error checking user existence:', err);
-            return res.status(500).json({ error: 'Server error during authentication.' });
-        }
-        if (!user) {
-            console.warn(`[AUTH_MIDDLEWARE] User ID ${req.session.userId} from session not found in DB. Destroying session.`);
-            req.session.destroy();
-            res.clearCookie('connect.sid');
-            return res.status(401).json({ error: 'User account no longer exists. Please log in again.' });
-        }
-        // User exists, proceed.
-        next();
-    });
+    let user;
+    try {
+        user = await userCache.get(req.session.userId);
+    } catch (err) {
+        console.error('[AUTH_MIDDLEWARE] DB error checking user existence:', err);
+        return res.status(500).json({ error: 'Server error during authentication.' });
+    }
+    if (!user) {
+        console.warn(`[AUTH_MIDDLEWARE] User ID ${req.session.userId} from session not found in DB. Destroying session.`);
+        req.session.destroy();
+        res.clearCookie('connect.sid');
+        return res.status(401).json({ error: 'User account no longer exists. Please log in again.' });
+    }
+
+    req.user = user;
+    const isAdmin = user.isAdmin === 1;
+    const canUseDvr = user.canUseDvr === 1;
+    if (req.session.isAdmin !== isAdmin) req.session.isAdmin = isAdmin;
+    if (req.session.canUseDvr !== canUseDvr) req.session.canUseDvr = canUseDvr;
+    if (req.session.username !== user.username) req.session.username = user.username;
+    next();
 };
 
 const requireAdmin = (req, res, next) => {
@@ -561,11 +977,23 @@ const requireDvrAccess = (req, res, next) => {
     return res.status(403).json({ error: 'DVR access required.' });
 };
 
-// *** FIX: DVR Playback Access ***
-// Removed `requireDvrAccess` from this route. Now, any authenticated user can access
-// the /dvr directory to play back recorded files. The API endpoints for creating
-// and managing recordings remain protected by `requireDvrAccess`.
-app.use('/dvr', requireAuth, express.static(DVR_DIR));
+// Recordings are private: only the owner (or an admin) may fetch the file. The lookup also
+// replaces express.static here so a filename cannot point outside the recordings directory.
+app.get('/dvr/:file', requireAuth, (req, res) => {
+    if (req.params.file !== path.basename(req.params.file)) {
+        return res.status(400).send('Invalid file name.');
+    }
+    const filePath = path.join(DVR_DIR, req.params.file);
+    const query = req.session.isAdmin
+        ? "SELECT filePath FROM dvr_recordings WHERE filePath = ?"
+        : "SELECT filePath FROM dvr_recordings WHERE filePath = ? AND user_id = ?";
+    const params = req.session.isAdmin ? [filePath] : [filePath, req.session.userId];
+    db.get(query, params, (err, recording) => {
+        if (err) return res.status(500).send('Could not look up the recording.');
+        if (!recording) return res.status(404).send('Recording not found.');
+        res.sendFile(recording.filePath);
+    });
+});
 
 // --- Helper Functions ---
 /**
@@ -629,6 +1057,10 @@ const dbAll = (db, sql, params = []) => {
     });
 };
 // --- End Database Helper Functions ---
+
+// Serialized /api/vod/library responses, dropped whenever the VOD catalog changes.
+const vodLibraryCache = createLibraryCache();
+const vodStore = createVodStore({ db, dbRun, dbAll, dbGet });
 
 
 /**
@@ -859,6 +1291,9 @@ function getSettings() {
             postBufferMinutes: 2,
             maxConcurrentRecordings: 1,
             autoDeleteDays: 0,
+            minFreeDiskMb: 5120,
+            maxRecordingHours: 0,
+            retainNewestGb: 0,
             activeRecordingProfileId: 'dvr-ts-default', // **MODIFIED: Point to the new default profile**
             recordingProfiles: [
                 // The primary default for timeshifting, uses almost no CPU.
@@ -887,11 +1322,25 @@ function getSettings() {
         activeCastProfileId: 'cast-default',
         activeUserAgentId: `default-ua-1724778434000`,
         activeStreamProfileId: 'redirect',
+        playerFallbackProfileId: null,
+        allowUserQualitySwitch: false,
+        downloads: {
+            enabled: true,
+            maxConcurrent: 2
+        },
+        liveRewind: {
+            enabled: false,
+            minutes: 15,
+            diskCapMb: 4096
+        },
         playerLogLevel: 'warning',
         dvrLogLevel: 'warning',
         searchScope: 'all_channels_unfiltered',
+        timeZone: null,
+        timezoneOffset: 0,
         notificationLeadTime: 10,
         sourcesLastUpdated: null,
+        epgOverrides: {}, // channel id -> XMLTV channel id, set by an admin; wins over every automatic match
         clientTelemetryEnabled: false,
         logs: {
             maxFiles: 5,
@@ -902,7 +1351,7 @@ function getSettings() {
 
     if (!fs.existsSync(SETTINGS_PATH)) {
         console.log('[SETTINGS] settings.json not found, creating default settings.');
-        fs.writeFileSync(SETTINGS_PATH, JSON.stringify(defaultSettings, null, 2));
+        writeSettings(defaultSettings);
         return defaultSettings;
     }
     try {
@@ -1035,6 +1484,41 @@ function getSettings() {
             needsSave = true;
         }
 
+        if (settings.timeZone === undefined) {
+            console.log('[SETTINGS_MIGRATE] Adding missing timeZone setting.');
+            settings.timeZone = defaultSettings.timeZone;
+            needsSave = true;
+        }
+        if (settings.timezoneOffset === undefined) {
+            settings.timezoneOffset = defaultSettings.timezoneOffset;
+            needsSave = true;
+        }
+
+        // Normalize the newer playback/DVR settings once, so old settings files get safe defaults.
+        const normalizedDvr = normalizeDvrSettings(settings.dvr || {});
+        const normalizedDownloads = normalizeDownloadsSettings(settings.downloads || {});
+        const normalizedRewind = normalizeLiveRewindSettings(settings.liveRewind || {});
+        if (JSON.stringify(normalizedDvr) !== JSON.stringify(settings.dvr)) {
+            settings.dvr = normalizedDvr;
+            needsSave = true;
+        }
+        if (JSON.stringify(normalizedDownloads) !== JSON.stringify(settings.downloads)) {
+            settings.downloads = normalizedDownloads;
+            needsSave = true;
+        }
+        if (JSON.stringify(normalizedRewind) !== JSON.stringify(settings.liveRewind)) {
+            settings.liveRewind = normalizedRewind;
+            needsSave = true;
+        }
+        if (settings.playerFallbackProfileId === undefined) {
+            settings.playerFallbackProfileId = null;
+            needsSave = true;
+        }
+        if (settings.allowUserQualitySwitch === undefined) {
+            settings.allowUserQualitySwitch = false;
+            needsSave = true;
+        }
+
         // Check that all expected settings are present and set and if not,
         // generate log to highlight missing setting(s) migration code. 
         if (!settings || typeof settings !== 'object') {
@@ -1051,7 +1535,7 @@ function getSettings() {
                 console.log('[SETTINGS_MIGRATE] Settings are all valid.');
                 if (needsSave) {
                     console.log('[SETTINGS_MIGRATE] Saving updated settings file after migration.');
-                    fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2));
+                    writeSettings(settings);
                 }
             } else {
                 console.log('[SETTINGS_MIGRATE_ERROR] Settings are not all valid.');
@@ -1283,10 +1767,9 @@ initializeLogSystem();
 /**
  * Initiates the VOD refresh process for a given XC provider.
  * @param {object} provider - The M3U source object (must be type 'xc').
- * @param {sqlite3.Database} dbInstance - The active database connection.
  * @param {function} sendStatus - Function to send status updates.
  */
-async function triggerVodRefreshForProvider(provider, dbInstance, sendStatus = () => { }) {
+async function triggerVodRefreshForProvider(provider, sendStatus = () => { }) {
     if (!provider || provider.type !== 'xc' || !provider.xc_data) {
         console.error(`[VOD Trigger] Invalid provider object passed for VOD refresh. ID: ${provider?.id}`);
         return;
@@ -1299,64 +1782,88 @@ async function triggerVodRefreshForProvider(provider, dbInstance, sendStatus = (
         const settings = getSettings();
         const activeUserAgent = settings.userAgents.find(ua => ua.id === settings.activeUserAgentId)?.value || 'VLC/3.0.20 (Linux; x86_64)';
         // Call the main processing function from vodProcessor.js
-        await refreshVodContent(dbInstance, dbGet, dbAll, dbRun, provider, sendStatus, activeUserAgent);
+        await refreshVodContent(vodStore, provider, sendStatus, activeUserAgent);
 
         console.log(`[VOD Trigger] Successfully finished VOD refresh for provider: ${provider.name}`);
 
     } catch (error) {
         console.error(`[VOD Trigger] Error during VOD refresh for ${provider.name}: ${error.message}`);
         sendStatus(`VOD refresh FAILED for ${provider.name}: ${error.message}`, 'error');
+    } finally {
+        vodLibraryCache.invalidate();
     }
 }
 
 
 // ... existing helper functions (fetchUrlContent, parseEpgTime, processAndMergeSources) remain the same ...
 
-function fetchUrlContent(url, options = {}, asBuffer = false) { // <-- MODIFIED
+function fetchUrlContent(url, options = {}, asStream = false) { // asStream resolves with the response stream, unread
+    try {
+        assertSafeStreamUrl(url);
+    } catch (err) {
+        return Promise.reject(err);
+    }
     return new Promise((resolve, reject) => {
         const protocol = url.startsWith('https') ? https : http;
-        const TIMEOUT_DURATION = 60000;
-        console.log(`[FETCH] Attempting to fetch URL content: ${url} (Timeout: ${TIMEOUT_DURATION / 1000}s)`);
+        const TIMEOUT_DURATION = 180000;
+        const started = Date.now();
+        const elapsed = () => `${Date.now() - started}ms`;
+        const label = `GET ${redactUrlForLog(url)}`;
+        console.log(`[FETCH] ${label} (Timeout: ${TIMEOUT_DURATION / 1000}s) headers=${JSON.stringify(redactHeaders(options.headers))}`);
 
         const request = protocol.get(url, { timeout: TIMEOUT_DURATION, ...options }, (res) => { // <-- MODIFIED
+            const h = res.headers;
+            console.log(`[FETCH] ${label} -> ${res.statusCode} ${res.statusMessage || ''} after ${elapsed()} (headers received) `
+                + `content-type=${h['content-type'] || 'n/a'} content-length=${h['content-length'] || 'n/a'} `
+                + `content-encoding=${h['content-encoding'] || 'n/a'} server=${h.server || 'n/a'}`);
+            // A body that dies mid-download (reverse proxy cut, provider reset) never fires request 'error'.
+            res.on('error', (err) => {
+                console.error(`[FETCH] ${label} response stream error after ${elapsed()}: ${describeNetError(err)}`);
+                reject(err);
+            });
+            res.on('aborted', () => console.error(`[FETCH] ${label} connection aborted by the remote end after ${elapsed()}`));
             if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-                console.log(`[FETCH] Redirecting to: ${res.headers.location}`);
+                let nextUrl;
+                try {
+                    nextUrl = new URL(res.headers.location, url).href;
+                } catch (e) {
+                    return reject(new Error('Invalid redirect location.'));
+                }
+                console.log(`[FETCH] Redirecting to: ${redactUrlForLog(nextUrl)}`);
                 request.abort();
-                // Pass the asBuffer flag through redirects
-                return fetchUrlContent(new URL(res.headers.location, url).href, options, asBuffer).then(resolve, reject);
+                return fetchUrlContent(nextUrl, options, asStream).then(resolve, reject);
             }
             if (res.statusCode !== 200) {
-                console.error(`[FETCH] Failed to fetch ${url}: Status Code ${res.statusCode}`);
-                return reject(new Error(`Failed to fetch: Status Code ${res.statusCode}`));
+                let snippet = '';
+                res.setEncoding('utf8');
+                res.on('data', (chunk) => { if (snippet.length < 300) snippet += chunk; });
+                res.on('end', () => {
+                    console.error(`[FETCH] Failed ${label}: Status Code ${res.statusCode} after ${elapsed()} body="${snippet.slice(0, 300).replace(/\s+/g, ' ')}"`);
+                    reject(new Error(`Failed to fetch: Status Code ${res.statusCode}`));
+                });
+                return;
             }
 
-            if (asBuffer) {
-                const chunks = [];
-                res.on('data', (chunk) => chunks.push(chunk));
-                res.on('end', () => {
-                    console.log(`[FETCH] Successfully fetched content as buffer from: ${url}`);
-                    resolve(Buffer.concat(chunks));
-                });
-            } else {
-                let data = '';
-                res.setEncoding('utf8');
-                res.on('data', (chunk) => { data += chunk; });
-                res.on('end', () => {
-                    console.log(`[FETCH] Successfully fetched content from: ${url}`);
-                    resolve(data);
-                });
-            }
+            if (asStream) return resolve(res);
+
+            let data = '';
+            res.setEncoding('utf8');
+            res.on('data', (chunk) => { data += chunk; });
+            res.on('end', () => {
+                console.log(`[FETCH] Fetched ${label}: ${data.length} chars in ${elapsed()}`);
+                resolve(data);
+            });
         });
 
         request.on('timeout', () => {
             request.destroy();
-            const timeoutError = new Error(`Request to ${url} timed out after ${TIMEOUT_DURATION / 1000} seconds.`);
-            console.error(`[FETCH] ${timeoutError.message}`);
+            const timeoutError = new Error(`Request to ${safeUrlForLog(url)} timed out after ${TIMEOUT_DURATION / 1000} seconds.`);
+            console.error(`[FETCH] ${label} idle timeout after ${elapsed()} (no data for ${TIMEOUT_DURATION / 1000}s)`);
             reject(timeoutError);
         });
 
         request.on('error', (err) => {
-            console.error(`[FETCH] Network error fetching ${url}: ${err.message}`);
+            console.error(`[FETCH] Network error ${label} after ${elapsed()}: ${describeNetError(err)}`);
             reject(err);
         });
     });
@@ -1364,27 +1871,176 @@ function fetchUrlContent(url, options = {}, asBuffer = false) { // <-- MODIFIED
 
 
 // --- EPG Parsing and Caching Logic ---
-const parseEpgTime = (timeStr, offsetHours = 0) => {
-    const match = timeStr.match(/(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\s*(([+-])(\d{2})(\d{2}))?/);
-    if (!match) {
-        console.warn(`[EPG_PARSE] Invalid time format encountered: ${timeStr}`);
-        return new Date();
+// The EPG half of processAndMergeSources, on its own so a manual EPG assignment can re-merge the guides
+// without fetching the playlists again. `liveChannels`: prefixed channel id -> {originalId, name}.
+// Updates the status of the active EPG sources in `settings` and adds the ones that failed to `failedSources`.
+async function mergeEpg(req, settings, liveChannels, onlyIds, failedSources) {
+    const activeEpgSources = settings.epgSources.filter(s => s.isActive);
+    const mergedProgramData = {};
+    const timeZone = settings.timeZone || null;
+    const timezoneOffset = settings.timezoneOffset || 0;
+
+    if (activeEpgSources.length === 0) {
+        console.log('[PROCESS] No active EPG sources found.');
+        sendProcessingStatus(req, 'No active EPG sources found.', 'info');
     }
 
-    const [, year, month, day, hours, minutes, seconds, , sign, tzHours, tzMinutes] = match;
-    let date;
-    if (sign && tzHours && tzMinutes) {
-        const epgOffsetMinutes = (parseInt(tzHours) * 60 + parseInt(tzMinutes)) * (sign === '+' ? 1 : -1);
-        date = new Date(Date.UTC(year, parseInt(month) - 1, day, hours, minutes, seconds));
-        date.setUTCMinutes(date.getUTCMinutes() - epgOffsetMinutes);
-    } else {
-        date = new Date(Date.UTC(year, parseInt(month) - 1, day, hours, minutes, seconds));
-        date.setUTCHours(date.getUTCHours() - offsetHours);
-    }
-    return date;
-};
+    // A guide is resolved to a file once (a URL is downloaded and kept on disk, so refreshing another source can
+    // re-merge it without downloading it again); the channel pass and the programme pass both read that file.
+    const epgFiles = new Map();
+    const openEpg = (source) => {
+        // The guide is parsed as a stream: big ones don't fit in a single string.
+        return openMaybeGzip(epgFiles.get(source.id));
+    };
+    const failEpg = (source, error) => {
+        const errorMsg = `Failed to process source "${source.name}" from ${source.path}: ${error.message}`;
+        console.error(`[EPG] ${errorMsg}`);
+        sendProcessingStatus(req, `Error: ${errorMsg}`, 'error');
+        failedSources.push(source.name);
+        source.status = 'Error';
+        source.statusMessage = `Processing failed: ${error.message.substring(0, 100)}...`;
+    };
 
-async function processAndMergeSources(req) {
+    // Pass 1: make every guide readable and list the channels it declares, so channels can be matched by name.
+    const epgChannels = new Map(); // XMLTV channel id -> {id, names}, across all guides
+    const syntheticChannelIds = new Set(); // guide channels whose <channel id=""> had to be synthesized from the name
+    const fallbackEpgSources = new Set(); // guides that failed to refresh and are re-merged from their cache
+    for (const source of activeEpgSources) {
+        console.log(`[EPG] Processing source: "${source.name}" (ID: ${source.id}, Type: ${source.type}, Path: ${sourcePathForLog(source.path)})`);
+        const cached = onlyIds && !onlyIds.includes(source.id);
+        sendProcessingStatus(req, `Processing EPG source: "${source.name}"...`, 'info');
+        try {
+            if (source.type === 'file') {
+                if (!fs.existsSync(source.path)) {
+                    const errorMsg = `File not found for source "${source.name}". Skipping.`;
+                    sendProcessingStatus(req, `Error: ${errorMsg}`, 'error');
+                    source.status = 'Error';
+                    source.statusMessage = 'File not found.';
+                    failedSources.push(source.name);
+                    continue;
+                }
+                epgFiles.set(source.id, source.path);
+            } else if (source.type === 'url') {
+                // Kept on disk so refreshing another source can re-merge this guide without downloading it again.
+                const cachePath = path.join(RAW_CACHE_DIR, `raw_${source.id}.epg_cache`);
+                if (!(cached && fs.existsSync(cachePath))) {
+                    sendProcessingStatus(req, ` -> Fetching content from URL...`, 'info');
+                    try {
+                        await pipelineAsync(await fetchUrlContent(source.path, source.fetchOptions || {}, true), fs.createWriteStream(`${cachePath}.tmp`));
+                        fs.renameSync(`${cachePath}.tmp`, cachePath);
+                    } catch (fetchError) {
+                        if (!fs.existsSync(cachePath)) throw fetchError;
+                        fallbackEpgSources.add(source.id);
+                        failedSources.push(source.name);
+                        console.warn(`[EPG] Refresh failed for "${source.name}", using the last cached guide: ${fetchError.message}`);
+                        sendProcessingStatus(req, ` -> Refresh failed (${fetchError.message}); using the last cached guide.`, 'warning');
+                    }
+                }
+                source.cachedRawPath = cachePath;
+                epgFiles.set(source.id, cachePath);
+            }
+            if (epgFiles.has(source.id)) {
+                await forEachChannel(openEpg(source), ({ id, names, synthetic }) => {
+                    if (synthetic) syntheticChannelIds.add(id);
+                    const known = epgChannels.get(id);
+                    epgChannels.set(id, { id, names: known ? [...new Set([...known.names, ...names])] : names });
+                });
+            }
+        } catch (error) {
+            epgFiles.delete(source.id);
+            failEpg(source, error);
+        }
+        if (!cached && !fallbackEpgSources.has(source.id)) {
+            source.lastUpdated = new Date().toISOString();
+        }
+    }
+
+    // Which playlist channels each XMLTV channel feeds: manual overrides, then exact ids, then unambiguous names.
+    const targets = buildTargets({ channels: liveChannels, overrides: settings.epgOverrides, epgChannels: [...epgChannels.values()] });
+    if (syntheticChannelIds.size) {
+        sendProcessingStatus(req, `Warning: ${syntheticChannelIds.size} guide channels had an empty channel id and were matched by name only.`, 'info');
+    }
+    const sample = new Map(); // XMLTV channel id -> one programme title, so the picker can show what a channel airs
+    const titleOf = (prog) => (prog.title && prog.title._cdata ? prog.title._cdata : (prog.title?._text || 'No Title')).trim();
+
+    // Pass 2: programmes, for the channels that have a target.
+    for (const source of activeEpgSources) {
+        if (!epgFiles.has(source.id)) continue;
+        try {
+            let programCount = 0;
+            let epgAddedCount = 0; // programmes added to the live guide (one per target channel)
+
+            await forEachProgramme(openEpg(source), (prog) => {
+                const channelId = prog._attributes?.channel;
+                if (!channelId) return;
+                programCount++;
+                if (!sample.has(channelId)) sample.set(channelId, titleOf(prog));
+                const ids = targets.get(channelId);
+                if (!ids) return;
+
+                const descNode = prog.desc && prog.desc._cdata ? prog.desc._cdata : (prog.desc?._text || '');
+                const entry = {
+                    start: parseEpgTime(prog._attributes.start, { timeZone, offsetHours: timezoneOffset }).toISOString(),
+                    stop: parseEpgTime(prog._attributes.stop, { timeZone, offsetHours: timezoneOffset }).toISOString(),
+                    title: titleOf(prog),
+                    desc: descNode.trim()
+                };
+                for (const id of ids) {
+                    (mergedProgramData[id] ||= []).push(entry);
+                    epgAddedCount++;
+                }
+            });
+
+            if (programCount === 0) {
+                sendProcessingStatus(req, `Warning: No programs found in "${source.name}".`, 'info');
+            }
+            if (fallbackEpgSources.has(source.id)) {
+                source.status = 'Error';
+                source.statusMessage = 'Refresh failed; kept the last cached guide.';
+            } else {
+                source.status = 'Success';
+                source.statusMessage = `Processed ${programCount} programs, added ${epgAddedCount} to live guide.`;
+            }
+            console.log(`[EPG] Source "${source.name}" processed successfully from ${sourcePathForLog(source.path)}.`);
+            sendProcessingStatus(req, ` -> Processed ${programCount} programs, added ${epgAddedCount} to live guide from "${source.name}".`, 'info');
+        } catch (error) {
+            failEpg(source, error);
+        }
+    }
+    for (const channelId in mergedProgramData) {
+        mergedProgramData[channelId].sort((a, b) => new Date(a.start) - new Date(b.start));
+    }
+    try { // Try block for saving EPG JSON
+        writeFileAtomic(LIVE_EPG_JSON_PATH, JSON.stringify(mergedProgramData));
+        console.log(`[EPG] Merged EPG JSON content saved to ${LIVE_EPG_JSON_PATH}.`);
+        sendProcessingStatus(req, `Successfully merged all EPG data for live channels.`, 'success');
+    } catch (writeErr) { // Catch block for saving EPG JSON
+        console.error(`[EPG] Error writing merged EPG JSON file: ${writeErr.message}`);
+        sendProcessingStatus(req, `Error writing merged EPG JSON file: ${writeErr.message}`, 'error');
+    }
+    try { // What the guides offer, for the manual EPG picker
+        writeFileAtomic(EPG_CHANNELS_JSON_PATH, JSON.stringify([...epgChannels.values()].map(c => ({ ...c, sample: sample.get(c.id) }))));
+    } catch (writeErr) {
+        console.error(`[EPG] Error writing EPG channel index: ${writeErr.message}`);
+    }
+}
+
+// Processing writes the merged files, so runs must not overlap (a timer, a manual
+// refresh and the startup pass could otherwise interleave their writes).
+let queuedSourceRuns = 0; // runs started or waiting; > 0 means a new run has to wait its turn
+function runSourceProcessing(req, onlyIds, keepStoredVod) {
+    if (queuedSourceRuns > 0) {
+        console.log('[PROCESS] Another refresh is still running; this one is queued behind it.');
+        sendProcessingStatus(req, 'Another refresh is still running. This one will start when it finishes.', 'info');
+    }
+    queuedSourceRuns++;
+    const run = sourceProcessing.then(() => processAndMergeSources(req, onlyIds, keepStoredVod));
+    sourceProcessing = run.catch(() => { }).finally(() => { queuedSourceRuns--; });
+    return run;
+}
+
+// onlyIds: refresh just those sources; the others are merged from their cached raw copy (fetched only if it is missing).
+async function processAndMergeSources(req, onlyIds, keepStoredVod = false) {
     console.log('[PROCESS] Starting to process and merge all active sources.');
     sendProcessingStatus(req, 'Starting to process sources...', 'info');
     const settings = getSettings();
@@ -1393,12 +2049,12 @@ async function processAndMergeSources(req) {
     let mergedLiveM3uContent = '#EXTM3U\n';
     //let mergedVodMovies = [];
     //let mergedVodSeries = [];
-    let liveChannelIdSet = new Set(); // To track which channels need EPG
+    const liveChannels = new Map(); // prefixed channel id -> {originalId, name}: what EPG matching needs
     const groupTitleRegex = /group-title="([^"]*)"/;
     // ---
 
     const activeM3uSources = settings.m3uSources.filter(s => s.isActive);
-    const activeEpgSources = settings.epgSources.filter(s => s.isActive);
+    const failedSources = []; // names, for the final summary
 
     if (activeM3uSources.length === 0) {
         console.log('[PROCESS] No active M3U sources found.');
@@ -1406,7 +2062,8 @@ async function processAndMergeSources(req) {
     }
 
     for (const source of activeM3uSources) {
-        console.log(`[M3U] Processing source: "${source.name}" (ID: ${source.id}, Type: ${source.type}, Path: ${source.path})`);
+        console.log(`[M3U] Processing source: "${source.name}" (ID: ${source.id}, Type: ${source.type}, Path: ${sourcePathForLog(source.path)})`);
+        const cached = onlyIds && !onlyIds.includes(source.id);
         sendProcessingStatus(req, `Processing M3U source: "${source.name}"...`, 'info');
 
         // --- NEW: Group Filter Logic ---
@@ -1417,45 +2074,57 @@ async function processAndMergeSources(req) {
         }
         // ---
 
+        let usedCachedFallback = false;
         try {
             let content = '';
-            let sourcePathForLog = source.path;
+            let processedPath = source.path;
             let m3uFetchOptions = {}; // NEW: For XC User-Agent
 
             if (source.type === 'file') {
                 const sourceFilePath = path.join(SOURCES_DIR, path.basename(source.path));
                 if (fs.existsSync(sourceFilePath)) {
                     content = fs.readFileSync(sourceFilePath, 'utf-8');
-                    sourcePathForLog = sourceFilePath;
+                    processedPath = sourceFilePath;
                 } else {
                     const errorMsg = `File not found for source "${source.name}". Skipping.`;
                     sendProcessingStatus(req, `Error: ${errorMsg}`, 'error');
                     source.status = 'Error';
                     source.statusMessage = 'File not found.';
+                    failedSources.push(source.name);
                     continue;
                 }
+            } else if (cached && source.cachedRawPath && fs.existsSync(source.cachedRawPath)) {
+                content = fs.readFileSync(source.cachedRawPath, 'utf-8');
+                sendProcessingStatus(req, ` -> Using cached content.`, 'info');
             } else if (source.type === 'url') {
                 sendProcessingStatus(req, ` -> Fetching content from URL...`, 'info');
-                content = await fetchUrlContent(source.path);
-                // Save raw content to cache (URL) ---
                 try {
-                    // Define cache path (ensure it's unique per source)
-                    const cacheFileName = `raw_${source.id}.m3u_cache`; // Use a distinct extension
-                    const cacheFilePath = path.join(RAW_CACHE_DIR, cacheFileName);
-
-                    // Write the fetched content to the cache file
-                    fs.writeFileSync(cacheFilePath, content);
-                    console.log(`[PROCESS_CACHE] Saved raw content for source "${source.name}" to ${cacheFilePath}`);
-
-                    // Store the path in the source object (this will be saved later when settings are saved)
-                    source.cachedRawPath = cacheFilePath;
-
-                } catch (cacheWriteError) {
-                    console.error(`[PROCESS_CACHE] Failed to write raw cache for source "${source.name}" (URL):`, cacheWriteError.message);
-                    // Clear any potentially stale cache path if writing failed
-                    delete source.cachedRawPath;
+                    content = await fetchUrlContent(source.path);
+                } catch (fetchError) {
+                    if (!source.cachedRawPath || !fs.existsSync(source.cachedRawPath)) throw fetchError;
+                    content = fs.readFileSync(source.cachedRawPath, 'utf-8');
+                    usedCachedFallback = true;
+                    console.warn(`[M3U] Refresh failed for "${source.name}", using the last cached playlist: ${fetchError.message}`);
+                    sendProcessingStatus(req, ` -> Refresh failed (${fetchError.message}); using the last cached playlist.`, 'warning');
                 }
-                sendProcessingStatus(req, ` -> Successfully fetched M3U content.`, 'info');
+                if (!usedCachedFallback) {
+                    try {
+                        const cacheFileName = `raw_${source.id}.m3u_cache`; // Use a distinct extension
+                        const cacheFilePath = path.join(RAW_CACHE_DIR, cacheFileName);
+
+                        fs.writeFileSync(cacheFilePath, content);
+                        console.log(`[PROCESS_CACHE] Saved raw content for source "${source.name}" to ${cacheFilePath}`);
+
+                        // Store the path in the source object (this will be saved later when settings are saved)
+                        source.cachedRawPath = cacheFilePath;
+
+                    } catch (cacheWriteError) {
+                        console.error(`[PROCESS_CACHE] Failed to write raw cache for source "${source.name}" (URL):`, cacheWriteError.message);
+                        // Clear any potentially stale cache path if writing failed
+                        delete source.cachedRawPath;
+                    }
+                    sendProcessingStatus(req, ` -> Successfully fetched M3U content.`, 'info');
+                }
             } else if (source.type === 'xc') {
                 if (!source.xc_data) {
                     throw new Error("XC source is missing credential data (xc_data).");
@@ -1472,15 +2141,16 @@ async function processAndMergeSources(req) {
 
                 // Fetch live streams from XC API
                 const liveStreamsUrl = `${server}/player_api.php?username=${username}&password=${password}&action=get_live_streams`;
+                let xcLiveError = null;
                 try {
                     sendProcessingStatus(req, ` -> Fetching live categories from XC server...`, 'info');
                     const liveCategoriesUrl = `${server}/player_api.php?username=${username}&password=${password}&action=get_live_categories`;
-                    console.log(`[M3U] Constructed XC Categories URL for "${source.name}": ${liveCategoriesUrl}`);
+                    console.log(`[M3U] Fetching live categories from XC source "${source.name}".`);
                     const liveCategoriesResponse = await fetchUrlContent(liveCategoriesUrl, m3uFetchOptions);
                     const liveCategories = JSON.parse(liveCategoriesResponse);
 
                     sendProcessingStatus(req, ` -> Fetching live streams from XC server...`, 'info');
-                    console.log(`[M3U] Constructed XC Streams URL for "${source.name}": ${liveCategoriesUrl}`);
+                    console.log(`[M3U] Fetching live streams from XC source "${source.name}".`);
                     const liveStreamsResponse = await fetchUrlContent(liveStreamsUrl, m3uFetchOptions);
                     const liveStreams = JSON.parse(liveStreamsResponse);
 
@@ -1515,40 +2185,41 @@ async function processAndMergeSources(req) {
                         sendProcessingStatus(req, ` -> No live streams found with stream_type = 'live'.`, 'info');
                     }
                 } catch (liveError) {
+                    xcLiveError = liveError;
                     console.error(`[XC Live] Error fetching live streams for "${source.name}": ${liveError.message}`);
                     sendProcessingStatus(req, ` -> Warning: Could not fetch live streams: ${liveError.message}`, 'warning');
                 }
 
-                // Save raw content to cache (XC) ---
-                try {
-                    // Define cache path (ensure it's unique per source)
-                    const cacheFileName = `raw_${source.id}.m3u_cache`; // Use a distinct extension
-                    const cacheFilePath = path.join(RAW_CACHE_DIR, cacheFileName);
-
-                    // Write the fetched content to the cache file
-                    fs.writeFileSync(cacheFilePath, content);
-                    console.log(`[PROCESS_CACHE] Saved raw content for source "${source.name}" to ${cacheFilePath}`);
-
-                    // Store the path in the source object (this will be saved later when settings are saved)
-                    source.cachedRawPath = cacheFilePath;
-
-                } catch (cacheWriteError) {
-                    console.error(`[PROCESS_CACHE] Failed to write raw cache for source "${source.name}" (XC):`, cacheWriteError.message);
-                    // Clear any potentially stale cache path if writing failed
-                    delete source.cachedRawPath;
+                if (xcLiveError && !content.trim()) {
+                    if (!source.cachedRawPath || !fs.existsSync(source.cachedRawPath)) throw xcLiveError;
+                    content = fs.readFileSync(source.cachedRawPath, 'utf-8');
+                    usedCachedFallback = true;
+                    console.warn(`[XC] Refresh failed for "${source.name}", using the last cached live playlist: ${xcLiveError.message}`);
+                    sendProcessingStatus(req, ` -> Refresh failed; using the last cached live playlist.`, 'warning');
                 }
 
-                sourcePathForLog = liveStreamsUrl;
+                // Save raw content to cache (XC); an empty or fallback result must not replace the last good copy.
+                if (content.trim() && !usedCachedFallback) {
+                    try {
+                        const cacheFileName = `raw_${source.id}.m3u_cache`; // Use a distinct extension
+                        const cacheFilePath = path.join(RAW_CACHE_DIR, cacheFileName);
+
+                        fs.writeFileSync(cacheFilePath, content);
+                        console.log(`[PROCESS_CACHE] Saved raw content for source "${source.name}" to ${cacheFilePath}`);
+
+                        // Store the path in the source object (this will be saved later when settings are saved)
+                        source.cachedRawPath = cacheFilePath;
+
+                    } catch (cacheWriteError) {
+                        console.error(`[PROCESS_CACHE] Failed to write raw cache for source "${source.name}" (XC):`, cacheWriteError.message);
+                        // Clear any potentially stale cache path if writing failed
+                        delete source.cachedRawPath;
+                    }
+                }
+
+                processedPath = liveStreamsUrl;
                 sendProcessingStatus(req, ` -> Successfully fetched M3U content from XC server.`, 'info');
             }
-
-            // --- NEW: Trigger VOD Refresh for all non-XC Sources ---
-            if (source.type === 'file' || source.type === 'url') {
-                console.log(`[PROCESS] Source "${source.name}" is a non-XC M3U. Triggering VOD processing.`);
-                sendProcessingStatus(req, ` -> Triggering VOD content processing for M3U source "${source.name}"...`, 'info');
-                await processM3uVod(db, dbGet, dbAll, dbRun, content, source, (msg, type) => sendProcessingStatus(req, msg, type));
-            }
-            // --- END VOD Trigger ---
 
             const lines = content.split('\n');
             let currentExtInf = '';
@@ -1563,7 +2234,7 @@ async function processAndMergeSources(req) {
                     continue;
                 }
 
-                if (line.startsWith('http') && currentExtInf) {
+                if (isPlaylistUrl(line) && currentExtInf) {
                     const streamUrl = line;
 
 
@@ -1581,9 +2252,9 @@ async function processAndMergeSources(req) {
                     liveStreamCount++;
                     let processedExtInf = currentExtInf;
                     const idMatch = currentExtInf.match(/tvg-id="([^"]*)"/); // Still needed for unique ID
-                    const nameMatch = line.match(/tvg-name="([^"]*)"/); // Get name if available
-                    const commaIndex = currentExtInf.lastIndexOf(',');
-                    const name = nameMatch ? nameMatch[1] : ((commaIndex !== -1) ? currentExtInf.substring(commaIndex + 1).trim() : 'Unknown');
+                    const tvgNameMatch = currentExtInf.match(/tvg-name="([^"]*)"/);
+                    const tvgName = (tvgNameMatch && tvgNameMatch[1]) || '';
+                    const name = displayNameFromExtinf(currentExtInf);
 
                     // Consistent Unique Channel ID Generation
                     // Treat an empty tvg-id="" the same as a missing attribute: otherwise
@@ -1606,25 +2277,31 @@ async function processAndMergeSources(req) {
                     processedExtInf = processedExtInf.slice(0, tvgIdAttrEnd) + ` vini-source="${source.name}"` + processedExtInf.slice(tvgIdAttrEnd);
 
                     mergedLiveM3uContent += processedExtInf + '\n' + streamUrl + '\n';
-                    liveChannelIdSet.add(finalUniqueChannelId);
+                    liveChannels.set(finalUniqueChannelId, { originalId: originalTvgId, name, tvgName, group: groupTitle });
                     // --- END LIVE CHANNEL PROCESSING ---
 
                     currentExtInf = ''; // Reset for next entry
                 }
             }
 
-            source.status = 'Success';
-            source.statusMessage = `Processed ${liveStreamCount} Live channels.`;
-            console.log(`[M3U] Source "${source.name}" processed successfully from ${sourcePathForLog}.`);
+            if (usedCachedFallback) {
+                source.status = 'Error';
+                source.statusMessage = 'Refresh failed; kept the last cached copy.';
+                failedSources.push(source.name);
+            } else {
+                source.status = 'Success';
+                source.statusMessage = `Processed ${liveStreamCount} Live channels.`;
+            }
+            console.log(`[M3U] Source "${source.name}" processed successfully from ${sourcePathForLog(processedPath)}.`);
             sendProcessingStatus(req, ` -> Processed ${liveStreamCount} Live channels from "${source.name}".`, 'info');
 
             // --- NEW: Trigger VOD Refresh for XC Sources ---
-            if (source.type === 'xc') {
+            // A restart or timezone change has no reason to download the whole VOD catalog again; a refresh does.
+            if (source.type === 'xc' && !cached && !(keepStoredVod && await vodStore.hasTitles(source.id))) {
                 console.log(`[PROCESS] Source "${source.name}" is XC. Triggering VOD refresh.`);
                 sendProcessingStatus(req, ` -> Triggering VOD content refresh for XC source "${source.name}"...`, 'info');
                 // Use setImmediate to run the VOD refresh *after* the current M3U processing finishes
-                // Pass the source object and the global db instance
-                await triggerVodRefreshForProvider(source, db, (msg, type) => sendProcessingStatus(req, msg, type));
+                await triggerVodRefreshForProvider(source, (msg, type) => sendProcessingStatus(req, msg, type));
             }
             // --- END VOD Trigger ---
 
@@ -1632,15 +2309,16 @@ async function processAndMergeSources(req) {
             const errorMsg = `Failed to process source "${source.name}" from ${source.path}: ${error.message}`;
             console.error(`[M3U] ${errorMsg}`);
             sendProcessingStatus(req, `Error: ${errorMsg}`, 'error');
+            failedSources.push(source.name);
             source.status = 'Error';
             source.statusMessage = `Processing failed: ${error.message.substring(0, 100)}...`;
         }
-        source.lastUpdated = new Date().toISOString();
+        if (!cached && !usedCachedFallback) source.lastUpdated = new Date().toISOString();
     }
 
     // --- Save the new separated files ---
     try { // Try block for saving LIVE M3U
-        fs.writeFileSync(LIVE_CHANNELS_M3U_PATH, mergedLiveM3uContent);
+        writeFileAtomic(LIVE_CHANNELS_M3U_PATH, mergedLiveM3uContent);
         console.log(`[M3U] Merged LIVE CHANNELS content saved to ${LIVE_CHANNELS_M3U_PATH}.`);
         sendProcessingStatus(req, `Successfully merged all live channels.`, 'success');
     } catch (writeErr) { // Catch block for saving LIVE M3U
@@ -1648,201 +2326,140 @@ async function processAndMergeSources(req) {
         sendProcessingStatus(req, `Error writing live channels file: ${writeErr.message}`, 'error');
     }
 
-    // --- EPG Processing (now filtered) ---
-    const mergedProgramData = {};
-    const timezoneOffset = settings.timezoneOffset || 0;
-
-    if (activeEpgSources.length === 0) {
-        console.log('[PROCESS] No active EPG sources found.');
-        sendProcessingStatus(req, 'No active EPG sources found.', 'info');
-    }
-
-    for (const source of activeEpgSources) {
-        console.log(`[EPG] Processing source: "${source.name}" (ID: ${source.id}, Type: ${source.type}, Path: ${source.path})`);
-        sendProcessingStatus(req, `Processing EPG source: "${source.name}"...`, 'info');
-        try {
-            let xmlString = '';
-            let epgFilePath = path.join(SOURCES_DIR, `epg_${source.id}.xml`);
-
-            if (source.type === 'file') {
-                if (fs.existsSync(source.path)) {
-                    xmlString = fs.readFileSync(source.path, 'utf-8');
-                } else {
-                    const errorMsg = `File not found for source "${source.name}". Skipping.`;
-                    sendProcessingStatus(req, `Error: ${errorMsg}`, 'error');
-                    source.status = 'Error';
-                    source.statusMessage = 'File not found.';
-                    continue;
-                }
-            } else if (source.type === 'url') {
-                sendProcessingStatus(req, ` -> Fetching content from URL...`, 'info');
-
-                // Use a different function to fetch raw buffer for compressed files
-                if (source.path.endsWith('.gz')) {
-                    const buffer = await fetchUrlContent(source.path, source.fetchOptions || {}, true); // Fetch as buffer
-                    xmlString = zlib.gunzipSync(buffer).toString('utf-8');
-                    sendProcessingStatus(req, ` -> Successfully fetched and decompressed EPG content.`, 'info');
-                } else {
-                    xmlString = await fetchUrlContent(source.path, source.fetchOptions || {});
-                    sendProcessingStatus(req, ` -> Successfully fetched EPG content.`, 'info');
-                }
-
-                try {
-                    fs.writeFileSync(epgFilePath, xmlString);
-                    console.log(`[EPG] Downloaded EPG for "${source.name}" saved to ${epgFilePath}.`);
-                } catch (writeErr) {
-                    console.error(`[EPG] Error saving EPG file from URL for "${source.name}": ${writeErr.message}`);
-                }
-            }
-
-            const epgJson = xmlJS.xml2js(xmlString, { compact: true });
-            const programs = epgJson.tv && epgJson.tv.programme ? [].concat(epgJson.tv.programme) : [];
-            let programCount = 0;
-            let epgAddedCount = 0; // NEW: Count only added programs
-
-            if (programs.length === 0) {
-                sendProcessingStatus(req, `Warning: No programs found in "${source.name}".`, 'info');
-            }
-
-            const m3uSourceProviders = settings.m3uSources.filter(m3u => m3u.isActive);
-
-            for (const prog of programs) {
-                const originalChannelId = prog._attributes?.channel;
-                if (!originalChannelId) continue;
-                programCount++;
-
-                for (const m3uSource of m3uSourceProviders) {
-                    const uniqueChannelId = `${m3uSource.id}_${originalChannelId}`;
-
-                    // --- NEW: EPG FILTERING ---
-                    // Only add EPG data if the channel is in our live channel list
-                    if (!liveChannelIdSet.has(uniqueChannelId)) {
-                        continue;
-                    }
-                    // ---
-
-                    if (!mergedProgramData[uniqueChannelId]) {
-                        mergedProgramData[uniqueChannelId] = [];
-                    }
-
-                    epgAddedCount++; // Increment count of *added* programs
-
-                    const titleNode = prog.title && prog.title._cdata ? prog.title._cdata : (prog.title?._text || 'No Title');
-                    const descNode = prog.desc && prog.desc._cdata ? prog.desc._cdata : (prog.desc?._text || '');
-
-                    mergedProgramData[uniqueChannelId].push({
-                        start: parseEpgTime(prog._attributes.start, timezoneOffset).toISOString(),
-                        stop: parseEpgTime(prog._attributes.stop, timezoneOffset).toISOString(),
-                        title: titleNode.trim(),
-                        desc: descNode.trim()
-                    });
-                }
-            }
-            if (!source.isXcEpg) {
-                source.status = 'Success';
-                source.statusMessage = `Processed ${programCount} programs, added ${epgAddedCount} to live guide.`;
-                console.log(`[EPG] Source "${source.name}" processed successfully from ${source.path}.`);
-            }
-            sendProcessingStatus(req, ` -> Processed ${programCount} programs, added ${epgAddedCount} to live guide from "${source.name}".`, 'info');
-
-        } catch (error) {
-            const errorMsg = `Failed to process source "${source.name}" from ${source.path}: ${error.message}`;
-            console.error(`[EPG] ${errorMsg}`);
-            sendProcessingStatus(req, `Error: ${errorMsg}`, 'error');
-            if (!source.isXcEpg) {
-                source.status = 'Error';
-                source.statusMessage = `Processing failed: ${error.message.substring(0, 100)}...`;
-            }
-        }
-        if (!source.isXcEpg) {
-            source.lastUpdated = new Date().toISOString();
-        }
-    }
-    for (const channelId in mergedProgramData) {
-        mergedProgramData[channelId].sort((a, b) => new Date(a.start) - new Date(b.start));
-    }
-    try { // Try block for saving EPG JSON
-        fs.writeFileSync(LIVE_EPG_JSON_PATH, JSON.stringify(mergedProgramData));
-        console.log(`[EPG] Merged EPG JSON content saved to ${LIVE_EPG_JSON_PATH}.`);
-        sendProcessingStatus(req, `Successfully merged all EPG data for live channels.`, 'success');
-    } catch (writeErr) { // Catch block for saving EPG JSON
-        console.error(`[EPG] Error writing merged EPG JSON file: ${writeErr.message}`);
-        sendProcessingStatus(req, `Error writing merged EPG JSON file: ${writeErr.message}`, 'error');
-    }
+    await mergeEpg(req, settings, liveChannels, onlyIds, failedSources);
 
     settings.sourcesLastUpdated = new Date().toISOString();
     console.log(`[PROCESS] Finished processing. New 'sourcesLastUpdated' timestamp: ${settings.sourcesLastUpdated}`);
-    sendProcessingStatus(req, 'All sources processed successfully!', 'final_success');
+    if (failedSources.length) {
+        sendProcessingStatus(req, `Finished with ${failedSources.length} failed source(s): ${failedSources.join(', ')}.`, 'error');
+    } else {
+        sendProcessingStatus(req, 'All sources processed successfully!', 'final_success');
+    }
 
-    return { success: true, message: 'Sources merged successfully.', updatedSettings: settings };
+    return {
+        success: failedSources.length === 0,
+        failedSources,
+        message: failedSources.length
+            ? `Sources merged with ${failedSources.length} failed source(s): ${failedSources.join(', ')}.`
+            : 'Sources merged successfully.',
+        updatedSettings: settings,
+    };
 }
 
 // ... existing helper functions ...
 
 // --- Authentication API Endpoints ---
+// Regenerates the session ID on login, so an ID an attacker knew before login cannot
+// become the authenticated session (session fixation).
+function startUserSession(req, user, callback) {
+    req.session.regenerate((err) => {
+        if (err) return callback(err);
+        req.session.userId = user.id;
+        req.session.username = user.username;
+        req.session.isAdmin = user.isAdmin === 1 || user.isAdmin === true;
+        req.session.canUseDvr = user.canUseDvr === 1 || user.canUseDvr === true;
+        callback(null);
+    });
+}
+
+// Drops every stored session for a user after a password change or account deletion.
+// connect-sqlite3 keeps the data as JSON, so filter in JS rather than guessing its schema.
+function destroyUserSessions(userId, exceptSid) {
+    sessionStore.db.all("SELECT sid, sess FROM sessions", (err, rows) => {
+        if (err || !rows) return;
+        rows.forEach((row) => {
+            if (exceptSid && row.sid === exceptSid) return;
+            try {
+                if (String(JSON.parse(row.sess).userId) === String(userId)) {
+                    sessionStore.destroy(row.sid, () => { });
+                }
+            } catch (e) { /* ignore a malformed session row */ }
+        });
+    });
+}
+
 app.get('/api/auth/needs-setup', (req, res) => {
     console.log('[AUTH_API] Received request for /api/auth/needs-setup');
-    db.get("SELECT COUNT(*) as count FROM users WHERE isAdmin = 1", [], (err, row) => {
+    db.get("SELECT COUNT(*) as count FROM users", [], (err, row) => {
         if (err) {
-            console.error('[AUTH_API] Error checking admin user count:', err.message);
-            return res.status(500).json({ error: err.message });
+            console.error('[AUTH_API] Error checking user count:', err.message);
+            return res.status(500).json({ error: 'Could not check the setup state.' });
         }
         const needsSetup = row.count === 0;
-        console.log(`[AUTH_API] Admin user count: ${row.count}. Needs setup: ${needsSetup}`);
+        console.log(`[AUTH_API] User count: ${row.count}. Needs setup: ${needsSetup}`);
         res.json({ needsSetup });
     });
 });
 
 app.post('/api/auth/setup-admin', (req, res) => {
     console.log('[AUTH_API] Received request for /api/auth/setup-admin');
-    db.get("SELECT COUNT(*) as count FROM users", [], (err, row) => {
+    const { username, password } = req.body || {};
+    if (typeof username !== 'string' || !username.trim()) {
+        return res.status(400).json({ error: 'A username is required.' });
+    }
+    const problem = passwordProblem(password);
+    if (problem) {
+        console.warn('[AUTH_API] Admin setup failed:', problem);
+        return res.status(400).json({ error: problem });
+    }
+
+    bcrypt.hash(password, saltRounds, (err, hash) => {
         if (err) {
-            console.error('[AUTH_API] Error checking user count during admin setup:', err.message);
-            return res.status(500).json({ error: err.message });
+            console.error('[AUTH_API] Error hashing password during admin setup:', err);
+            return res.status(500).json({ error: 'Error hashing password.' });
         }
-        if (row.count > 0) {
-            console.warn('[AUTH_API] Setup attempted but users already exist. Denying setup.');
-            return res.status(403).json({ error: "Setup has already been completed." });
-        }
-
-        const { username, password } = req.body;
-        if (!username || !password) {
-            console.warn('[AUTH_API] Admin setup failed: Username and/or password missing.');
-            return res.status(400).json({ error: "Username and password are required." });
-        }
-
-        bcrypt.hash(password, saltRounds, (err, hash) => {
-            if (err) {
-                console.error('[AUTH_API] Error hashing password during admin setup:', err);
-                return res.status(500).json({ error: 'Error hashing password.' });
-            }
-            db.run("INSERT INTO users (username, password, isAdmin, canUseDvr) VALUES (?, ?, 1, 1)", [username, hash], function (err) {
+        // One statement: concurrent first-run requests cannot both see an empty table.
+        db.run(
+            `INSERT INTO users (username, password, isAdmin, canUseDvr)
+             SELECT ?, ?, 1, 1 WHERE NOT EXISTS (SELECT 1 FROM users)`,
+            [username.trim(), hash],
+            function (err) {
                 if (err) {
                     console.error('[AUTH_API] Error inserting admin user:', err.message);
-                    return res.status(500).json({ error: err.message });
+                    return res.status(500).json({ error: 'Could not create the admin account.' });
                 }
-                req.session.userId = this.lastID;
-                req.session.username = username;
-                req.session.isAdmin = true;
-                req.session.canUseDvr = true;
-                console.log(`[AUTH_API] Admin user "${username}" created successfully (ID: ${this.lastID}). Session set.`);
-                res.json({ success: true, user: { id: this.lastID, username: req.session.username, isAdmin: req.session.isAdmin, canUseDvr: req.session.canUseDvr } });
-            });
-        });
+                if (this.changes === 0) {
+                    console.warn('[AUTH_API] Setup attempted but users already exist. Denying setup.');
+                    return res.status(403).json({ error: 'Setup has already been completed.' });
+                }
+                const userId = this.lastID;
+                console.log(`[AUTH_API] Admin user "${username}" created successfully (ID: ${userId}).`);
+                startUserSession(req, { id: userId, username: username.trim(), isAdmin: 1, canUseDvr: 1 }, (sessionErr) => {
+                    if (sessionErr) {
+                        console.error('[AUTH_API] Error starting the admin session:', sessionErr);
+                        return res.status(500).json({ error: 'Admin created, but the session could not be started. Please log in.' });
+                    }
+                    res.json({ success: true, user: { id: userId, username: username.trim(), isAdmin: true, canUseDvr: true } });
+                });
+            }
+        );
     });
 });
 
 app.post('/api/auth/login', (req, res) => {
     console.log('[AUTH_API] Received request for /api/auth/login');
-    const { username, password } = req.body;
+    const { username, password } = req.body || {};
+    if (typeof username !== 'string' || typeof password !== 'string') {
+        return res.status(400).json({ error: 'Username and password are required.' });
+    }
+    const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
+    const retryAfter = loginLimiter.check(clientIp, username);
+    if (retryAfter > 0) {
+        res.setHeader('Retry-After', String(retryAfter));
+        console.warn(`[AUTH_API] Login rate limit hit for ${clientIp}.`);
+        return res.status(429).json({ error: 'Too many login attempts. Try again later.' });
+    }
+
     db.get("SELECT * FROM users WHERE username = ?", [username], (err, user) => {
         if (err) {
             console.error('[AUTH_API] Error querying user during login:', err.message);
-            return res.status(500).json({ error: err.message });
+            return res.status(500).json({ error: 'Authentication error.' });
         }
         if (!user) {
-            console.warn(`[AUTH_API] Login failed for username "${username}": User not found.`);
-            return res.status(401).json({ error: "Invalid username or password." });
+            loginLimiter.fail(clientIp, username);
+            console.warn('[AUTH_API] Login failed: user not found.');
+            // Same bcrypt cost as a real check, so timing does not reveal valid usernames.
+            return bcrypt.compare(password, DUMMY_PASSWORD_HASH, () => res.status(401).json({ error: "Invalid username or password." }));
         }
 
         bcrypt.compare(password, user.password, (err, result) => {
@@ -1850,20 +2467,23 @@ app.post('/api/auth/login', (req, res) => {
                 console.error('[AUTH_API] Error comparing password hash:', err);
                 return res.status(500).json({ error: 'Authentication error.' });
             }
-            if (result) {
-                req.session.userId = user.id;
-                req.session.username = user.username;
-                req.session.isAdmin = user.isAdmin === 1;
-                req.session.canUseDvr = user.canUseDvr === 1;
-                console.log(`[AUTH_API] User "${username}" (ID: ${user.id}) logged in successfully. Session set.`);
+            if (!result) {
+                loginLimiter.fail(clientIp, username);
+                console.warn('[AUTH_API] Login failed: incorrect password.');
+                return res.status(401).json({ error: "Invalid username or password." });
+            }
+            loginLimiter.success(clientIp, username);
+            startUserSession(req, user, (sessionErr) => {
+                if (sessionErr) {
+                    console.error('[AUTH_API] Error starting the user session:', sessionErr);
+                    return res.status(500).json({ error: 'Authentication error.' });
+                }
+                console.log(`[AUTH_API] User "${user.username}" (ID: ${user.id}) logged in successfully.`);
                 res.json({
                     success: true,
                     user: { id: user.id, username: user.username, isAdmin: user.isAdmin === 1, canUseDvr: user.canUseDvr === 1 }
                 });
-            } else {
-                console.warn(`[AUTH_API] Login failed for username "${username}": Incorrect password.`);
-                res.status(401).json({ error: "Invalid username or password." });
-            }
+            });
         });
     });
 });
@@ -1883,7 +2503,7 @@ app.post('/api/auth/logout', (req, res) => {
 });
 
 // --- NEW/OPTIMIZED ENDPOINT FOR GROUP FILTERING (with Caching & Refresh) ---
-app.post('/api/sources/fetch-groups', requireAuth, async (req, res) => {
+app.post('/api/sources/fetch-groups', requireAuth, requireAdmin, async (req, res) => {
     // --- ADDITION: Get refresh flag from query or body ---
     const forceRefresh = req.query.refresh === 'true' || req.body.refresh === true;
     const { type, url, xc, sourceId } = req.body; // Added sourceId
@@ -1904,20 +2524,7 @@ app.post('/api/sources/fetch-groups', requireAuth, async (req, res) => {
             sourceToUse = settings.m3uSources.find(s => s.id === sourceId) || settings.epgSources.find(s => s.id === sourceId);
         }
 
-        // --- START CACHE CHECK ---
-        if (!forceRefresh && sourceToUse && sourceToUse.cachedRawPath && fs.existsSync(sourceToUse.cachedRawPath)) {
-            try {
-                console.log(`[API_GROUPS] Using cached raw file: ${sourceToUse.cachedRawPath}`);
-                content = fs.readFileSync(sourceToUse.cachedRawPath, 'utf-8');
-                usedCache = true;
-            } catch (cacheReadError) {
-                console.warn(`[API_GROUPS] Failed to read cache file ${sourceToUse.cachedRawPath}. Will fetch fresh. Error:`, cacheReadError.message);
-                usedCache = false; // Ensure we fetch fresh if cache read fails
-            }
-        }
-        // --- END CACHE CHECK ---
-
-        // --- Fetch if cache wasn't used or refresh was forced ---
+        // XC categories are not the cached M3U live list. Handle them before the cache.
         if (type === 'xc' && xc) {
             const xcInfo = JSON.parse(xc);
             if (!xcInfo.server || !xcInfo.username || !xcInfo.password) {
@@ -1931,6 +2538,23 @@ app.post('/api/sources/fetch-groups', requireAuth, async (req, res) => {
             return res.json({ success: true, groups: allCategories, usedCache: false });
         }
 
+        // After the URL was edited in the form, the cache describes the old provider.
+        const urlChanged = type === 'url' && sourceToUse && sourceToUse.type === 'url' && url && url !== sourceToUse.path;
+
+        // --- START CACHE CHECK ---
+        if (!forceRefresh && !urlChanged && sourceToUse && sourceToUse.cachedRawPath && fs.existsSync(sourceToUse.cachedRawPath)) {
+            try {
+                console.log(`[API_GROUPS] Using cached raw file: ${sourceToUse.cachedRawPath}`);
+                content = fs.readFileSync(sourceToUse.cachedRawPath, 'utf-8');
+                usedCache = true;
+            } catch (cacheReadError) {
+                console.warn(`[API_GROUPS] Failed to read cache file ${sourceToUse.cachedRawPath}. Will fetch fresh. Error:`, cacheReadError.message);
+                usedCache = false; // Ensure we fetch fresh if cache read fails
+            }
+        }
+        // --- END CACHE CHECK ---
+
+        // --- Fetch if cache wasn't used or refresh was forced ---
         if (!usedCache) {
             console.log(`[API_GROUPS] ${forceRefresh ? 'Refresh forced' : 'Cache not used/found'}. Fetching from original source.`);
             if (type === 'url' && url) {
@@ -1988,7 +2612,7 @@ app.post('/api/sources/fetch-groups', requireAuth, async (req, res) => {
 });
 
 app.get('/api/auth/status', (req, res) => {
-    console.log(`[AUTH_API] GET /api/auth/status - Checking session ID: ${req.sessionID}`);
+    console.log('[AUTH_API] GET /api/auth/status');
     if (req.session && req.session.userId) {
         console.log(`[AUTH_API_STATUS] Valid session found for user "${req.session.username}" (ID: ${req.session.userId}). Responding with isLoggedIn: true.`);
         res.json({ isLoggedIn: true, user: { id: req.session.userId, username: req.session.username, isAdmin: req.session.isAdmin, canUseDvr: req.session.canUseDvr } });
@@ -1998,24 +2622,28 @@ app.get('/api/auth/status', (req, res) => {
     }
 });
 // ... existing User Management API Endpoints ...
-app.get('/api/users', requireAdmin, (req, res) => {
+app.get('/api/users', requireAuth, requireAdmin, (req, res) => {
     console.log('[USER_API] Fetching all users.');
     db.all("SELECT id, username, isAdmin, canUseDvr, allowed_sources FROM users ORDER BY username", [], (err, rows) => {
         if (err) {
             console.error('[USER_API] Error fetching users:', err.message);
-            return res.status(500).json({ error: err.message });
+            return res.status(500).json({ error: 'Could not load users.' });
         }
         console.log(`[USER_API] Found ${rows.length} users.`);
         res.json(rows);
     });
 });
 
-app.post('/api/users', requireAdmin, (req, res) => {
+app.post('/api/users', requireAuth, requireAdmin, (req, res) => {
     console.log('[USER_API] Adding new user.');
     const { username, password, isAdmin, canUseDvr, allowed_sources } = req.body;
-    if (!username || !password) {
-        console.warn('[USER_API] Add user failed: Username and/or password missing.');
-        return res.status(400).json({ error: "Username and password are required." });
+    if (!username) {
+        console.warn('[USER_API] Add user failed: Username missing.');
+        return res.status(400).json({ error: "Username is required." });
+    }
+    const problem = passwordProblem(password);
+    if (problem) {
+        return res.status(400).json({ error: problem });
     }
 
     bcrypt.hash(password, saltRounds, (err, hash) => {
@@ -2035,10 +2663,15 @@ app.post('/api/users', requireAdmin, (req, res) => {
     });
 });
 
-app.put('/api/users/:id', requireAdmin, (req, res) => {
+app.put('/api/users/:id', requireAuth, requireAdmin, (req, res) => {
     const { id } = req.params;
     const { username, password, isAdmin, canUseDvr, allowed_sources } = req.body;
     console.log(`[USER_API] Updating user ID: ${id}. Username: ${username}, IsAdmin: ${isAdmin}, CanUseDvr: ${canUseDvr}`);
+
+    if (password) {
+        const problem = passwordProblem(password);
+        if (problem) return res.status(400).json({ error: problem });
+    }
 
     const allowedSourcesStr = allowed_sources ? JSON.stringify(allowed_sources) : null;
 
@@ -2052,7 +2685,7 @@ app.put('/api/users/:id', requireAdmin, (req, res) => {
                 db.run("UPDATE users SET username = ?, password = ?, isAdmin = ?, canUseDvr = ?, allowed_sources = ? WHERE id = ?", [username, hash, isAdmin ? 1 : 0, canUseDvr ? 1 : 0, allowedSourcesStr, id], (err) => {
                     if (err) {
                         console.error(`[USER_API] Error updating user ${id} with new password:`, err.message);
-                        return res.status(500).json({ error: err.message });
+                        return res.status(500).json({ error: 'Could not update user.' });
                     }
                     if (req.session.userId == id) {
                         req.session.username = username;
@@ -2060,6 +2693,8 @@ app.put('/api/users/:id', requireAdmin, (req, res) => {
                         req.session.canUseDvr = canUseDvr;
                         console.log(`[USER_API] Current user's session (ID: ${id}) updated.`);
                     }
+                    userCache.invalidate(id);
+                    if (password) destroyUserSessions(id, req.sessionID);
                     console.log(`[USER_API] User ${id} updated successfully (with password change).`);
                     res.json({ success: true });
                 });
@@ -2068,7 +2703,7 @@ app.put('/api/users/:id', requireAdmin, (req, res) => {
             db.run("UPDATE users SET username = ?, isAdmin = ?, canUseDvr = ?, allowed_sources = ? WHERE id = ?", [username, isAdmin ? 1 : 0, canUseDvr ? 1 : 0, allowedSourcesStr, id], (err) => {
                 if (err) {
                     console.error(`[USER_API] Error updating user ${id} without password change:`, err.message);
-                    return res.status(500).json({ error: err.message });
+                    return res.status(500).json({ error: 'Could not update user.' });
                 }
                 if (req.session.userId == id) {
                     req.session.username = username;
@@ -2076,6 +2711,7 @@ app.put('/api/users/:id', requireAdmin, (req, res) => {
                     req.session.canUseDvr = canUseDvr;
                     console.log(`[USER_API] Current user's session (ID: ${id}) updated.`);
                 }
+                userCache.invalidate(id);
                 console.log(`[USER_API] User ${id} updated successfully (without password change).`);
                 res.json({ success: true });
             });
@@ -2087,7 +2723,7 @@ app.put('/api/users/:id', requireAdmin, (req, res) => {
         db.get("SELECT COUNT(*) as count FROM users WHERE isAdmin = 1", [], (err, row) => {
             if (err) {
                 console.error('[USER_API] Error checking admin count for demotion:', err.message);
-                return res.status(500).json({ error: err.message });
+                return res.status(500).json({ error: 'Could not update user.' });
             }
             if (row.count <= 1) {
                 console.warn(`[USER_API] Cannot demote user ${id}: They are the last administrator.`);
@@ -2101,7 +2737,7 @@ app.put('/api/users/:id', requireAdmin, (req, res) => {
 });
 
 // MODIFIED: User deletion now terminates active streams and forces logout.
-app.delete('/api/users/:id', requireAdmin, (req, res) => {
+app.delete('/api/users/:id', requireAuth, requireAdmin, (req, res) => {
     const idToDelete = parseInt(req.params.id, 10);
     console.log(`[USER_API] Deleting user ID: ${idToDelete}`);
     if (req.session.userId == idToDelete) {
@@ -2133,51 +2769,50 @@ app.delete('/api/users/:id', requireAdmin, (req, res) => {
     db.run("DELETE FROM users WHERE id = ?", idToDelete, function (err) {
         if (err) {
             console.error(`[USER_API] Error deleting user ${idToDelete}:`, err.message);
-            return res.status(500).json({ error: err.message });
+            return res.status(500).json({ error: 'Could not delete user.' });
         }
         if (this.changes === 0) {
             console.warn(`[USER_API] User ${idToDelete} not found for deletion.`);
             return res.status(404).json({ error: 'User not found.' });
         }
+        userCache.invalidate(idToDelete);
+        destroyUserSessions(idToDelete);
         console.log(`[USER_API] User ${idToDelete} deleted successfully from database.`);
         res.json({ success: true });
     });
 });
 // --- Protected IPTV API Endpoints ---
+// The EPG arrives as ready-made JSON text, so it is spliced into the response instead of being serialized again.
+const sendConfig = (req, res, config, epgJson = 'null') => {
+    const settings = { ...config.settings };
+    // Never send the session secret, even to an admin. It is also no longer stored here.
+    delete settings.generatedSessionSecret;
+    if (!req.session.isAdmin) {
+        // Provider credentials and source URLs are needed only by the admin settings page.
+        const stripSourceSecrets = (list) => (list || []).map(({ xc_data, url, path, ...source }) => source);
+        settings.m3uSources = stripSourceSecrets(settings.m3uSources);
+        settings.epgSources = stripSourceSecrets(settings.epgSources);
+    }
+    const body = { ...config, settings };
+    sendJson(req, res, Buffer.from(`${JSON.stringify(body).slice(0, -1)},"epgContent":${epgJson}}`));
+};
+
 app.get('/api/config', requireAuth, async (req, res) => {
     try {
         // ADDED vodMovies and vodSeries
-        let config = { m3uContent: null, epgContent: null, settings: {}, vodMovies: [], vodSeries: [] };
+        let config = { m3uContent: null, settings: {}, vodMovies: [], vodSeries: [] }; // epgContent is added by sendConfig
+        let epgJson;
         let globalSettings = getSettings();
         config.settings = globalSettings;
 
-        // FETCH USER PERMISSIONS
-        let allowedSources = null;
+        // Permissions are already loaded by requireAuth. Fail closed on a malformed row.
+        let allowedSources;
         try {
-            const user = await dbGet(db, "SELECT id, allowed_sources, username, isAdmin FROM users WHERE id = ?", [req.session.userId]);
-            if (user) {
-                console.log(`[DEBUG_API_CONFIG] Fetching config for UserID: ${req.session.userId} (Session: ${req.sessionID})`);
-                if (user.isAdmin || req.session.isAdmin || user.id === 1 || req.session.userId === 1) {
-                    allowedSources = null;
-                    console.log(`[DEBUG_API_CONFIG] User '${user.username}' is admin (full source access).`);
-                } else if (user.allowed_sources) {
-                    try {
-                        const parsed = JSON.parse(user.allowed_sources);
-                        if (parsed && typeof parsed === 'object' && Object.keys(parsed).length > 0) {
-                            allowedSources = parsed;
-                            console.log(`[DEBUG_API_CONFIG] DB allowed_sources for user '${user.username}':`, JSON.stringify(allowedSources, null, 2));
-                        } else {
-                            allowedSources = null;
-                        }
-                    } catch (e) {
-                        allowedSources = null;
-                    }
-                } else {
-                    console.log(`[DEBUG_API_CONFIG] No allowed_sources found for user '${user.username}' (admin/full access).`);
-                }
-            }
-        } catch (dbErr) {
-            console.error("[API] Error fetching user permissions:", dbErr);
+            allowedSources = allowedSourcesFromUser(req.user);
+            console.log(`[DEBUG_API_CONFIG] Config for UserID ${req.session.userId}: ${allowedSources ? 'restricted sources' : 'full source access'}.`);
+        } catch (permErr) {
+            console.error('[API] Error reading user permissions:', permErr);
+            allowedSources = {};
         }
 
         // LOAD M3U
@@ -2233,7 +2868,7 @@ app.get('/api/config', requireAuth, async (req, res) => {
                             currentExtInf = null;
                         }
 
-                    } else if (line.startsWith('http') || (line.startsWith('/') && !line.startsWith('//'))) { // URL or local path
+                    } else if (isPlaylistUrl(line) || (line.startsWith('/') && !line.startsWith('//'))) { // URL or local path
                         if (currentExtInf) {
                             filteredLines.push(currentExtInf);
                             filteredLines.push(line);
@@ -2252,63 +2887,32 @@ app.get('/api/config', requireAuth, async (req, res) => {
         }
 
         // LOAD EPG
-        if (fs.existsSync(LIVE_EPG_JSON_PATH)) {
-            try {
-                const fullEpg = JSON.parse(fs.readFileSync(LIVE_EPG_JSON_PATH, 'utf-8'));
-                if (allowedSources) {
-                    const filteredEpg = {};
-                    for (const channelId in fullEpg) {
-                        const underscoreIndex = channelId.indexOf('_');
-                        if (underscoreIndex !== -1) {
-                            const sourceId = channelId.substring(0, underscoreIndex);
-                            if (allowedSources[sourceId] && allowedSources[sourceId].allowed) {
-                                // For EPG, we can't easily filter by group unless we look up the channel's group from M3U
-                                // But EPG entries don't have group info. 
-                                // However, the frontend matches EPG to M3U channels. 
-                                // If M3U channel is hidden, EPG doesn't matter much, but good to filter for payload size.
-                                // Limiting factor: We don't know the group here easily without re-parsing M3U or having a mapping.
-                                // DECISION: Filter EPG by Source ID only. Granular group filtering happens naturally because the M3U won't have the channel.
-                                filteredEpg[channelId] = fullEpg[channelId];
-                            }
-                        }
-                    }
-                    config.epgContent = filteredEpg;
-                    console.log(`[API] Loaded and FILTERED EPG content for user ${req.session.username}.`);
-                } else {
-                    config.epgContent = fullEpg;
-                    console.log(`[API] Loaded EPG content from ${LIVE_EPG_JSON_PATH}.`);
-                }
-            } catch (parseError) {
-                console.error(`[API] Error parsing merged EPG JSON from ${LIVE_EPG_JSON_PATH}: ${parseError.message}`);
-                config.epgContent = {};
+        epgJson = epgPayload(allowedSources);
+        console.log(epgJson === undefined
+            ? `[API] No merged EPG JSON file found at ${LIVE_EPG_JSON_PATH}.`
+            : `[API] Loaded${allowedSources ? ' and FILTERED' : ''} EPG content from ${LIVE_EPG_JSON_PATH}.`);
+
+        // --- Legacy VOD files ---
+        // The new /api/vod/library endpoint filters by provider. These files carry no
+        // permission data, so restricted users do not get them at all.
+        if (!allowedSources) {
+            if (fs.existsSync(VOD_MOVIES_JSON_PATH)) {
+                try {
+                    config.vodMovies = JSON.parse(fs.readFileSync(VOD_MOVIES_JSON_PATH, 'utf-8'));
+                } catch (e) { }
             }
-        } else {
-            console.log(`[API] No merged EPG JSON file found at ${LIVE_EPG_JSON_PATH}.`);
+            if (fs.existsSync(VOD_SERIES_JSON_PATH)) {
+                try {
+                    config.vodSeries = JSON.parse(fs.readFileSync(VOD_SERIES_JSON_PATH, 'utf-8'));
+                } catch (e) { }
+            }
         }
-
-        // --- NEW: Load VOD Files (Legacy) ---
-        // VOD filtering is complex here as it uses legacy JSON files. 
-        // We will assume VOD is handled by the new /api/vod/library endpoint properly.
-        // But to be safe, we can clear these if legacy mode is active and user is restricted.
-        // For now, loading as is, but frontend uses the library endpoint.
-
-        if (fs.existsSync(VOD_MOVIES_JSON_PATH)) {
-            // ... legacy code kept simple
-            try {
-                config.vodMovies = JSON.parse(fs.readFileSync(VOD_MOVIES_JSON_PATH, 'utf-8'));
-            } catch (e) { }
-        }
-        if (fs.existsSync(VOD_SERIES_JSON_PATH)) {
-            try {
-                config.vodSeries = JSON.parse(fs.readFileSync(VOD_SERIES_JSON_PATH, 'utf-8'));
-            } catch (e) { }
-        }
-        // --- END NEW VOD ---
+        // --- END Legacy VOD ---
 
         db.all(`SELECT key, value FROM user_settings WHERE user_id = ?`, [req.session.userId], (err, rows) => {
             if (err) {
                 console.error("[API] Error fetching user settings:", err);
-                return res.status(200).json(config);
+                return sendConfig(req, res, config, epgJson);
             }
             if (rows) {
                 const userSettings = {};
@@ -2342,7 +2946,7 @@ app.get('/api/config', requireAuth, async (req, res) => {
             console.log(`[API] Serving config with permissions signature: ${userPermissionsSignature}`);
             // --------------------------------
 
-            res.status(200).json(config);
+            sendConfig(req, res, config, epgJson);
         });
 
     } catch (error) {
@@ -2351,165 +2955,81 @@ app.get('/api/config', requireAuth, async (req, res) => {
     }
 });
 
-// --- NEW: VOD Library Endpoint (Reads from DB and builds URLs) ---
-app.get('/api/vod/library', requireAuth, async (req, res) => {
-    console.log('[API_VOD] Request received for /api/vod/library (DB Query)');
+// The XC providers this request may see (with the credentials that go into stream URLs) and the category
+// whitelist per provider. Throws if the permission data cannot be read.
+async function vodAccess(req) {
+    let allowedSources = null;
     try {
-        // FETCH USER PERMISSIONS
-        let allowedSources = null;
-        try {
-            const user = await dbGet(db, "SELECT allowed_sources FROM users WHERE id = ?", [req.session.userId]);
-            if (user && user.allowed_sources) {
-                allowedSources = JSON.parse(user.allowed_sources);
-            }
-        } catch (dbErr) {
-            console.error("[API_VOD] Error fetching user permissions:", dbErr);
+        const user = await userCache.get(req.session.userId);
+        if (user && user.isAdmin !== 1 && user.allowed_sources) {
+            allowedSources = JSON.parse(user.allowed_sources);
+        } else if (!user) {
+            allowedSources = {};
         }
+    } catch (dbErr) {
+        console.error("[API_VOD] Error fetching user permissions:", dbErr);
+        // Fail closed: broken permission data must not grant the whole library.
+        allowedSources = {};
+    }
 
-        // 1. Get active XC providers from settings
-        const settings = getSettings();
-        let activeXcProviders = settings.m3uSources.filter(s => s.isActive && s.type === 'xc');
-
-        // FILTER PROVIDERS
-        if (allowedSources) {
-            activeXcProviders = activeXcProviders.filter(p => {
-                if (allowedSources[p.id]) {
-                    // Check if specifically allowed
-                    if (allowedSources[p.id].allowed) {
-                        return true;
-                    }
-                    return false;
-                }
-                // If allowedSources exists but source not in it, assume blocked (whitelist approach)
-                return false;
-            });
-            console.log(`[API_VOD] Filtered VOD providers for user ${req.session.username}. Allowed: ${activeXcProviders.map(p => p.name).join(', ')}`);
-        }
-
-        const providerMap = new Map();
-        activeXcProviders.forEach(p => {
+    const providerMap = new Map();
+    getSettings().m3uSources
+        .filter(s => s.isActive && s.type === 'xc' && (!allowedSources || allowedSources[s.id]?.allowed))
+        .forEach(p => {
             try {
                 const xcInfo = JSON.parse(p.xc_data);
                 const url = new URL(xcInfo.server);
                 providerMap.set(p.id, {
                     baseUrl: `${url.protocol}//${url.host}`,
                     username: xcInfo.username,
-                    password: xcInfo.password
+                    password: xcInfo.password,
+                    // An empty whitelist means every category.
+                    groups: allowedSources?.[p.id]?.groups?.length ? allowedSources[p.id].groups : null,
                 });
             } catch (e) {
                 console.error(`[API_VOD] Skipping provider ${p.name}, invalid XC data: ${e.message}`);
             }
         });
-        const activeProviderIds = Array.from(providerMap.keys());
-        if (activeProviderIds.length === 0) {
-            console.log('[API_VOD] No active XC providers found. Returning empty library.');
-            return res.json({ movies: [], series: [] });
-        }
+    return { providerMap, scope: Array.from(providerMap, ([id, p]) => ({ id, groups: p.groups })) };
+}
 
-        const providerIdPlaceholders = activeProviderIds.map(() => '?').join(',');
-
-        // 2. Fetch all movies from active providers
-        const movieQuery = `
-            SELECT m.provider_unique_id, m.name, m.year, m.description, m.logo, m.tmdb_id, m.imdb_id, m.category_name, r.stream_id, r.container_extension, r.provider_id
-            FROM movies m
-            JOIN provider_movie_relations r ON m.id = r.movie_id
-            WHERE r.provider_id IN (${providerIdPlaceholders})
-            ORDER BY m.name
-        `;
-        const movies = await dbAll(db, movieQuery, activeProviderIds);
-
-        const processedMovies = movies.map(m => {
-            const provider = providerMap.get(m.provider_id);
-            if (!provider) return null; // Skip if provider is not active
-
-            // PERMISSION CHECK: Filter by category if strict groups are defined
-            if (allowedSources) {
-                const perms = allowedSources[m.provider_id];
-                if (perms && perms.allowed) {
-                    const allowedGroups = perms.groups || [];
-                    // If whitelist exists (length > 0) AND this category is NOT in it, skip
-                    if (allowedGroups.length > 0 && !allowedGroups.includes(m.category_name)) {
-                        return null;
-                    }
-                }
+// --- VOD library: one page at a time. Search, type, category and sort run in SQL, so loading the page
+// costs the same whether the catalog holds 2k or 200k titles. ---
+app.get('/api/vod/library', requireAuth, async (req, res) => {
+    try {
+        const { providerMap, scope } = await vodAccess(req);
+        const { type, group, q, page, limit } = req.query;
+        const { rows, total } = await vodStore.listTitles({
+            providers: scope, type, group: group && String(group), q: q && String(q).trim(), page, limit,
+        });
+        const items = rows.map(r => {
+            const item = { id: r.provider_unique_id, type: r.type, name: r.name, year: r.year, description: r.description, logo: r.logo, group: r.category_name };
+            if (r.type === 'movie') {
+                const p = providerMap.get(r.provider_id);
+                item.url = `${p.baseUrl}/movie/${p.username}/${p.password}/${r.stream_id}.${r.container_extension || 'mp4'}`;
             }
-
-            const ext = m.container_extension || 'mp4';
-            // Build the full playable URL
-            const url = `${provider.baseUrl}/movie/${provider.username}/${provider.password}/${m.stream_id}.${ext}`;
-            return {
-                id: m.provider_unique_id, // Use the stable provider_unique_id
-                name: m.name,
-                year: m.year,
-                description: m.description,
-                logo: m.logo,
-                tmdb_id: m.tmdb_id,
-                imdb_id: m.imdb_id,
-                url: url, // The all-important URL
-                type: 'movie',
-                group: m.category_name
-            };
-        }).filter(Boolean); // Filter out null entries
-        console.log(`[API_VOD] Fetched ${processedMovies.length} movies from DB.`);
-
-        // 3. Fetch all series headers from active providers
-        // Added r.provider_id to SELECT so we can filter permissions
-        const seriesQuery = `
-            SELECT DISTINCT s.provider_unique_id, s.name, s.year, s.description, s.logo, s.tmdb_id, s.imdb_id, s.category_name, r.provider_id
-            FROM series s
-            JOIN provider_series_relations r ON s.id = r.series_id
-            WHERE r.provider_id IN (${providerIdPlaceholders})
-            ORDER BY s.name
-        `;
-        const seriesList = await dbAll(db, seriesQuery, activeProviderIds);
-
-        // Process series headers with permission checks
-        const processedSeries = seriesList.map(series => {
-            // PERMISSION CHECK: Filter by category if strict groups are defined
-            if (allowedSources) {
-                const perms = allowedSources[series.provider_id];
-                if (perms && perms.allowed) {
-                    const allowedGroups = perms.groups || [];
-                    // If whitelist exists (length > 0) AND this category is NOT in it, skip
-                    if (allowedGroups.length > 0 && !allowedGroups.includes(series.category_name)) {
-                        return null;
-                    }
-                }
-            }
-
-            return {
-                ...series,
-                type: 'series',
-                id: series.provider_unique_id, // Use the stable provider_unique_id
-                group: series.category_name
-                // seasons property removed as it is lazy loaded
-            };
-        }).filter(Boolean);
-
-        console.log(`[API_VOD] Processed ${processedSeries.length} series headers (filtered). Episodes will be lazy-loaded.`);
-
-        // 5. Respond
-        // 5. Respond
-        // FIX: Derive categories from the filtered content to ensure we only show relevant groups
-        const uniqueCategories = new Set();
-        processedMovies.forEach(m => {
-            if (m.group) uniqueCategories.add(m.group);
+            return item;
         });
-        processedSeries.forEach(s => {
-            if (s.group) uniqueCategories.add(s.group);
-        });
-
-        const categoryNames = Array.from(uniqueCategories).sort();
-
-        res.json({
-            movies: processedMovies,
-            series: processedSeries,
-            categories: categoryNames
-        });
-
+        await sendJson(req, res, Buffer.from(JSON.stringify({ items, total })));
     } catch (error) {
         console.error(`[API_VOD] Error fetching VOD library from DB: ${error.message}`, error);
         res.status(500).json({ error: "Could not retrieve VOD library from database." });
+    }
+});
+
+// The category lists for the filter dropdown, { movies: [...], series: [...] }. They only change when the catalog
+// does, so the serialized answer is kept per permission scope until a refresh invalidates it.
+app.get('/api/vod/groups', requireAuth, async (req, res) => {
+    try {
+        const { scope } = await vodAccess(req);
+        const body = await vodLibraryCache.get(JSON.stringify(scope), async () => {
+            const groups = await vodStore.listGroups(scope);
+            return { movies: groups.movie, series: groups.series };
+        });
+        await sendJson(req, res, body);
+    } catch (error) {
+        console.error(`[API_VOD] Error fetching VOD categories from DB: ${error.message}`, error);
+        res.status(500).json({ error: "Could not retrieve VOD categories from database." });
     }
 });
 
@@ -2522,9 +3042,13 @@ async function getStreamDurationSeconds(streamUrl, userAgentHeader) {
         return vodDurationCache.get(streamUrl);
     }
     return new Promise((resolve) => {
-        const uaFlag = userAgentHeader ? `-user_agent "${userAgentHeader.replace(/"/g, '')}"` : '';
-        const cmd = `ffprobe ${uaFlag} -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${streamUrl}"`;
-        exec(cmd, { timeout: 8000 }, (error, stdout) => {
+        if (!isAllowedStreamUrl(streamUrl)) {
+            return resolve(null);
+        }
+        // Pass arguments as an argv array (no shell) so the URL cannot run shell commands.
+        const args = userAgentHeader ? ['-user_agent', userAgentHeader] : [];
+        args.push('-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', streamUrl);
+        execFile('ffprobe', args, { timeout: 8000 }, (error, stdout) => {
             if (error || !stdout) {
                 return resolve(null);
             }
@@ -2548,6 +3072,11 @@ app.get('/api/vod/duration', requireAuth, async (req, res) => {
     const { url } = req.query;
     if (!url) {
         return res.status(400).json({ error: "Missing required 'url' parameter" });
+    }
+    try {
+        await assertSafeMediaStreamUrl(url);
+    } catch (err) {
+        return res.status(400).json({ error: 'URL is not allowed.' });
     }
     try {
         const settings = getSettings();
@@ -2584,38 +3113,31 @@ app.get('/api/vod/series/:seriesId', requireAuth, async (req, res) => {
         `, [numericSeriesId]);
 
         let episodesToReturn = existingEpisodes;
-        const needsEpisodeFetch = existingEpisodes.length === 0 || existingEpisodes.some(ep => !ep.duration && !ep.duration_secs);
+        // Episodes come from the provider once. A provider that never reports durations would otherwise be asked on every open.
+        const needsEpisodeFetch = existingEpisodes.length === 0 || (!seriesInfo.episodes_fetched_at && existingEpisodes.some(ep => !ep.duration && !ep.duration_secs));
+
+        // Permission is checked before anything is returned, cached episodes or not.
+        // An empty whitelist means no providers; a missing column keeps legacy full access.
+        const relation = await dbGet(db, "SELECT provider_id, external_series_id FROM provider_series_relations WHERE series_id = ? LIMIT 1", [numericSeriesId]);
+        let allowedSources = null;
+        try {
+            const user = await userCache.get(req.session.userId);
+            if (user && user.isAdmin !== 1 && user.allowed_sources) allowedSources = JSON.parse(user.allowed_sources);
+            else if (!user) allowedSources = {};
+        } catch (dbErr) {
+            console.error("[API_VOD] Error checking user permissions:", dbErr);
+            return res.status(500).json({ error: "Could not check access to this series." });
+        }
+        if (allowedSources && !(relation && allowedSources[relation.provider_id]?.allowed)) {
+            console.warn(`[API_VOD_SERIES] Access denied for user ${req.session.username} to provider ${relation ? relation.provider_id : '(none)'}`);
+            return res.status(403).json({ error: "Access denied to this series." });
+        }
 
         // 3. If no episodes in DB or missing metadata, fetch from XC API and save/update
         if (needsEpisodeFetch) {
             console.log(`[API_VOD_SERIES] Fetching details and episode metadata from provider for Series ID ${numericSeriesId}...`);
 
-            // Find the provider details for this series
-            const relation = await dbGet(db, "SELECT provider_id, external_series_id FROM provider_series_relations WHERE series_id = ? LIMIT 1", [numericSeriesId]);
             if (relation) {
-                // CHECK PERMISSIONS
-                let permitted = true;
-                try {
-                    const user = await dbGet(db, "SELECT allowed_sources FROM users WHERE id = ?", [req.session.userId]);
-                    if (user && user.allowed_sources) {
-                        const allowedSources = JSON.parse(user.allowed_sources);
-                        if (allowedSources[relation.provider_id] && !allowedSources[relation.provider_id].allowed) {
-                            console.warn(`[API_VOD_SERIES] Access denied for user ${req.session.username} to provider ${relation.provider_id}`);
-                            permitted = false;
-                        }
-                        if (!allowedSources[relation.provider_id]) {
-                            console.warn(`[API_VOD_SERIES] Access denied (not in list) for user ${req.session.username} to provider ${relation.provider_id}`);
-                            permitted = false;
-                        }
-                    }
-                } catch (dbErr) {
-                    console.error("[API_VOD] Error checking user permissions:", dbErr);
-                }
-
-                if (!permitted && existingEpisodes.length === 0) {
-                    return res.status(403).json({ error: "Access denied to this series." });
-                }
-
                 const settings = getSettings();
                 const providerConfig = settings.m3uSources.find(s => s.id === relation.provider_id);
                 if (providerConfig && providerConfig.type === 'xc' && providerConfig.xc_data) {
@@ -2638,7 +3160,10 @@ app.get('/api/vod/series/:seriesId', requireAuth, async (req, res) => {
                             const director = seriesDetails.info.director || seriesInfo.director || null;
                             const cast = seriesDetails.info.cast || seriesInfo.cast || null;
                             if ((director && director !== seriesInfo.director) || (cast && cast !== seriesInfo.cast)) {
-                                db.run("UPDATE series SET director = COALESCE(?, director), cast = COALESCE(?, cast) WHERE id = ?", [director, cast, numericSeriesId], () => { });
+                                // "cast" is quoted because CAST is an SQL keyword: unquoted, this statement was a syntax error whose failure the empty callback hid.
+                                db.run('UPDATE series SET director = COALESCE(?, director), "cast" = COALESCE(?, "cast") WHERE id = ?', [director, cast, numericSeriesId], (updateErr) => {
+                                    if (updateErr) console.error(`[API_VOD_SERIES] Could not save director/cast for Series ID ${numericSeriesId}: ${updateErr.message}`);
+                                });
                                 seriesInfo.director = director || seriesInfo.director;
                                 seriesInfo.cast = cast || seriesInfo.cast;
                             }
@@ -2646,63 +3171,35 @@ app.get('/api/vod/series/:seriesId', requireAuth, async (req, res) => {
 
                         if (seriesDetails && seriesDetails.episodes && typeof seriesDetails.episodes === 'object') {
                             console.log(`[API_VOD_SERIES] Processing episodes and metadata from provider for Series ID ${numericSeriesId}...`);
-                            const episodeInsertStmt = db.prepare(`INSERT OR IGNORE INTO episodes (series_id, season_num, episode_num, name, description, air_date, duration, duration_secs, tmdb_id, imdb_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-                            const episodeRelationInsertStmt = db.prepare(`INSERT OR IGNORE INTO provider_episode_relations (provider_id, episode_id, provider_stream_id, container_extension, last_seen) VALUES (?, ?, ?, ?, ?)`);
-                            const lastSeen = new Date().toISOString();
-
-                            await dbRun(db, "BEGIN TRANSACTION");
-                            try {
-                                for (const seasonNum in seriesDetails.episodes) {
-                                    const epList = seriesDetails.episodes[seasonNum];
-                                    if (!Array.isArray(epList)) continue;
-                                    for (const epData of epList) {
-                                        const actualSeason = epData.season !== undefined ? epData.season : parseInt(seasonNum, 10);
-                                        const actualEpisode = epData.episode_num !== undefined ? epData.episode_num : 1;
-                                        const durationSecs = parseInt(epData.info?.duration_secs || epData.duration_secs || 0, 10) || null;
-                                        const durationStr = epData.info?.duration || epData.duration || (durationSecs ? `${Math.floor(durationSecs / 60)} min` : null);
-                                        const airDate = epData.info?.releasedate || epData.info?.air_date || epData.releasedate || epData.air_date || null;
-                                        const plot = epData.info?.plot || epData.plot || null;
-                                        const title = epData.title || epData.name || `Episode ${actualEpisode}`;
-
-                                        let episodeId;
-                                        const existingEp = await dbGet(db, `SELECT id, duration, duration_secs, air_date FROM episodes WHERE series_id = ? AND season_num = ? AND episode_num = ?`, [numericSeriesId, actualSeason, actualEpisode]);
-
-                                        if (existingEp) {
-                                            episodeId = existingEp.id;
-                                            if ((durationSecs || durationStr || airDate) && (!existingEp.duration && !existingEp.duration_secs)) {
-                                                await new Promise((resolve) => {
-                                                    db.run("UPDATE episodes SET duration = COALESCE(?, duration), duration_secs = COALESCE(?, duration_secs), air_date = COALESCE(air_date, ?) WHERE id = ?",
-                                                        [durationStr, durationSecs, airDate, episodeId],
-                                                        () => resolve()
-                                                    );
-                                                });
-                                            }
-                                        } else {
-                                            const epResult = await new Promise((resolve, reject) => {
-                                                episodeInsertStmt.run(numericSeriesId, actualSeason, actualEpisode, title, plot, airDate, durationStr, durationSecs, null, null, function (err) {
-                                                    if (err) reject(err);
-                                                    else resolve(this);
-                                                });
-                                            });
-                                            episodeId = epResult.lastID;
-                                        }
-
-                                        await new Promise((resolve, reject) => {
-                                            episodeRelationInsertStmt.run(relation.provider_id, episodeId, String(epData.id), epData.container_extension || 'mp4', lastSeen, function (err) {
-                                                if (err) reject(err);
-                                                else resolve(this);
-                                            });
-                                        });
-                                    }
+                            const toInt = (value) => Number.parseInt(value, 10);
+                            const episodeRows = [];
+                            for (const seasonNum in seriesDetails.episodes) {
+                                const epList = seriesDetails.episodes[seasonNum];
+                                if (!Array.isArray(epList)) continue;
+                                for (const epData of epList) {
+                                    const actualSeason = toInt(epData.season !== undefined ? epData.season : seasonNum);
+                                    const actualEpisode = toInt(epData.episode_num !== undefined ? epData.episode_num : 1);
+                                    if (!Number.isFinite(actualSeason) || !Number.isFinite(actualEpisode) || epData.id === undefined || epData.id === null) continue;
+                                    const durationSecs = parseInt(epData.info?.duration_secs || epData.duration_secs || 0, 10) || null;
+                                    episodeRows.push({
+                                        season: actualSeason,
+                                        episode: actualEpisode,
+                                        name: epData.title || epData.name || `Episode ${actualEpisode}`,
+                                        description: epData.info?.plot || epData.plot || null,
+                                        airDate: epData.info?.releasedate || epData.info?.air_date || epData.releasedate || epData.air_date || null,
+                                        duration: epData.info?.duration || epData.duration || (durationSecs ? `${Math.floor(durationSecs / 60)} min` : null),
+                                        durationSecs,
+                                        streamId: epData.id,
+                                        containerExtension: epData.container_extension
+                                    });
                                 }
-                                await dbRun(db, "COMMIT");
+                            }
+
+                            try {
+                                await vodStore.saveEpisodes(numericSeriesId, relation.provider_id, episodeRows);
                                 console.log(`[API_VOD_SERIES] Successfully updated episodes and metadata for Series ID ${numericSeriesId}.`);
                             } catch (dbError) {
-                                await dbRun(db, "ROLLBACK");
                                 console.error(`[API_VOD_SERIES] DB Error saving episodes for Series ID ${numericSeriesId}: ${dbError.message}`);
-                            } finally {
-                                episodeInsertStmt.finalize();
-                                episodeRelationInsertStmt.finalize();
                             }
 
                             episodesToReturn = await dbAll(db, `
@@ -2723,7 +3220,7 @@ app.get('/api/vod/series/:seriesId', requireAuth, async (req, res) => {
         // 4. Build the response structure
         const seasons = new Map();
         const settings = getSettings();
-        const activeXcProviders = settings.m3uSources.filter(s => s.isActive && s.type === 'xc');
+        const activeXcProviders = settings.m3uSources.filter(s => s.isActive && s.type === 'xc' && (!allowedSources || allowedSources[s.id]?.allowed));
         const providerMap = new Map();
         activeXcProviders.forEach(p => {
             try {
@@ -2781,6 +3278,127 @@ app.get('/api/vod/series/:seriesId', requireAuth, async (req, res) => {
 });
 // --- END NEW ENDPOINT ---
 
+// --- VOD downloads: resolve the provider URL server-side, never trust a client URL ---
+let activeVodDownloads = 0;
+
+function vodProviderMap(settings) {
+    const map = new Map();
+    (settings.m3uSources || []).filter(s => s.isActive && s.type === 'xc').forEach((source) => {
+        try {
+            const xc = JSON.parse(source.xc_data);
+            const url = new URL(xc.server);
+            map.set(source.id, {
+                baseUrl: `${url.protocol}//${url.host}`,
+                username: xc.username,
+                password: xc.password,
+            });
+        } catch (e) { }
+    });
+    return map;
+}
+
+function readAllowedSources(user) {
+    if (!user?.allowed_sources) return null;
+    try {
+        const parsed = JSON.parse(user.allowed_sources);
+        return parsed && Object.keys(parsed).length ? parsed : null;
+    } catch (e) {
+        return null;
+    }
+}
+
+function isVodProviderAllowed(allowedSources, providerId, category) {
+    if (!allowedSources) return true;
+    const perms = allowedSources[providerId];
+    if (!perms?.allowed) return false;
+    const groups = perms.groups || [];
+    return groups.length === 0 || groups.includes(category);
+}
+
+async function resolveVodDownload(mediaType, id, userId) {
+    const settings = getSettings();
+    const providers = vodProviderMap(settings);
+    const user = await userCache.get(userId);
+    const allowedSources = readAllowedSources(user);
+    let rows = [];
+    if (mediaType === 'movie') {
+        rows = await dbAll(db, `
+            SELECT m.name, m.category_name, r.provider_id, r.stream_id, r.container_extension
+            FROM movies m JOIN provider_movie_relations r ON m.id = r.movie_id
+            WHERE m.provider_unique_id = ?`, [id]);
+    } else {
+        rows = await dbAll(db, `
+            SELECT e.name, e.season_num, e.episode_num, s.name AS series_name, s.category_name,
+                   r.provider_id, r.provider_stream_id AS stream_id, r.container_extension
+            FROM episodes e
+            JOIN series s ON s.id = e.series_id
+            JOIN provider_episode_relations r ON r.episode_id = e.id
+            WHERE e.id = ?`, [id]);
+    }
+    const row = rows.find(candidate => providers.has(candidate.provider_id) &&
+        isVodProviderAllowed(allowedSources, candidate.provider_id, candidate.category_name));
+    if (!row) return null;
+    const provider = providers.get(row.provider_id);
+    const ext = row.container_extension || 'mp4';
+    const base = mediaType === 'movie'
+        ? `${provider.baseUrl}/movie/${encodeURIComponent(provider.username)}/${encodeURIComponent(provider.password)}/${encodeURIComponent(row.stream_id)}.${ext}`
+        : `${provider.baseUrl}/series/${encodeURIComponent(provider.username)}/${encodeURIComponent(provider.password)}/${encodeURIComponent(row.stream_id)}.${ext}`;
+    const displayName = mediaType === 'movie'
+        ? row.name
+        : `${row.series_name} S${String(row.season_num).padStart(2, '0')}E${String(row.episode_num).padStart(2, '0')} - ${row.name}`;
+    return { url: base, filename: sanitizeDownloadFilename(displayName, ext), userAgent: (settings.userAgents || []).find(ua => ua.id === settings.activeUserAgentId)?.value };
+}
+
+async function handleVodDownload(req, res, mediaType) {
+    const settings = getSettings();
+    if (!settings.downloads?.enabled) return res.status(403).json({ error: 'Downloads are disabled.' });
+    const max = settings.downloads.maxConcurrent || 2;
+    if (activeVodDownloads >= max) return res.status(429).json({ error: 'Too many active downloads. Try again shortly.' });
+
+    let counted = false;
+    let releaseDownload = null;
+    try {
+        const item = await resolveVodDownload(mediaType, req.params.id, req.session.userId);
+        if (!item) return res.status(404).json({ error: 'VOD item not found or not authorized.' });
+        await assertSafeMediaUrl(item.url, ['http:', 'https:']);
+        activeVodDownloads++;
+        counted = true;
+        let finished = false;
+        let upstreamResponse = null;
+        const finish = () => { if (!finished) { finished = true; activeVodDownloads = Math.max(0, activeVodDownloads - 1); } };
+        releaseDownload = finish;
+        req.on('close', () => {
+            finish();
+            if (upstreamResponse) upstreamResponse.destroy();
+        });
+        const { response } = await safeGet(item.url, { headers: item.userAgent ? { 'User-Agent': item.userAgent } : {}, timeout: 30000 });
+        upstreamResponse = response;
+        response.setTimeout(60000, () => response.destroy(new Error('Provider download stalled.')));
+        if (res.destroyed) {
+            finish();
+            response.destroy();
+            return;
+        }
+        res.setHeader('Content-Type', response.headers['content-type'] || 'application/octet-stream');
+        if (response.headers['content-length']) res.setHeader('Content-Length', response.headers['content-length']);
+        const asciiName = item.filename.replace(/[^\x20-\x7e]/g, '_');
+        res.setHeader('Content-Disposition', `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(item.filename)}`);
+        res.on('close', () => { finish(); response.destroy(); });
+        response.on('error', () => { finish(); if (!res.headersSent) res.status(502).end(); else res.destroy(); });
+        response.pipe(res);
+        response.on('end', finish);
+    } catch (error) {
+        if (releaseDownload) releaseDownload();
+        else if (counted) activeVodDownloads = Math.max(0, activeVodDownloads - 1);
+        console.error(`[VOD_DOWNLOAD] ${mediaType} ${req.params.id} failed:`, error.message);
+        if (!res.headersSent) res.status(502).json({ error: 'Could not fetch this VOD from the provider.' });
+        else res.destroy();
+    }
+}
+
+app.get('/api/vod/download/movie/:id', requireAuth, (req, res) => handleVodDownload(req, res, 'movie'));
+app.get('/api/vod/download/episode/:id', requireAuth, (req, res) => handleVodDownload(req, res, 'episode'));
+
 // --- NEW: VOD Categories Endpoint ---
 app.get('/api/vod/categories', requireAuth, async (req, res) => {
     console.log('[API_VOD] Request received for /api/vod/categories');
@@ -2805,11 +3423,12 @@ const upload = multer({
         filename: (req, file, cb) => {
             cb(null, `${file.fieldname}-${Date.now()}${path.extname(file.originalname)}`);
         }
-    })
+    }),
+    limits: { fileSize: 50 * 1024 * 1024, files: 1 },
 });
 
 
-app.post('/api/sources', requireAuth, upload.single('sourceFile'), async (req, res) => {
+app.post('/api/sources', requireAuth, requireAdmin, upload.single('sourceFile'), async (req, res) => {
     // ADD selectedGroups to the destructured body
     const { sourceType, name, url, isActive, id, refreshHours, xc, selectedGroups } = req.body;
 
@@ -2906,6 +3525,7 @@ app.post('/api/sources', requireAuth, upload.single('sourceFile'), async (req, r
         // Case 1: Type changed FROM XC to something else (URL or File)
         if (wasXc && !isNowXc) {
             const epgIdToDelete = `epg_for_${id}`;
+            fs.rmSync(path.join(RAW_CACHE_DIR, `raw_${epgIdToDelete}.epg_cache`), { force: true });
             const initialEpgCount = settings.epgSources.length;
             settings.epgSources = settings.epgSources.filter(epg => epg.id !== epgIdToDelete);
             if (settings.epgSources.length < initialEpgCount) {
@@ -3094,12 +3714,12 @@ app.post('/api/sources', requireAuth, upload.single('sourceFile'), async (req, r
 
         saveSettings(settings);
         console.log(`[SOURCES_API] New source "${name}" added successfully (ID: ${newSource.id}).`);
-        res.json({ success: true, message: 'Source added successfully.', settings: getSettings() });
+        res.json({ success: true, message: 'Source added successfully.', id: newSource.id, settings: getSettings() });
     }
 });
 
 
-app.put('/api/sources/:sourceType/:id', requireAuth, (req, res) => {
+app.put('/api/sources/:sourceType/:id', requireAuth, requireAdmin, (req, res) => {
     const { sourceType, id } = req.params;
     const { name, path: newPath, isActive } = req.body;
     console.log(`[SOURCES_API] Partial update source ID: ${id}, Type: ${sourceType}, isActive: ${isActive}`);
@@ -3126,7 +3746,7 @@ app.put('/api/sources/:sourceType/:id', requireAuth, (req, res) => {
     res.json({ success: true, message: 'Source updated.', settings: getSettings() });
 });
 
-app.delete('/api/sources/:sourceType/:id', requireAuth, async (req, res) => {
+app.delete('/api/sources/:sourceType/:id', requireAuth, requireAdmin, async (req, res) => {
     const { sourceType, id } = req.params;
     console.log(`[SOURCES_API] Deleting source ID: ${id}, Type: ${sourceType}`);
 
@@ -3165,6 +3785,7 @@ app.delete('/api/sources/:sourceType/:id', requireAuth, async (req, res) => {
     // --- NEW: Automatically delete the managed EPG when an XC source is deleted ---
     if (sourceType === 'm3u' && source && source.type === 'xc') {
         const epgIdToDelete = `epg_for_${id}`;
+        fs.rmSync(path.join(RAW_CACHE_DIR, `raw_${epgIdToDelete}.epg_cache`), { force: true });
         const initialEpgCount = settings.epgSources.length;
         settings.epgSources = settings.epgSources.filter(epg => epg.id !== epgIdToDelete);
         if (settings.epgSources.length < initialEpgCount) {
@@ -3180,20 +3801,9 @@ app.delete('/api/sources/:sourceType/:id', requireAuth, async (req, res) => {
     if (sourceType === 'm3u' && source.type === 'xc') {
         try {
             console.log(`[SOURCES_API] Deleting VOD relations for provider: ${id}`);
-            await dbRun(db, "BEGIN TRANSACTION");
-            await dbRun(db, `DELETE FROM provider_movie_relations WHERE provider_id = ?`, [id]);
-            await dbRun(db, `DELETE FROM provider_series_relations WHERE provider_id = ?`, [id]);
-            await dbRun(db, `DELETE FROM provider_episode_relations WHERE provider_id = ?`, [id]);
-
-            // Cleanup orphans
-            await dbRun(db, `DELETE FROM movies WHERE id NOT IN (SELECT DISTINCT movie_id FROM provider_movie_relations)`);
-            await dbRun(db, `DELETE FROM series WHERE id NOT IN (SELECT DISTINCT series_id FROM provider_series_relations)`);
-            await dbRun(db, `DELETE FROM episodes WHERE id NOT IN (SELECT DISTINCT episode_id FROM provider_episode_relations)`);
-
-            await dbRun(db, "COMMIT");
+            await vodStore.removeProvider(id);
             console.log(`[SOURCES_API] Successfully cleaned up VOD data for provider: ${id}`);
         } catch (dbErr) {
-            await dbRun(db, "ROLLBACK");
             console.error(`[SOURCES_API] Error cleaning up VOD data for provider ${id}:`, dbErr.message);
         }
     }
@@ -3202,33 +3812,218 @@ app.delete('/api/sources/:sourceType/:id', requireAuth, async (req, res) => {
     res.json({ success: true, message: 'Source deleted.', settings: getSettings() });
 });
 
-app.post('/api/process-sources', requireAuth, async (req, res) => {
-    console.log('[API] Received request to /api/process-sources (manual trigger).');
+app.post('/api/process-sources', requireAuth, requireAdmin, async (req, res) => {
+    const t0 = Date.now();
+    console.log(`[API] Received request to /api/process-sources (manual trigger). via=${req.headers.via || 'n/a'} x-forwarded-for=${req.headers['x-forwarded-for'] || 'n/a'}`);
+    const { sourceId } = req.body || {}; // optional: refresh only this source
+    const settings = getSettings();
+    if (sourceId && ![...settings.m3uSources, ...settings.epgSources].some(s => s.id === sourceId && s.isActive)) {
+        return res.status(404).json({ error: 'Active source not found.' });
+    }
+    // Answer now: a run can outlast a reverse proxy's timeout (504 in the browser). Progress and the outcome
+    // reach the page through the processing-status events.
+    res.status(202).json({ success: true, message: 'Processing started.' });
     try {
-        const result = await processAndMergeSources(req); // <-- MODIFIED: Pass req
+        // An XC source is refreshed together with its managed EPG.
+        const result = await runSourceProcessing(req, sourceId && [sourceId, `epg_for_${sourceId}`]);
 
-        if (result.success) {
-            fs.writeFileSync(SETTINGS_PATH, JSON.stringify(result.updatedSettings, null, 2));
-            console.log('[API] Source processing completed and settings saved (manual trigger).');
-            res.json({ success: true, message: 'Sources merged successfully.' });
-        } else {
-            res.status(500).json({ error: result.message || 'Failed to process sources.' });
-        }
+        // Save the successful sources even when another one failed.
+        saveProcessedSettings(result.updatedSettings);
+        console.log(`[API] Source processing completed and settings saved (manual trigger) in ${Date.now() - t0}ms.`);
     }
     catch (error) {
         console.error("[API] Error during manual source processing:", error);
         sendProcessingStatus(req, `A critical error occurred: ${error.message}`, 'error'); // <-- MODIFIED
-        res.status(500).json({ error: 'Failed to process sources. Check server logs.' });
     }
 });
 
 
-app.post('/api/save/settings', requireAuth, async (req, res) => {
+// --- Manual EPG assignment (admin) ---
+// Search what the guides declare; empty q lists the first few.
+app.get('/api/epg/channels', requireAuth, requireAdmin, (req, res) => {
+    const q = String(req.query.q || '').trim();
+    const limit = Math.min(parseInt(req.query.limit, 10) || 30, 100);
+    res.json(q ? suggestEpg(q, limit) : (readEpgChannels() || NO_EPG_CHANNELS).slice(0, limit));
+});
+
+// Best guess per channel, saved to the suggestion store so refresh/restart and re-runs lose nothing.
+// Capped per call (a search is a few ms): the client sends big lists in batches so the server stays responsive.
+// With `llm`, channels the name search is not sure about are put to a small model on OpenRouter, choosing among
+// the search's own top candidates. Only those channel and guide names leave the server.
+const MAX_SUGGEST_BATCH = 300;
+const AI_CONFIDENCE = 0.8; // a model's pick has no score: shown, but never part of "accept all confident"
+
+// Per-chunk suggest, shared by the single-shot endpoint and the background job.
+const suggestFor = (items, withAi) => {
+    const { apiKey, model } = readAiConfig() || {};
+    return suggestChunk(items, { suggestName: suggestEpg, bestOf: bestMatch, pickWithLlm, withAi, apiKey, model, CONFIDENT, AI_CONFIDENCE });
+};
+
+app.post('/api/epg/suggest', requireAuth, requireAdmin, async (req, res) => {
+    const { channelIds, llm } = req.body || {};
+    if (!Array.isArray(channelIds) || channelIds.length > MAX_SUGGEST_BATCH) {
+        return res.status(400).json({ error: `channelIds must be a list of at most ${MAX_SUGGEST_BATCH}.` });
+    }
+    if (llm && !(readAiConfig()?.apiKey && readAiConfig()?.model)) return res.status(400).json({ error: AI_UNSET });
+    const wanted = new Set(channelIds);
+    const items = (readChannels() || []).filter((c) => wanted.has(c.id)).map((c) => ({ id: c.id, name: c.displayName, group: c.group }));
+    const { suggestions, error } = await suggestFor(items, !!llm);
+    if (error) return res.status(502).json({ error: `AI matching failed: ${error}` });
+    const list = Object.values(suggestions);
+    if (list.length) suggestStore.merge(list);
+    res.json({ suggestions: list });
+});
+
+app.get('/api/epg/suggest', requireAuth, requireAdmin, (req, res) => res.json({ suggestions: suggestStore.all() }));
+
+app.delete('/api/epg/suggest', requireAuth, requireAdmin, (req, res) => {
+    // {all: true} starts matching over: a re-run skips channels that still have a suggestion.
+    if (req.body?.all === true) {
+        if (epgMatchState.status === 'running') return res.status(409).json({ error: 'Matching is running. Wait for it to finish.' });
+        suggestStore.remove(suggestStore.all().map((s) => s.channelId));
+        return res.json({ success: true });
+    }
+    const { channelIds } = req.body || {};
+    if (!Array.isArray(channelIds) || !channelIds.every((v) => typeof v === 'string') || channelIds.length > 10000) {
+        return res.status(400).json({ error: 'channelIds must be a list of channel ids.' });
+    }
+    suggestStore.remove(channelIds);
+    res.json({ success: true });
+});
+
+// --- Background matching over every unresolved channel (admin) ---
+// State lives in memory; the suggestion store is the resume point, so a restart re-POSTs and skips stored ones.
+let epgMatchState = { status: 'idle', totalChunks: 0, chunkSize: 0, done: 0, suggested: 0, failed: 0, error: null };
+let epgMatchRunning = null; // Promise of the in-flight run, to serialize starts
+
+function startMatch(useAi) {
+    if (epgMatchState.status === 'running') return epgMatchRunning;
+    const stored = new Set(suggestStore.all().map((s) => s.channelId));
+    const overrides = getSettings().epgOverrides || {};
+    const withGuide = new Set(readEpgKeys() || []);
+    const items = (readChannels() || [])
+        .filter((c) => !overrides[c.id] && !withGuide.has(c.id) && !stored.has(c.id))
+        .map((c) => ({ id: c.id, name: c.displayName, group: c.group }));
+    const chunkSize = useAi ? 100 : 300; // one AI request per chunk (epgLlm BATCH)
+    const chunks = [];
+    for (let i = 0; i < items.length; i += chunkSize) chunks.push(items.slice(i, i + chunkSize));
+
+    epgMatchState = { status: 'running', useAi, totalChunks: chunks.length, totalChannels: items.length, chunkSize, done: 0, suggested: 0, failed: 0, error: null };
+    epgMatchRunning = (async () => {
+        try {
+            await runMatchJob({
+                chunks,
+                processChunk: (chunk) => suggestFor(chunk, useAi),
+                persist: (list) => suggestStore.merge(list),
+                concurrency: useAi ? 4 : 1,
+                onProgress: ({ done, total, suggested, failed }) => { Object.assign(epgMatchState, { done, totalChunks: total, suggested, failed }); },
+            });
+            epgMatchState.status = 'done';
+        } catch (e) {
+            epgMatchState = { ...epgMatchState, status: 'done', error: e.message };
+        }
+    })();
+    return epgMatchRunning;
+}
+
+app.post('/api/epg/match', requireAuth, requireAdmin, (req, res) => {
+    const useAi = !!req.body?.useAi;
+    if (useAi && !(readAiConfig()?.apiKey && readAiConfig()?.model)) return res.status(400).json({ error: AI_UNSET });
+    if (epgMatchState.status === 'running') return res.json({ started: false, ...epgMatchState });
+    startMatch(useAi);
+    res.json({ started: true, ...epgMatchState });
+});
+
+app.get('/api/epg/match', requireAuth, requireAdmin, (req, res) => {
+    res.json({ ...epgMatchState, stored: suggestStore.all().length });
+});
+
+// --- AI matching settings (admin) ---
+// The key is never sent back: the browser only learns whether one is set and how it ends.
+app.get('/api/epg/ai', requireAuth, requireAdmin, (req, res) => res.json(aiStatus(readAiConfig())));
+
+app.put('/api/epg/ai', requireAuth, requireAdmin, (req, res) => {
+    let next;
+    try {
+        next = updateAiConfig(readAiConfig() || {}, req.body);
+    } catch (error) {
+        return res.status(400).json({ error: error.message });
+    }
+    writeFileAtomic(OPENROUTER_PATH, JSON.stringify(next), 0o600);
+    res.json(aiStatus(next));
+});
+
+// OpenRouter's own model list, with prices, for the model picker.
+app.get('/api/epg/ai/models', requireAuth, requireAdmin, async (req, res) => {
+    try {
+        res.json(searchModels(await listModels(), req.query.q, req.query.all ? Infinity : 50));
+    } catch (error) {
+        res.status(502).json({ error: `Could not load OpenRouter's model list: ${error.message}` });
+    }
+});
+
+// One real, tiny completion with the saved key and model: proves the key, the model and the credit all at once.
+app.post('/api/epg/ai/test', requireAuth, requireAdmin, async (req, res) => {
+    const { apiKey, model } = readAiConfig() || {};
+    if (!(apiKey && model)) return res.status(400).json({ error: AI_UNSET });
+    try {
+        const reply = await chat({ apiKey, model, maxTokens: 16, messages: [{ role: 'user', content: 'Reply with the single word OK.' }] });
+        res.json({ ok: true, model, reply: reply.trim() });
+    } catch (error) {
+        res.status(502).json({ error: error.message });
+    }
+});
+
+// {set: {channelId: xmltvId}, clear: [channelId]}. Re-merges the guides (not the playlists) so it shows at once.
+let epgRemerge = Promise.resolve(); // one at a time: merges share their temp files
+let epgRemergeQueued = false;
+
+// Queues one guide re-merge; saves made while one waits ride along, since it reads the settings when it starts.
+function scheduleEpgRemerge(req, channels) {
+    if (epgRemergeQueued) return;
+    epgRemergeQueued = true;
+    epgRemerge = epgRemerge.then(async () => {
+        epgRemergeQueued = false;
+        const settings = getSettings();
+        // Same shape as processAndMergeSources builds from the playlists; the prefix before the first "_" is the source id.
+        const liveChannels = new Map(channels.map(c => [c.id, { originalId: c.id.slice(c.id.indexOf('_') + 1), name: c.displayName, tvgName: c.name, group: c.group }]));
+        await mergeEpg(req, settings, liveChannels, [], []);
+        settings.sourcesLastUpdated = new Date().toISOString(); // tells every client its cached guide is stale
+        saveProcessedSettings(settings);
+    }).catch((error) => console.error('[API] Error re-merging the guide after EPG overrides:', error));
+}
+
+app.put('/api/epg/overrides', requireAuth, requireAdmin, async (req, res) => {
+    const { set = {}, clear = [] } = req.body || {};
+    const isIdMap = set && typeof set === 'object' && !Array.isArray(set) && Object.values(set).every(v => typeof v === 'string');
+    if (!isIdMap || !Array.isArray(clear) || !clear.every(v => typeof v === 'string')) {
+        return res.status(400).json({ error: 'Expected {set: {channelId: epgChannelId}, clear: [channelId]}.' });
+    }
+    const channels = readChannels() || [];
+    const channelIds = new Set(channels.map(c => c.id));
+    const epgIds = new Set((readEpgChannels() || NO_EPG_CHANNELS).map(c => c.id));
+    const unknown = Object.entries(set).find(([id, epgId]) => !channelIds.has(id) || !epgIds.has(epgId));
+    if (unknown) return res.status(400).json({ error: `Unknown channel or EPG channel: ${unknown[0]} -> ${unknown[1]}` });
+
+    // Saved before answering, not after the re-merge: on a big guide that takes minutes, and a refresh
+    // meanwhile would show the accepted suggestions again.
+    const settings = getSettings();
+    settings.epgOverrides = { ...settings.epgOverrides, ...set };
+    for (const id of clear) delete settings.epgOverrides[id];
+    writeSettings(settings);
+    // Accepted suggestions are no longer pending: drop them from the store so they do not resurface.
+    if (Object.keys(set).length) suggestStore.remove(Object.keys(set));
+    res.json({ success: true, epgOverrides: settings.epgOverrides });
+    scheduleEpgRemerge(req, channels);
+});
+
+app.post('/api/save/settings', requireAuth, requireAdmin, async (req, res) => {
     console.log('[API] Received request to /api/save/settings.');
     try {
         let currentSettings = getSettings();
 
         const oldTimezone = currentSettings.timezoneOffset;
+        const oldTimeZone = currentSettings.timeZone;
 
         const updatedSettings = { ...currentSettings };
         for (const key in req.body) {
@@ -3238,15 +4033,18 @@ app.post('/api/save/settings', requireAuth, async (req, res) => {
                 console.warn(`[SETTINGS_SAVE] Attempted to save user-specific key "${key}" to global settings. This is ignored.`);
             }
         }
+        // A partial client update must not wipe the existing profile list or nested defaults.
+        updatedSettings.dvr = { ...currentSettings.dvr, ...(updatedSettings.dvr || {}) };
+        updatedSettings.downloads = { ...currentSettings.downloads, ...(updatedSettings.downloads || {}) };
+        updatedSettings.liveRewind = { ...currentSettings.liveRewind, ...(updatedSettings.liveRewind || {}) };
 
         saveSettings(updatedSettings);
 
-        if (updatedSettings.timezoneOffset !== oldTimezone) {
+        if (updatedSettings.timezoneOffset !== oldTimezone || updatedSettings.timeZone !== oldTimeZone) {
             console.log("[API] Timezone setting changed, re-processing sources.");
-            const result = await processAndMergeSources();
-            if (result.success) {
-                fs.writeFileSync(SETTINGS_PATH, JSON.stringify(result.updatedSettings, null, 2));
-            }
+            const result = await runSourceProcessing(null, undefined, true);
+            saveProcessedSettings(result.updatedSettings);
+            if (!result.success) console.warn(`[API] ${result.message}`);
         }
 
         res.json({ success: true, message: 'Settings saved.', settings: getSettings() });
@@ -3604,9 +4402,11 @@ app.delete('/api/data', requireAuth, requireAdmin, (req, res) => {
             try { process.kill(pid, 'SIGKILL'); } catch (e) { }
         }
         runningFFmpegProcesses.clear();
+        for (const channelId of activeLiveBuffers.keys()) stopLiveBuffer(channelId);
+        activeLiveBuffers.clear();
 
         console.log('[API_RESET] Wiping all data files...');
-        const filesToDelete = [LIVE_CHANNELS_M3U_PATH, LIVE_EPG_JSON_PATH, VOD_MOVIES_JSON_PATH, VOD_SERIES_JSON_PATH, SETTINGS_PATH, VAPID_KEYS_PATH];
+        const filesToDelete = [LIVE_CHANNELS_M3U_PATH, LIVE_EPG_JSON_PATH, EPG_CHANNELS_JSON_PATH, VOD_MOVIES_JSON_PATH, VOD_SERIES_JSON_PATH, SETTINGS_PATH, VAPID_KEYS_PATH, OPENROUTER_PATH];
         filesToDelete.forEach(file => {
             if (fs.existsSync(file)) fs.unlinkSync(file);
         });
@@ -3619,7 +4419,7 @@ app.delete('/api/data', requireAuth, requireAdmin, (req, res) => {
         });
 
         console.log('[API_RESET] Wiping all database tables...');
-        const tables = ['stream_history', 'dvr_recordings', 'dvr_jobs', 'notification_deliveries', 'notifications', 'push_subscriptions', 'multiview_layouts', 'user_settings', 'users', 'sessions'];
+        const tables = ['stream_history', 'dvr_recordings', 'dvr_jobs', 'dvr_series_rules', 'notification_deliveries', 'notifications', 'push_subscriptions', 'multiview_layouts', 'user_settings', 'watch_progress', 'provider_episode_relations', 'provider_series_relations', 'provider_movie_relations', 'episodes', 'series', 'movies', 'vod_categories', 'users', 'sessions'];
         db.serialize(() => {
             tables.forEach(table => {
                 db.run(`DELETE FROM ${table}`, (err) => {
@@ -3628,6 +4428,7 @@ app.delete('/api/data', requireAuth, requireAdmin, (req, res) => {
             });
         });
 
+        userCache.clear();
         console.log('[API_RESET] Hard reset complete. The application is now in a fresh-install state.');
         res.json({ success: true, message: 'All application data has been cleared.' });
 
@@ -3640,84 +4441,65 @@ app.delete('/api/data', requireAuth, requireAdmin, (req, res) => {
 // Middleware to allow local network access OR authenticated access OR cast token
 // This enables Chromecast devices to access streams using temporary tokens
 function allowLocalOrAuth(req, res, next) {
-    // Check if authenticated via session
-    if (req.session && req.session.userId) {
-        return next();
+    const identity = resolveStreamIdentity(req, { castTokens: activeCastTokens, trustProxy: TRUST_PROXY });
+    if (!identity.ok) {
+        console.warn(`[STREAM_AUTH] ✗ ${identity.message} from ${req.ip || req.socket.remoteAddress || 'unknown'}.`);
+        return res.status(identity.status).send(identity.message);
     }
-
-    // Check for Cast token (priority for Chromecast)
-    const { castToken } = req.query;
-    if (castToken) {
-        const tokenData = activeCastTokens.get(castToken);
-
-        if (!tokenData) {
-            console.warn(`[STREAM_AUTH] Invalid cast token: ${castToken.substring(0, 8)}...`);
-            return res.status(401).send('Invalid cast token');
-        }
-
-        if (tokenData.expiresAt < Date.now()) {
-            console.warn(`[STREAM_AUTH] Expired cast token: ${castToken.substring(0, 8)}...`);
-            activeCastTokens.delete(castToken);
-            return res.status(401).send('Expired cast token');
-        }
-
-        console.log(`[STREAM_AUTH] ✓ Valid cast token for user ${tokenData.userId}`);
-
-        // Set session from token
-        req.session = req.session || {};
-        req.session.userId = tokenData.userId;
-        req.session.username = 'Cast User';
-
-        // One-time use: delete token after successful auth
-        activeCastTokens.delete(castToken);
-
-        return next();
-    }
-
-    // Get the real client IP (first IP in X-Forwarded-For chain, before Cloudflare)
-    let clientIp = req.clientIp || req.ip;
-
-    // X-Forwarded-For can be a comma-separated list: "client, proxy1, proxy2"
-    // We want the FIRST IP (the real client)
-    if (clientIp && clientIp.includes(',')) {
-        clientIp = clientIp.split(',')[0].trim();
-    }
-
-    console.log(`[STREAM_AUTH] Checking IP: ${clientIp} (original: ${req.clientIp || req.ip})`);
-
-    // Check if request is from local network (fallback for direct local access)
-    const isLocal = clientIp.startsWith('192.168.') ||
-        clientIp.startsWith('10.') ||
-        clientIp.startsWith('172.16.') ||
-        clientIp === '127.0.0.1' ||
-        clientIp === '::1' ||
-        clientIp === '::ffff:127.0.0.1';
-
-    if (isLocal) {
-        console.log(`[STREAM_AUTH] ✓ Allowing unauthenticated access from local network: ${clientIp}`);
-        // Set a dummy session for logging purposes
-        req.session = req.session || {};
-        req.session.userId = 1; // Default to admin user for local access
-        req.session.username = 'Local Network';
-        return next();
-    }
-
-    console.warn(`[STREAM_AUTH] ✗ Unauthorized access attempt from: ${clientIp}`);
-    res.status(401).send('Authentication required');
+    // These fields describe this stream only. The real session is never modified.
+    req.streamUserId = identity.userId;
+    req.streamUsername = identity.username;
+    req.localAccess = identity.localAccess;
+    console.log(identity.localAccess
+        ? `[STREAM_AUTH] ✓ Allowing unauthenticated access from local network: ${req.ip || req.socket.remoteAddress}`
+        : `[STREAM_AUTH] ✓ Stream authorized for user ${identity.userId ?? 'cast'}`);
+    next();
 }
 
 // MODIFIED: Stream endpoint now allows local network access for Chromecast and supports fast input seeking
+app.get('/api/stream/tracks', requireAuth, async (req, res) => {
+    const { url, userAgentId } = req.query;
+    if (!url) return res.status(400).json({ error: 'A stream URL is required.' });
+    try {
+        await assertSafeMediaUrl(url, ['http:', 'https:']);
+        const settings = getSettings();
+        const userAgent = (settings.userAgents || []).find(ua => ua.id === userAgentId)?.value
+            || (settings.userAgents || []).find(ua => ua.id === settings.activeUserAgentId)?.value
+            || '';
+        const tracks = await probeStreamTracks(url, userAgent);
+        res.json(tracks);
+    } catch (error) {
+        console.warn('[STREAM_TRACKS] Could not probe tracks:', error.message);
+        res.status(502).json({ error: 'Could not read this stream’s tracks.' });
+    }
+});
+
 app.get('/stream', allowLocalOrAuth, async (req, res) => {
-    const { url: streamUrl, profileId, userAgentId, vodName, vodLogo, startTime: seekParam } = req.query;
-    const userId = req.session.userId;
-    const username = req.session.username;
+    const { url: streamUrl, profileId, userAgentId, vodName, vodLogo, startTime: seekParam, audioTrack: audioTrackParam } = req.query;
+    const audioTrack = Number.parseInt(audioTrackParam, 10);
+    const hasAudioTrack = Number.isInteger(audioTrack) && audioTrack >= 0 && audioTrack < 64;
+    const userId = req.streamUserId ?? null;
+    const username = req.streamUsername || 'Local Network';
     const clientIp = req.clientIp;
 
     const seekSec = parseFloat(seekParam);
     const isSeek = seekParam !== undefined && !isNaN(seekSec);
 
-    // Include profileId and seek offset in stream key so seeked streams don't collide with position 0
-    const baseStreamKey = `${userId}::${streamUrl}::${profileId}`;
+    if (!streamUrl) return res.status(400).send('Error: `url` query parameter is required.');
+    if (!isAllowedStreamUrl(streamUrl)) {
+        console.warn(`[STREAM] Rejected stream URL with unsupported protocol: ${safeUrlForLog(streamUrl)}`);
+        return res.status(400).send('Error: unsupported stream URL protocol.');
+    }
+    try {
+        assertSafeStreamUrl(streamUrl);
+        await assertSafeMediaStreamUrl(streamUrl);
+    } catch (err) {
+        console.warn(`[STREAM] Rejected stream URL: ${err.message}`);
+        return res.status(400).send('Error: stream URL is not allowed.');
+    }
+
+    // Include profileId, audio track and seek offset in the stream key so they don't collide.
+    const baseStreamKey = `${userId}::${streamUrlKey(streamUrl)}::${profileId}${hasAudioTrack ? `::a${audioTrack}` : ''}`;
     const streamKey = isSeek ? `${baseStreamKey}::${Math.floor(seekSec)}` : baseStreamKey;
 
     // If seeking, terminate any existing stream for this user/URL to cleanly switch position
@@ -3754,8 +4536,7 @@ app.get('/stream', allowLocalOrAuth, async (req, res) => {
         return;
     }
 
-    console.log(`[STREAM] New request: URL=${streamUrl}, ProfileID=${profileId}, UserAgentID=${userAgentId}`);
-    if (!streamUrl) return res.status(400).send('Error: `url` query parameter is required.');
+    console.log(`[STREAM] New request: ProfileID=${profileId}, UserAgentID=${userAgentId}`);
 
     let settings = getSettings();
     // Check both streamProfiles and castProfiles arrays
@@ -3773,7 +4554,7 @@ app.get('/stream', allowLocalOrAuth, async (req, res) => {
     const isTranscoded = profile.command !== 'redirect';
 
     if (!isTranscoded) {
-        console.log(`[STREAM] Redirecting to stream URL: ${streamUrl}`);
+        console.log(`[STREAM] Redirecting to stream URL: ${safeUrlForLog(streamUrl)}`);
         return res.redirect(302, streamUrl);
     }
 
@@ -3793,7 +4574,7 @@ app.get('/stream', allowLocalOrAuth, async (req, res) => {
         console.log(`[STREAM] VOD stream detected for logging: Name='${channelName}'`);
     } else {
         // It's a live channel stream, use existing M3U parsing logic
-        const allChannels = parseM3U(fs.existsSync(LIVE_CHANNELS_M3U_PATH) ? fs.readFileSync(LIVE_CHANNELS_M3U_PATH, 'utf-8') : '');
+        const allChannels = readChannels() || [];
         const channel = allChannels.find(c => c.url === streamUrl);
         channelName = channel ? channel.displayName || channel.name : 'Direct Stream';
         channelId = channel ? channel.id : null;
@@ -3818,51 +4599,60 @@ app.get('/stream', allowLocalOrAuth, async (req, res) => {
         }
     }
 
-    const commandTemplate = `-v level+${settings.playerLogLevel} ` + profileCommand
-        .replace(/{streamUrl}/g, streamUrl)
-        .replace(/{userAgent}|{clientUserAgent}/g, userAgent.value);
+    const args = buildFfmpegArgs(profileCommand, {
+        streamUrl,
+        userAgent: userAgent.value,
+        clientUserAgent: userAgent.value
+    }, settings.playerLogLevel);
+    if (hasAudioTrack) {
+        const inputIndex = args.lastIndexOf(streamUrl);
+        if (inputIndex !== -1) {
+            // Place explicit maps immediately after the input so the chosen audio stream wins.
+            args.splice(inputIndex + 1, 0, '-map', '0:v:0?', '-map', `0:a:${audioTrack}`);
+            console.log(`[STREAM] Selected audio track ${audioTrack} for ${streamKey}`);
+        }
+    }
 
-    const args = (commandTemplate.match(/(?:[^\s"]+|"[^"]*")+/g) || []).map(arg => arg.replace(/^"|"$/g, ''));
-
-    console.log(`[STREAM] FFmpeg command args: ffmpeg ${args.join(' ')}`);
+    console.log(`[STREAM] Starting ffmpeg with profile "${profile.name}"`);
     const ffmpeg = spawn('ffmpeg', args);
 
     //-- ENHANCEMENT: Log richer stream start data to history.
     const startTime = new Date().toISOString();
-    db.run(
-        `INSERT INTO stream_history (user_id, username, channel_id, channel_name, start_time, status, client_ip, channel_logo, stream_profile_name) VALUES (?, ?, ?, ?, ?, 'playing', ?, ?, ?)`,
-        [userId, username, channelId, channelName, startTime, clientIp, channelLogo, streamProfileName],
-        function (err) {
-            if (err) {
-                console.error('[STREAM_HISTORY] Error logging stream start:', err.message);
-            } else {
-                const historyId = this.lastID;
-                console.log(`[STREAM_HISTORY] Logged stream start with history ID: ${historyId}`);
-
-                // Now that we have the history ID, store it with the process
-                const newStreamInfo = {
-                    process: ffmpeg,
-                    references: 1,
-                    lastAccess: Date.now(),
-                    userId,
-                    username,
-                    channelId,
-                    channelName,
-                    channelLogo, // Store logo
-                    streamProfileName, // Store profile name
-                    startTime,
-                    historyId,
-                    clientIp,
-                    streamKey,
-                    isTranscoded, // NEW: Store transcoding status
-                };
-                activeStreamProcesses.set(streamKey, newStreamInfo);
-                console.log(`[STREAM] Started FFMPEG process with PID: ${ffmpeg.pid} for user ${userId} for stream key: ${streamKey}.`);
-                //-- ENHANCEMENT: Notify admins that a new stream has started.
-                broadcastAdminUpdate();
+    const newStreamInfo = {
+        process: ffmpeg,
+        references: 1,
+        lastAccess: Date.now(),
+        userId,
+        username,
+        channelId,
+        channelName,
+        channelLogo,
+        streamProfileName,
+        startTime,
+        historyId: null,
+        clientIp,
+        streamKey,
+        isTranscoded,
+    };
+    const trackStream = (historyId) => {
+        newStreamInfo.historyId = historyId;
+        activeStreamProcesses.set(streamKey, newStreamInfo);
+        console.log(`[STREAM] Started FFMPEG process with PID: ${ffmpeg.pid} for user ${userId ?? 'local'} for stream key: ${streamKey}.`);
+        broadcastAdminUpdate();
+    };
+    if (userId === null) {
+        // stream_history.user_id is NOT NULL; local playback has no user row.
+        trackStream(null);
+    } else {
+        db.run(
+            `INSERT INTO stream_history (user_id, username, channel_id, channel_name, start_time, status, client_ip, channel_logo, stream_profile_name) VALUES (?, ?, ?, ?, ?, 'playing', ?, ?, ?)`,
+            [userId, username, channelId, channelName, startTime, clientIp, channelLogo, streamProfileName],
+            function (err) {
+                if (err) console.error('[STREAM_HISTORY] Error logging stream start:', err.message);
+                trackStream(err ? null : this.lastID);
             }
-        }
-    );
+        );
+    }
 
     // Set appropriate Content-Type based on output format
     if (profile.command.includes('-f mp4')) {
@@ -3972,7 +4762,7 @@ app.post('/api/cast/generate-token', requireAuth, (req, res) => {
         // Auto-cleanup after expiry
         setTimeout(() => {
             activeCastTokens.delete(token);
-            console.log(`[CAST_TOKEN] Token expired and removed: ${token.substring(0, 8)}...`);
+            console.log('[CAST_TOKEN] Token expired and removed.');
         }, 5 * 60 * 1000);
 
         console.log(`[CAST_TOKEN] Generated token for user ${userId}, expires in 5 minutes`);
@@ -3989,68 +4779,26 @@ app.post('/api/cast/generate-token', requireAuth, (req, res) => {
 // ============================================================
 app.post('/api/stream/stop', requireAuth, (req, res) => {
     const { url: streamUrl, profileId } = req.body;
-    let streamKey;
-
     if (!streamUrl) {
         return res.status(400).json({ error: "Stream URL is required to stop the stream." });
     }
 
-    // If profileId is provided, construct the specific key and support seeked streams with timestamp suffix
-    if (profileId) {
-        const fullKey = `${req.session.userId}::${streamUrl}::${profileId}`;
-        if (activeStreamProcesses.has(fullKey)) {
-            streamKey = fullKey;
-        } else {
-            for (const key of activeStreamProcesses.keys()) {
-                if (key.startsWith(fullKey)) {
-                    streamKey = key;
-                    break;
-                }
-            }
-        }
-        if (!streamKey) {
-            streamKey = fullKey;
-        }
-    } else {
-        // If no profileId, try to find a matching key for this user and URL
-        // The key format is either "userId::url" (old) or "userId::url::profileId" (new)
-        const partialKey = `${req.session.userId}::${streamUrl}`;
+    // Match every variant for this user/profile: seek suffix, audio track, and old key formats.
+    const prefix = profileId
+        ? `${req.session.userId}::${streamUrlKey(streamUrl)}::${profileId}`
+        : `${req.session.userId}::${streamUrlKey(streamUrl)}`;
+    const matchingKeys = [...activeStreamProcesses.keys()].filter(key =>
+        key === prefix || key.startsWith(prefix + '::')
+    );
 
-        // Check for exact match first (legacy format or redirect)
-        if (activeStreamProcesses.has(partialKey)) {
-            streamKey = partialKey;
-        } else {
-            // Search for keys starting with the partial key
-            for (const key of activeStreamProcesses.keys()) {
-                if (key.startsWith(partialKey + '::')) {
-                    streamKey = key;
-                    break; // Stop at the first match
-                }
-            }
-        }
-
-        // If still not found, default to the partial key so the error message is consistent
-        if (!streamKey) {
-            streamKey = partialKey;
-        }
-    }
-
-    const activeStreamInfo = activeStreamProcesses.get(streamKey);
-
-    if (activeStreamInfo) {
-        console.log(`[STREAM_STOP_API] Received request to stop stream for user ${req.session.userId}. Key: ${streamKey}`);
-
-        // --- NEW: Smart Termination Logic ---
-        // If there are other active references (e.g., another device), DO NOT kill the process.
+    let terminated = 0;
+    for (const streamKey of matchingKeys) {
+        const activeStreamInfo = activeStreamProcesses.get(streamKey);
+        if (!activeStreamInfo) continue;
         if (activeStreamInfo.references > 1) {
-            console.log(`[STREAM_STOP_API] Stream ${streamKey} has ${activeStreamInfo.references} active references. NOT terminating process.`);
-            // We still return success because from the client's perspective, *their* session is done.
-            // The server just keeps the underlying process alive for the other client(s).
-            return res.json({ success: true, message: 'Stream kept alive for other active clients.' });
+            console.log(`[STREAM_STOP_API] Stream ${streamKey} has ${activeStreamInfo.references} active references. NOT terminating.`);
+            continue;
         }
-        // --- END NEW ---
-
-        console.log(`[STREAM_STOP_API] No other references. Terminating process for key: ${streamKey}`);
         try {
             if (activeStreamInfo.historyId) {
                 const endTime = new Date().toISOString();
@@ -4060,17 +4808,17 @@ app.post('/api/stream/stop', requireAuth, (req, res) => {
             }
             activeStreamInfo.process.kill('SIGKILL');
             activeStreamProcesses.delete(streamKey);
-            //-- ENHANCEMENT: Notify admins that a stream has ended.
-            broadcastAdminUpdate();
-            console.log(`[STREAM_STOP_API] Successfully terminated process for key: ${streamKey}`);
+            terminated++;
+            console.log(`[STREAM_STOP_API] Terminated process for key: ${streamKey}`);
         } catch (e) {
-            console.warn(`[STREAM_STOP_API] Could not kill process for key: ${streamKey}. It might have already exited. Error: ${e.message}`);
+            console.warn(`[STREAM_STOP_API] Could not kill process for key: ${streamKey}. Error: ${e.message}`);
         }
-        res.json({ success: true, message: `Stream process for ${streamKey} terminated.` });
-    } else {
-        console.log(`[STREAM_STOP_API] Received stop request for user ${req.session.userId}, but no active stream was found for key (or partial match): ${streamKey}`);
-        res.json({ success: true, message: 'No active stream to stop.' });
     }
+    if (terminated) broadcastAdminUpdate();
+    res.json({
+        success: true,
+        message: terminated ? `Terminated ${terminated} stream process(es).` : 'No active stream to stop.',
+    });
 });
 
 app.post('/api/activity/start-redirect', requireAuth, (req, res) => {
@@ -4609,7 +5357,7 @@ async function checkAndSendNotifications() {
 async function getMediaDurationSeconds(filePath) {
     return new Promise((resolve) => {
         if (!filePath || !fs.existsSync(filePath)) return resolve(null);
-        exec(`ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${filePath}"`, { timeout: 10000 }, (error, stdout) => {
+        execFile('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', filePath], { timeout: 10000 }, (error, stdout) => {
             if (error || !stdout) {
                 return resolve(null);
             }
@@ -4776,8 +5524,8 @@ class DvrSupervisor {
 
     resolveStreamUrl() {
         try {
-            if (fs.existsSync(LIVE_CHANNELS_M3U_PATH)) {
-                const channels = parseM3U(fs.readFileSync(LIVE_CHANNELS_M3U_PATH, 'utf-8'));
+            const channels = readChannels();
+            if (channels) {
                 const freshChannel = channels.find(c => c.id === this.job.channelId);
                 if (freshChannel && freshChannel.url) {
                     return freshChannel.url;
@@ -4798,8 +5546,8 @@ class DvrSupervisor {
         // that could cause tuner contention / cross-talk with IPTV proxies like Dispatcharr
         let hadConflictingStream = false;
         for (const [streamKey, streamInfo] of activeStreamProcesses.entries()) {
-            if (streamKey.includes(currentUrl)) {
-                console.log(`[DVR_SUPERVISOR][${this.job.id}] Found active conflicting stream for URL ${currentUrl}. Terminating to free upstream tuner.`);
+            if (streamKey.includes(streamUrlKey(currentUrl))) {
+                console.log(`[DVR_SUPERVISOR][${this.job.id}] Found active conflicting stream for ${safeUrlForLog(currentUrl)}. Terminating to free upstream tuner.`);
                 try {
                     streamInfo.process.kill('SIGKILL');
                     activeStreamProcesses.delete(streamKey);
@@ -4809,8 +5557,15 @@ class DvrSupervisor {
         }
         for (const [streamKey, redirectInfo] of activeRedirectStreams.entries()) {
             if (streamKey.includes(currentUrl)) {
-                console.log(`[DVR_SUPERVISOR][${this.job.id}] Found active conflicting redirect stream for URL ${currentUrl}. Closing.`);
+                console.log(`[DVR_SUPERVISOR][${this.job.id}] Found active conflicting redirect stream for ${safeUrlForLog(currentUrl)}. Closing.`);
                 activeRedirectStreams.delete(streamKey);
+                hadConflictingStream = true;
+            }
+        }
+        for (const [channelId, buffer] of activeLiveBuffers.entries()) {
+            if (buffer.sourceUrl === currentUrl) {
+                console.log(`[DVR_SUPERVISOR][${this.job.id}] Stopping conflicting live rewind buffer for channel ${channelId}.`);
+                stopLiveBuffer(channelId);
                 hadConflictingStream = true;
             }
         }
@@ -4820,20 +5575,13 @@ class DvrSupervisor {
             await new Promise(r => setTimeout(r, 400));
         }
 
-        let commandStr = this.recProfile.command
-            .replace(/{streamUrl}/g, currentUrl)
-            .replace(/{userAgent}/g, this.userAgent.value);
+        const args = buildFfmpegArgs(this.recProfile.command, {
+            streamUrl: currentUrl,
+            userAgent: this.userAgent.value,
+            filePath: this.isTs ? 'pipe:1' : this.fullFilePath
+        }, this.settings.dvrLogLevel);
 
-        if (this.isTs) {
-            commandStr = commandStr.replace(/{filePath}/g, 'pipe:1');
-        } else {
-            commandStr = commandStr.replace(/{filePath}/g, this.fullFilePath);
-        }
-
-        const fullCommand = `-v level+${this.settings.dvrLogLevel || 'warning'} ` + commandStr;
-        const args = (fullCommand.match(/(?:[^\s"]+|"[^"]*")+/g) || []).map(arg => arg.replace(/^"|"$/g, ''));
-
-        console.log(`[DVR_SUPERVISOR][${this.job.id}] Spawning FFmpeg (attempt ${this.retryCount + 1}/${this.maxRetries + 1}): ffmpeg ${args.join(' ')}`);
+        console.log(`[DVR_SUPERVISOR][${this.job.id}] Spawning FFmpeg (attempt ${this.retryCount + 1}/${this.maxRetries + 1}) with profile "${this.recProfile.name}".`);
 
         try {
             this.ffmpegProcess = spawn('ffmpeg', args);
@@ -5001,10 +5749,10 @@ class DvrSupervisor {
             console.error(`[DVR_SUPERVISOR][${this.job.id}] File stat failed:`, e.message);
         }
 
-        if (stats && stats.size > 2 * 1024 * 1024) {
+        let durationSeconds = stats ? await getMediaDurationSeconds(this.fullFilePath) : null;
+        if (isRecordingFileUsable(stats?.size, durationSeconds)) {
             let finalFilePath = this.fullFilePath;
             let finalSizeBytes = stats.size;
-            let durationSeconds = await getMediaDurationSeconds(this.fullFilePath);
             const wallClockDuration = Math.max(1, Math.round((Date.now() - new Date(this.job.startTime).getTime()) / 1000));
 
             // If recorded in TS format, fast-remux to MP4 for native browser seeking & zero duplicate storage
@@ -5049,6 +5797,7 @@ class DvrSupervisor {
                         console.error(`[DVR_SUPERVISOR][${this.job.id}] Failed to insert into dvr_recordings:`, insertErr.message);
                     } else {
                         console.log(`[DVR_SUPERVISOR][${this.job.id}] Successfully logged to dvr_recordings.`);
+                        enforceRecordingSizeLimit().catch(() => { });
                     }
                 }
             );
@@ -5061,15 +5810,15 @@ class DvrSupervisor {
             db.run("UPDATE dvr_jobs SET status = ?, startTime = ?, endTime = ?, ffmpeg_pid = NULL, filePath = ?, errorMessage = ? WHERE id = ?", [finalStatus, actualStartTime, actualEndTime, finalFilePath, errorMsg, this.job.id]);
             broadcastDvrUpdate(this.job.user_id, { jobId: this.job.id, status: finalStatus, startTime: actualStartTime, endTime: actualEndTime, errorMessage: errorMsg });
         } else {
-            const errMsg = `Recording failed or file too small (<2MB). Reason: ${reason}. Output: ${this.lastErrorOutput.slice(-500)}`;
+            const errMsg = `Recording failed or produced no usable video. Reason: ${reason}. Output: ${this.lastErrorOutput.slice(-500)}`;
             console.error(`[DVR_SUPERVISOR][${this.job.id}] ${errMsg}`);
             db.run("UPDATE dvr_jobs SET status = 'error', ffmpeg_pid = NULL, errorMessage = ? WHERE id = ?", [errMsg, this.job.id]);
             broadcastDvrUpdate(this.job.user_id, { jobId: this.job.id, status: 'error', errorMessage: errMsg });
 
-            if (stats && stats.size <= 2 * 1024 * 1024) {
+            if (stats && !isRecordingFileUsable(stats.size, durationSeconds)) {
                 try {
                     fs.unlinkSync(this.fullFilePath);
-                    console.log(`[DVR_SUPERVISOR][${this.job.id}] Cleaned up small/failed file: ${this.fullFilePath}`);
+                    console.log(`[DVR_SUPERVISOR][${this.job.id}] Cleaned up empty/failed file: ${this.fullFilePath}`);
                 } catch (e) { }
             }
         }
@@ -5121,11 +5870,20 @@ function stopRecording(jobId) {
 async function startRecording(job) {
     console.log(`[DVR] Starting recording for job ${job.id}: "${job.programTitle}"`);
     const settings = getSettings();
-    const allChannels = parseM3U(fs.existsSync(LIVE_CHANNELS_M3U_PATH) ? fs.readFileSync(LIVE_CHANNELS_M3U_PATH, 'utf-8') : '');
+    const allChannels = readChannels() || [];
     const channel = allChannels.find(c => c.id === job.channelId);
 
     if (!channel) {
         const errorMsg = `Channel ID ${job.channelId} not found in M3U.`;
+        console.error(`[DVR] Cannot start recording job ${job.id}: ${errorMsg}`);
+        db.run("UPDATE dvr_jobs SET status = 'error', ffmpeg_pid = NULL, errorMessage = ? WHERE id = ?", [errorMsg, job.id]);
+        broadcastDvrUpdate(job.user_id, { jobId: job.id, status: 'error', errorMessage: errorMsg });
+        return;
+    }
+
+    const owner = await dbGet(db, "SELECT id, isAdmin, allowed_sources FROM users WHERE id = ?", [job.user_id]);
+    if (!owner || !isChannelAllowed(channel, allowedSourcesFromUser(owner))) {
+        const errorMsg = 'This channel is no longer available for this user.';
         console.error(`[DVR] Cannot start recording job ${job.id}: ${errorMsg}`);
         db.run("UPDATE dvr_jobs SET status = 'error', ffmpeg_pid = NULL, errorMessage = ? WHERE id = ?", [errorMsg, job.id]);
         broadcastDvrUpdate(job.user_id, { jobId: job.id, status: 'error', errorMessage: errorMsg });
@@ -5148,6 +5906,18 @@ async function startRecording(job) {
     const fileExtension = recProfile.command.includes('-f mp4') ? '.mp4' : '.ts';
     const safeFilename = `${job.id}_${job.programTitle.replace(/[^a-z0-9]/gi, '_').toLowerCase()}${fileExtension}`;
     const fullFilePath = path.join(DVR_DIR, safeFilename);
+
+    const space = await assertDvrFreeSpace(settings);
+    if (!space.ok) {
+        console.error(`[DVR] Cannot start recording job ${job.id}: ${space.error}`);
+        if (activeDvrJobs.has(job.id)) {
+            activeDvrJobs.get(job.id)?.cancel();
+            activeDvrJobs.delete(job.id);
+        }
+        db.run("UPDATE dvr_jobs SET status = 'error', ffmpeg_pid = NULL, errorMessage = ? WHERE id = ?", [space.error, job.id]);
+        broadcastDvrUpdate(job.user_id, { jobId: job.id, status: 'error', errorMessage: space.error });
+        return;
+    }
 
     if (activeDvrSupervisors.has(job.id)) {
         activeDvrSupervisors.get(job.id).stop();
@@ -5208,30 +5978,44 @@ function scheduleDvrJob(job) {
 
 // ... existing functions ...
 
-async function checkForConflicts(newJob, userId) {
-    return new Promise((resolve, reject) => {
-        const settings = getSettings();
-        const maxConcurrent = settings.dvr?.maxConcurrentRecordings || 1;
+// One Node process schedules recordings; this queue keeps check-and-insert atomic.
+let dvrScheduleChain = Promise.resolve();
+function withDvrScheduleLock(task) {
+    const run = dvrScheduleChain.then(task, task);
+    dvrScheduleChain = run.catch(() => { });
+    return run;
+}
 
-        db.all("SELECT * FROM dvr_jobs WHERE user_id = ? AND status = 'scheduled'", [userId], (err, scheduledJobs) => {
-            if (err) return reject(err);
+async function checkForConflicts(newJob) {
+    const settings = getSettings();
+    const maxConcurrent = settings.dvr?.maxConcurrentRecordings || 1;
+    const jobs = await dbAll(
+        db,
+        "SELECT id, user_id, channelName, programTitle, startTime, endTime, status FROM dvr_jobs WHERE status IN ('scheduled', 'recording', 'reconnecting')",
+        []
+    );
+    const overlapping = overlappingJobs(jobs, newJob);
+    return overlapping.length >= maxConcurrent ? overlapping : [];
+}
 
-            const newStart = new Date(newJob.startTime).getTime();
-            const newEnd = new Date(newJob.endTime).getTime();
+function getDvrJobForUser(jobId, session) {
+    return dbGet(
+        db,
+        session.isAdmin ? "SELECT * FROM dvr_jobs WHERE id = ?" : "SELECT * FROM dvr_jobs WHERE id = ? AND user_id = ?",
+        session.isAdmin ? [jobId] : [jobId, session.userId]
+    );
+}
 
-            const conflictingJobs = scheduledJobs.filter(existingJob => {
-                const existingStart = new Date(existingJob.startTime).getTime();
-                const existingEnd = new Date(existingJob.endTime).getTime();
-                return newStart < existingEnd && newEnd > existingStart;
-            });
-
-            if (conflictingJobs.length >= maxConcurrent) {
-                resolve(conflictingJobs);
-            } else {
-                resolve([]);
-            }
-        });
-    });
+// Other users' programme names must not leak in a conflict response.
+function conflictsForResponse(jobs, isAdmin) {
+    if (isAdmin) return jobs;
+    return jobs.map((job) => ({
+        id: job.id,
+        programTitle: 'Another recording',
+        channelName: 'Another channel',
+        startTime: job.startTime,
+        endTime: job.endTime,
+    }));
 }
 
 async function autoDeleteOldRecordings() {
@@ -5277,6 +6061,90 @@ async function autoDeleteOldRecordings() {
         });
     });
 }
+async function enforceRecordingSizeLimit() {
+    const limitGb = getSettings().dvr?.retainNewestGb || 0;
+    if (limitGb <= 0) return;
+    const limitBytes = limitGb * 1024 * 1024 * 1024;
+    try {
+        const rows = await dbAll(db, "SELECT id, filePath, fileSizeBytes FROM dvr_recordings ORDER BY startTime DESC", []);
+        let total = rows.reduce((sum, row) => sum + (Number(row.fileSizeBytes) || 0), 0);
+        for (let i = rows.length - 1; i >= 0 && total > limitBytes; i--) {
+            const row = rows[i];
+            try {
+                if (row.filePath && fs.existsSync(row.filePath)) await fs.promises.unlink(row.filePath);
+                await dbRun(db, "DELETE FROM dvr_recordings WHERE id = ?", [row.id]);
+                total -= Number(row.fileSizeBytes) || 0;
+                console.log(`[DVR_STORAGE] Removed oldest recording to stay under ${limitGb} GB: ${row.filePath}`);
+            } catch (e) {
+                console.warn('[DVR_STORAGE] Could not remove old recording:', e.message);
+            }
+        }
+    } catch (e) {
+        console.error('[DVR_STORAGE] Size cleanup failed:', e.message);
+    }
+}
+
+async function syncSeriesRules(ruleId = null) {
+    await schemaReady;
+    const settings = getSettings();
+    const dvrSettings = settings.dvr || {};
+    const rules = await dbAll(
+        db,
+        ruleId
+            ? "SELECT * FROM dvr_series_rules WHERE id = ? AND enabled = 1"
+            : "SELECT * FROM dvr_series_rules WHERE enabled = 1",
+        ruleId ? [ruleId] : []
+    );
+    if (!rules.length) return 0;
+    const guide = readEpgGuide() || {};
+    const now = Date.now();
+    const horizon = now + 7 * 24 * 60 * 60 * 1000;
+    const preBuffer = (dvrSettings.preBufferMinutes || 0) * 60 * 1000;
+    const postBuffer = (dvrSettings.postBufferMinutes || 0) * 60 * 1000;
+    let created = 0;
+
+    for (const rule of rules) {
+        const programs = matchingSeriesPrograms(rule, guide[rule.channelId] || [], now, horizon);
+        for (const program of programs) {
+            const startMs = Date.parse(program.start);
+            const stopMs = Date.parse(program.stop);
+            if (await dbGet(db, "SELECT id FROM dvr_jobs WHERE channelId = ? AND status IN ('scheduled', 'recording', 'reconnecting', 'completed') AND startTime < ? AND endTime > ? LIMIT 1", [rule.channelId, program.stop, program.start])) continue;
+            const window = validateRecordingWindow(program.start, program.stop, dvrSettings.maxRecordingHours);
+            if (!window.ok) continue;
+
+            const newJob = {
+                user_id: rule.user_id,
+                channelId: rule.channelId,
+                channelName: rule.channelName,
+                programTitle: rule.programTitle,
+                startTime: new Date(Math.max(now, startMs - preBuffer)).toISOString(),
+                programStart: program.start,
+                endTime: new Date(stopMs + postBuffer).toISOString(),
+                status: 'scheduled',
+                profileId: dvrSettings.activeRecordingProfileId,
+                userAgentId: settings.activeUserAgentId,
+                preBufferMinutes: dvrSettings.preBufferMinutes || 0,
+                postBufferMinutes: dvrSettings.postBufferMinutes || 0,
+                series_rule_id: rule.id,
+            };
+            const result = await withDvrScheduleLock(async () => {
+                const conflicts = await checkForConflicts(newJob);
+                if (conflicts.length) return null;
+                const inserted = await dbRun(db, `INSERT INTO dvr_jobs (user_id, channelId, channelName, programTitle, startTime, endTime, status, profileId, userAgentId, preBufferMinutes, postBufferMinutes, programStart, series_rule_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                    [newJob.user_id, newJob.channelId, newJob.channelName, newJob.programTitle, newJob.startTime, newJob.endTime, newJob.status, newJob.profileId, newJob.userAgentId, newJob.preBufferMinutes, newJob.postBufferMinutes, newJob.programStart, newJob.series_rule_id]);
+                return { ...newJob, id: inserted.lastID };
+            });
+            if (!result) continue;
+            scheduleDvrJob(result);
+            broadcastDvrUpdate(result.user_id, { jobId: result.id, status: 'scheduled' });
+            created++;
+        }
+    }
+    if (created) console.log(`[DVR_SERIES] Scheduled ${created} recording(s) from series rules.`);
+    return created;
+}
+
 // --- DVR API Endpoints (MODIFIED & NEW) ---
 // ... existing DVR API Endpoints ...
 
@@ -5360,9 +6228,9 @@ async function getOrCreateTimeshiftSession(jobId, filePath) {
         '-c', 'copy',
         '-f', 'hls',
         '-hls_time', '4',
-        '-hls_list_size', '0',
+        '-hls_list_size', '900',
         '-hls_playlist_type', 'event',
-        '-hls_flags', 'append_list+omit_endlist',
+        '-hls_flags', 'delete_segments+append_list+omit_endlist',
         '-hls_segment_filename', segmentPattern,
         playlistPath
     ];
@@ -5474,43 +6342,66 @@ app.get('/api/dvr/timeshift/:jobId/stream.m3u8', requireAuth, requireDvrAccess, 
 // Endpoint to serve segments (seg_*.ts) and stream.m3u8
 app.get('/api/dvr/timeshift/:jobId/:file', requireAuth, requireDvrAccess, (req, res) => {
     const { jobId, file } = req.params;
-    const session = activeTimeshiftSessions.get(jobId);
-    const sessionDir = session ? session.dir : path.join(DVR_DIR, '.timeshift', String(jobId));
+    const query = req.session.isAdmin
+        ? "SELECT id FROM dvr_jobs WHERE id = ?"
+        : "SELECT id FROM dvr_jobs WHERE id = ? AND user_id = ?";
+    const params = req.session.isAdmin ? [jobId] : [jobId, req.session.userId];
 
-    if (session) {
-        session.lastAccess = Date.now();
-    }
-
-    if (file === 'stream.m3u8') {
-        const playlistPath = path.join(sessionDir, 'stream.m3u8');
-        if (!fs.existsSync(playlistPath)) {
-            return res.status(404).send('Timeshift stream not found.');
+    db.get(query, params, (err, job) => {
+        if (err || !job) {
+            return res.status(404).send('Recording job not found or not authorized.');
         }
-        return sendFormattedTimeshiftPlaylist(playlistPath, res);
-    }
 
-    if (!/^seg_.*\.ts$/.test(file)) {
-        return res.status(400).send('Invalid segment filename.');
-    }
+        const session = activeTimeshiftSessions.get(jobId);
+        const sessionDir = session ? session.dir : path.join(DVR_DIR, '.timeshift', String(jobId));
 
-    const segPath = path.join(sessionDir, file);
-    if (!fs.existsSync(segPath)) {
-        return res.status(404).send('Segment not found.');
-    }
+        if (session) {
+            session.lastAccess = Date.now();
+        }
 
-    res.setHeader('Content-Type', 'video/mp2t');
-    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-    res.setHeader('Pragma', 'no-cache');
-    res.setHeader('Expires', '0');
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    fs.createReadStream(segPath).pipe(res);
+        if (file === 'stream.m3u8') {
+            const playlistPath = path.join(sessionDir, 'stream.m3u8');
+            if (!fs.existsSync(playlistPath)) {
+                return res.status(404).send('Timeshift stream not found.');
+            }
+            return sendFormattedTimeshiftPlaylist(playlistPath, res);
+        }
+
+        // No slashes: the previous `.*` let an encoded %2F walk out of the session directory.
+        if (!/^seg_[a-z0-9]+_\d+\.ts$/i.test(file)) {
+            return res.status(400).send('Invalid segment filename.');
+        }
+
+        const segPath = path.join(sessionDir, file);
+        if (path.dirname(segPath) !== sessionDir) {
+            return res.status(400).send('Invalid segment filename.');
+        }
+        if (!fs.existsSync(segPath)) {
+            return res.status(404).send('Segment not found.');
+        }
+
+        res.setHeader('Content-Type', 'video/mp2t');
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        fs.createReadStream(segPath).pipe(res);
+    });
 });
 
 // Endpoint to explicitly stop/clean up a timeshift session (stops processes, preserves directory)
 app.post('/api/dvr/timeshift/:jobId/stop', requireAuth, requireDvrAccess, (req, res) => {
     const { jobId } = req.params;
-    cleanupTimeshiftSession(jobId, false);
-    res.json({ success: true });
+    const query = req.session.isAdmin
+        ? "SELECT id FROM dvr_jobs WHERE id = ?"
+        : "SELECT id FROM dvr_jobs WHERE id = ? AND user_id = ?";
+    const params = req.session.isAdmin ? [jobId] : [jobId, req.session.userId];
+
+    db.get(query, params, (err, job) => {
+        if (err || !job) return res.status(404).json({ error: 'Recording job not found or not authorized.' });
+        cleanupTimeshiftSession(jobId, false);
+        res.json({ success: true });
+    });
 });
 
 // Legacy redirect for any old timeshift calls
@@ -5519,88 +6410,383 @@ app.get('/api/dvr/timeshift/:jobId', requireAuth, requireDvrAccess, (req, res) =
     res.redirect(`/api/dvr/timeshift/${jobId}/stream.m3u8`);
 });
 
+// --- Live rewind buffer: one rolling HLS session per channel ---
+function liveBufferDir(channelId) {
+    const safe = String(channelId).replace(/[^a-z0-9_-]/gi, '_').slice(0, 40);
+    const hash = crypto.createHash('sha1').update(String(channelId)).digest('hex').slice(0, 8);
+    return path.join(LIVE_BUFFER_DIR, `${safe}_${hash}`);
+}
 
-app.post('/api/dvr/schedule', requireAuth, requireDvrAccess, async (req, res) => {
-    const { channelId, channelName, programTitle, programStart, programStop } = req.body;
-    const settings = getSettings();
-    const dvrSettings = settings.dvr || {};
-    const preBuffer = (dvrSettings.preBufferMinutes || 0) * 60 * 1000;
-    const postBuffer = (dvrSettings.postBufferMinutes || 0) * 60 * 1000;
+function directorySizeMb(dir) {
+    try {
+        return fs.readdirSync(dir).reduce((total, name) => {
+            try { return total + fs.statSync(path.join(dir, name)).size; } catch (e) { return total; }
+        }, 0) / (1024 * 1024);
+    } catch (e) {
+        return 0;
+    }
+}
 
-    const plannedStart = new Date(new Date(programStart).getTime() - preBuffer).toISOString();
-    const nowMs = Date.now();
-    // If the program already started (or is starting right now), actual start time of recording is now!
-    const effectiveStartTime = (new Date(plannedStart).getTime() < nowMs) ? new Date(nowMs).toISOString() : plannedStart;
+function stopLiveBuffer(channelId, deleteDirectory = true) {
+    const id = String(channelId);
+    const session = activeLiveBuffers.get(id);
+    if (session?.process) {
+        try { session.process.kill('SIGTERM'); } catch (e) { }
+        try { session.process.kill('SIGKILL'); } catch (e) { }
+    }
+    activeLiveBuffers.delete(id);
+    if (deleteDirectory) {
+        setTimeout(() => {
+            if (activeLiveBuffers.has(id)) return;
+            try {
+                if (session?.dir && fs.existsSync(session.dir)) fs.rmSync(session.dir, { recursive: true, force: true });
+            } catch (e) {
+                console.warn(`[LIVE_BUFFER] Could not remove ${session?.dir}:`, e.message);
+            }
+        }, 1000);
+    }
+}
 
-    const newJob = {
-        user_id: req.session.userId,
-        channelId,
-        channelName,
-        programTitle,
-        startTime: effectiveStartTime,
-        programStart: programStart,
-        endTime: new Date(new Date(programStop).getTime() + postBuffer).toISOString(),
-        status: 'scheduled',
-        profileId: dvrSettings.activeRecordingProfileId,
-        userAgentId: settings.activeUserAgentId,
-        preBufferMinutes: dvrSettings.preBufferMinutes || 0,
-        postBufferMinutes: dvrSettings.postBufferMinutes || 0
-    };
+function cleanupStaleLiveBuffers() {
+    try {
+        if (!fs.existsSync(LIVE_BUFFER_DIR)) return;
+        for (const name of fs.readdirSync(LIVE_BUFFER_DIR)) {
+            fs.rmSync(path.join(LIVE_BUFFER_DIR, name), { recursive: true, force: true });
+        }
+        console.log('[LIVE_BUFFER] Cleared stale rewind directories.');
+    } catch (e) {
+        console.warn('[LIVE_BUFFER] Could not clear stale directories:', e.message);
+    }
+}
 
-    const conflictingJobs = await checkForConflicts(newJob, req.session.userId);
-    if (conflictingJobs.length > 0) {
-        return res.status(409).json({ error: 'Recording conflict detected.', newJob, conflictingJobs });
+function waitForFile(filePath, timeoutMs = 8000) {
+    return new Promise((resolve) => {
+        const started = Date.now();
+        const tick = () => {
+            try {
+                if (fs.existsSync(filePath) && fs.statSync(filePath).size > 50) return resolve(true);
+            } catch (e) { }
+            if (Date.now() - started >= timeoutMs) return resolve(false);
+            setTimeout(tick, 150);
+        };
+        tick();
+    });
+}
+
+async function startLiveBuffer(channel, settings) {
+    const channelId = String(channel.id);
+    const existing = activeLiveBuffers.get(channelId);
+    if (existing) return existing;
+
+    assertSafeStreamUrl(channel.url);
+    await assertSafeMediaStreamUrl(channel.url);
+    const dir = liveBufferDir(channelId);
+    const playlistPath = path.join(dir, 'stream.m3u8');
+    const segmentPattern = path.join(dir, 'seg_%05d.ts');
+    try {
+        if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+        fs.mkdirSync(dir, { recursive: true, mode: 0o777 });
+    } catch (e) {
+        throw new Error(`Could not create live rewind directory: ${e.message}`);
     }
 
-    db.run(`INSERT INTO dvr_jobs (user_id, channelId, channelName, programTitle, startTime, endTime, status, profileId, userAgentId, preBufferMinutes, postBufferMinutes, programStart)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [newJob.user_id, newJob.channelId, newJob.channelName, newJob.programTitle, newJob.startTime, newJob.endTime, newJob.status, newJob.profileId, newJob.userAgentId, newJob.preBufferMinutes, newJob.postBufferMinutes, newJob.programStart],
-        function (err) {
-            if (err) {
-                console.error('[DVR_API] Error scheduling new recording:', err);
-                return res.status(500).json({ error: 'Could not schedule recording.' });
-            }
-            const jobWithId = { ...newJob, id: this.lastID };
-            scheduleDvrJob(jobWithId);
-            res.status(201).json({ success: true, job: jobWithId });
+    const userAgent = (settings.userAgents || []).find(ua => ua.id === settings.activeUserAgentId)?.value || 'VLC/3.0.20 (Linux; x86_64)';
+    const minutes = settings.liveRewind?.minutes || 15;
+    const args = [
+        '-v', 'level+error',
+        '-user_agent', userAgent,
+        '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '10',
+        '-rw_timeout', '15000000',
+        '-fflags', '+genpts+discardcorrupt',
+        '-i', channel.url,
+        '-map', '0:v:0?', '-map', '0:a:0?', '-sn', '-dn',
+        '-c', 'copy',
+        '-f', 'hls',
+        '-hls_time', '4',
+        '-hls_list_size', String(liveBufferSegmentCount(minutes)),
+        '-hls_playlist_type', 'event',
+        '-hls_flags', 'delete_segments+append_list+omit_endlist',
+        '-hls_segment_filename', segmentPattern,
+        playlistPath,
+    ];
+    console.log(`[LIVE_BUFFER] Starting for channel ${channelId} (${channel.name || channel.displayName}) for ${minutes} minutes.`);
+    const process = spawn('ffmpeg', args);
+    const session = {
+        channelId,
+        sourceUrl: channel.url,
+        dir,
+        playlistPath,
+        process,
+        lastAccess: Date.now(),
+        diskCapMb: settings.liveRewind?.diskCapMb || 4096,
+    };
+    activeLiveBuffers.set(channelId, session);
+
+    process.stderr.on('data', (data) => {
+        const line = data.toString().trim();
+        if (line) console.warn(`[LIVE_BUFFER][${channelId}] ${line}`);
+    });
+    process.on('error', (err) => console.error(`[LIVE_BUFFER][${channelId}] ${err.message}`));
+    process.on('close', (code) => {
+        console.log(`[LIVE_BUFFER][${channelId}] FFmpeg exited with code ${code}.`);
+        if (activeLiveBuffers.get(channelId) === session) {
+            activeLiveBuffers.delete(channelId);
+            try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) { }
         }
-    );
+    });
+
+    if (!(await waitForFile(playlistPath))) {
+        stopLiveBuffer(channelId);
+        throw new Error('Live rewind buffer did not start in time.');
+    }
+    return session;
+}
+
+function sendLiveBufferPlaylist(playlistPath, res) {
+    try {
+        const playlist = fs.readFileSync(playlistPath, 'utf-8');
+        res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.send(playlist);
+    } catch (e) {
+        res.status(500).send('Error reading live rewind playlist.');
+    }
+}
+
+app.head('/api/livebuffer/:channelId/stream.m3u8', requireAuth, (req, res) => {
+    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.status(200).end();
+});
+
+app.get('/api/livebuffer/:channelId/stream.m3u8', requireAuth, async (req, res) => {
+    const settings = getSettings();
+    if (!settings.liveRewind?.enabled) return res.status(404).send('Live rewind is disabled.');
+    const channelId = String(req.params.channelId);
+    const channel = (readChannels() || []).find(c => String(c.id) === channelId);
+    if (!channel) return res.status(404).send('Channel not found.');
+
+    if (!activeLiveBuffers.has(channelId)) {
+        const space = await assertDvrFreeSpace(settings);
+        if (!space.ok) return res.status(507).send(space.error);
+    }
+
+    try {
+        const session = await startLiveBuffer(channel, settings);
+        session.lastAccess = Date.now();
+        if (!fs.existsSync(session.playlistPath)) return res.status(503).send('Live rewind is initializing.');
+        sendLiveBufferPlaylist(session.playlistPath, res);
+    } catch (error) {
+        console.error(`[LIVE_BUFFER] Could not start channel ${channelId}:`, error.message);
+        res.status(503).send(error.message);
+    }
+});
+
+app.get('/api/livebuffer/:channelId/:file', requireAuth, (req, res) => {
+    const channelId = String(req.params.channelId);
+    const session = activeLiveBuffers.get(channelId);
+    if (!session) return res.status(404).send('Live rewind session not found.');
+    session.lastAccess = Date.now();
+
+    const file = req.params.file;
+    if (!/^seg_\d+\.ts$/.test(file)) return res.status(400).send('Invalid segment filename.');
+    const segmentPath = path.join(session.dir, file);
+    if (!segmentPath.startsWith(session.dir + path.sep)) return res.status(400).send('Invalid segment filename.');
+    if (!fs.existsSync(segmentPath)) return res.status(404).send('Segment not found.');
+
+    res.setHeader('Content-Type', 'video/mp2t');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    fs.createReadStream(segmentPath).pipe(res);
+});
+
+setInterval(() => {
+    const now = Date.now();
+    for (const [channelId, session] of activeLiveBuffers.entries()) {
+        if (now - session.lastAccess > 300000) {
+            console.log(`[LIVE_BUFFER] Stopping idle session for channel ${channelId}.`);
+            stopLiveBuffer(channelId);
+            continue;
+        }
+        const sizeMb = directorySizeMb(session.dir);
+        if (sizeMb > session.diskCapMb) {
+            console.warn(`[LIVE_BUFFER] Channel ${channelId} hit its ${session.diskCapMb} MB cap; stopping.`);
+            stopLiveBuffer(channelId);
+        }
+    }
+}, 30000);
+
+cleanupStaleLiveBuffers();
+try {
+    const timeshiftDir = path.join(DVR_DIR, '.timeshift');
+    if (fs.existsSync(timeshiftDir)) {
+        for (const name of fs.readdirSync(timeshiftDir)) {
+            fs.rmSync(path.join(timeshiftDir, name), { recursive: true, force: true });
+        }
+    }
+} catch (e) {
+    console.warn('[DVR_TIMESHIFT] Could not clear stale timeshift directories:', e.message);
+}
+
+app.post('/api/dvr/schedule', requireAuth, requireDvrAccess, async (req, res) => {
+    try {
+        const { channelId, channelName, programTitle, programStart, programStop } = req.body;
+        const settings = getSettings();
+        const dvrSettings = settings.dvr || {};
+        const channel = (readChannels() || []).find(c => String(c.id) === String(channelId));
+        if (!channel) return res.status(400).json({ error: 'Channel not found.' });
+        if (!isChannelAllowed(channel, allowedSourcesFromUser(req.user))) {
+            return res.status(403).json({ error: 'You do not have access to this channel.' });
+        }
+        const window = validateRecordingWindow(programStart, programStop, dvrSettings.maxRecordingHours);
+        if (!window.ok) return res.status(400).json({ error: window.error });
+
+        const preBuffer = (dvrSettings.preBufferMinutes || 0) * 60 * 1000;
+        const postBuffer = (dvrSettings.postBufferMinutes || 0) * 60 * 1000;
+        const plannedStart = new Date(window.startMs - preBuffer).toISOString();
+        const nowMs = Date.now();
+        const effectiveStartTime = new Date(plannedStart).getTime() < nowMs ? new Date(nowMs).toISOString() : plannedStart;
+        const endTime = new Date(window.endMs + postBuffer).toISOString();
+        if (Date.parse(endTime) <= nowMs) return res.status(400).json({ error: 'The programme has already ended.' });
+
+        const newJob = {
+            user_id: req.session.userId,
+            channelId,
+            channelName: channel.displayName || channel.name || channelName,
+            programTitle: String(programTitle || channel.displayName || channel.name || 'Recording').slice(0, 200),
+            startTime: effectiveStartTime,
+            programStart: new Date(window.startMs).toISOString(),
+            endTime,
+            status: 'scheduled',
+            profileId: dvrSettings.activeRecordingProfileId,
+            userAgentId: settings.activeUserAgentId,
+            preBufferMinutes: dvrSettings.preBufferMinutes || 0,
+            postBufferMinutes: dvrSettings.postBufferMinutes || 0
+        };
+
+        const result = await withDvrScheduleLock(async () => {
+            const conflictingJobs = await checkForConflicts(newJob);
+            if (conflictingJobs.length > 0) return { conflicts: conflictingJobs };
+            const inserted = await dbRun(db, `INSERT INTO dvr_jobs (user_id, channelId, channelName, programTitle, startTime, endTime, status, profileId, userAgentId, preBufferMinutes, postBufferMinutes, programStart)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [newJob.user_id, newJob.channelId, newJob.channelName, newJob.programTitle, newJob.startTime, newJob.endTime, newJob.status, newJob.profileId, newJob.userAgentId, newJob.preBufferMinutes, newJob.postBufferMinutes, newJob.programStart]);
+            return { job: { ...newJob, id: inserted.lastID } };
+        });
+        if (result.conflicts) {
+            return res.status(409).json({ error: 'Recording conflict detected.', newJob, conflictingJobs: conflictsForResponse(result.conflicts, req.session.isAdmin) });
+        }
+        scheduleDvrJob(result.job);
+        res.status(201).json({ success: true, job: result.job });
+    } catch (error) {
+        console.error('[DVR_API] Error scheduling new recording:', error);
+        res.status(500).json({ error: 'Could not schedule recording.' });
+    }
 });
 
 app.post('/api/dvr/schedule/manual', requireAuth, requireDvrAccess, async (req, res) => {
-    const { channelId, channelName, startTime, endTime } = req.body;
-    const settings = getSettings();
-    const dvrSettings = settings.dvr || {};
-
-    const newJob = {
-        user_id: req.session.userId,
-        channelId,
-        channelName,
-        programTitle: `Manual Recording: ${channelName}`,
-        startTime,
-        endTime,
-        status: 'scheduled',
-        profileId: dvrSettings.activeRecordingProfileId,
-        userAgentId: settings.activeUserAgentId,
-        preBufferMinutes: 0,
-        postBufferMinutes: 0
-    };
-
-    const conflictingJobs = await checkForConflicts(newJob, req.session.userId);
-    if (conflictingJobs.length > 0) {
-        return res.status(409).json({ error: 'Recording conflict detected.', newJob, conflictingJobs });
-    }
-
-    db.run(`INSERT INTO dvr_jobs (user_id, channelId, channelName, programTitle, startTime, endTime, status, profileId, userAgentId, preBufferMinutes, postBufferMinutes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [newJob.user_id, newJob.channelId, newJob.channelName, newJob.programTitle, newJob.startTime, newJob.endTime, newJob.status, newJob.profileId, newJob.userAgentId, newJob.preBufferMinutes, newJob.postBufferMinutes],
-        function (err) {
-            if (err) return res.status(500).json({ error: 'Could not schedule recording.' });
-            const jobWithId = { ...newJob, id: this.lastID };
-            scheduleDvrJob(jobWithId);
-            res.status(201).json({ success: true, job: jobWithId });
+    try {
+        const { channelId, channelName, startTime, endTime, programTitle } = req.body;
+        const settings = getSettings();
+        const dvrSettings = settings.dvr || {};
+        const channel = (readChannels() || []).find(c => String(c.id) === String(channelId));
+        if (!channel) return res.status(400).json({ error: 'Channel not found.' });
+        if (!isChannelAllowed(channel, allowedSourcesFromUser(req.user))) {
+            return res.status(403).json({ error: 'You do not have access to this channel.' });
         }
-    );
+        const window = validateRecordingWindow(startTime, endTime, dvrSettings.maxRecordingHours);
+        if (!window.ok) return res.status(400).json({ error: window.error });
+        const effectiveStartMs = Math.max(window.startMs, Date.now());
+        if (window.endMs <= effectiveStartMs) return res.status(400).json({ error: 'End time must be in the future.' });
+
+        const newJob = {
+            user_id: req.session.userId,
+            channelId,
+            channelName: channel.displayName || channel.name || channelName,
+            programTitle: String(programTitle || `Manual Recording: ${channel.displayName || channel.name || channelName}`).slice(0, 200),
+            startTime: new Date(effectiveStartMs).toISOString(),
+            endTime: new Date(window.endMs).toISOString(),
+            status: 'scheduled',
+            profileId: dvrSettings.activeRecordingProfileId,
+            userAgentId: settings.activeUserAgentId,
+            preBufferMinutes: 0,
+            postBufferMinutes: 0
+        };
+
+        const result = await withDvrScheduleLock(async () => {
+            const conflictingJobs = await checkForConflicts(newJob);
+            if (conflictingJobs.length > 0) return { conflicts: conflictingJobs };
+            const inserted = await dbRun(db, `INSERT INTO dvr_jobs (user_id, channelId, channelName, programTitle, startTime, endTime, status, profileId, userAgentId, preBufferMinutes, postBufferMinutes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [newJob.user_id, newJob.channelId, newJob.channelName, newJob.programTitle, newJob.startTime, newJob.endTime, newJob.status, newJob.profileId, newJob.userAgentId, newJob.preBufferMinutes, newJob.postBufferMinutes]);
+            return { job: { ...newJob, id: inserted.lastID } };
+        });
+        if (result.conflicts) {
+            return res.status(409).json({ error: 'Recording conflict detected.', newJob, conflictingJobs: conflictsForResponse(result.conflicts, req.session.isAdmin) });
+        }
+        scheduleDvrJob(result.job);
+        res.status(201).json({ success: true, job: result.job });
+    } catch (error) {
+        console.error('[DVR_API] Error scheduling manual recording:', error);
+        res.status(500).json({ error: 'Could not schedule recording.' });
+    }
+});
+
+app.post('/api/dvr/series', requireAuth, requireDvrAccess, async (req, res) => {
+    try {
+        const { channelId, programTitle } = req.body;
+        const channel = (readChannels() || []).find(c => String(c.id) === String(channelId));
+        const title = String(programTitle || '').trim();
+        if (!channel || !title) return res.status(400).json({ error: 'A valid channel and programme title are required.' });
+        await dbRun(db, "INSERT OR IGNORE INTO dvr_series_rules (user_id, channelId, channelName, programTitle) VALUES (?, ?, ?, ?)",
+            [req.session.userId, channel.id, channel.displayName || channel.name, title]);
+        const rule = await dbGet(db, "SELECT * FROM dvr_series_rules WHERE user_id = ? AND channelId = ? AND programTitle = ?",
+            [req.session.userId, channel.id, title]);
+        const scheduled = await syncSeriesRules(rule.id);
+        res.status(201).json({ success: true, rule, scheduled });
+    } catch (error) {
+        console.error('[DVR_SERIES] Could not create series rule:', error);
+        res.status(500).json({ error: 'Could not create series recording.' });
+    }
+});
+
+app.get('/api/dvr/series', requireAuth, (req, res) => {
+    if (!req.session.isAdmin && !req.session.canUseDvr) return res.json([]);
+    const query = req.session.isAdmin
+        ? "SELECT r.*, u.username FROM dvr_series_rules r JOIN users u ON u.id = r.user_id ORDER BY r.createdAt DESC"
+        : "SELECT r.* FROM dvr_series_rules r WHERE r.user_id = ? ORDER BY r.createdAt DESC";
+    db.all(query, req.session.isAdmin ? [] : [req.session.userId], (err, rows) => {
+        if (err) return res.status(500).json({ error: 'Could not load series recordings.' });
+        res.json(rows);
+    });
+});
+
+app.delete('/api/dvr/series/:id', requireAuth, requireDvrAccess, async (req, res) => {
+    try {
+        const id = parseInt(req.params.id, 10);
+        const rule = await dbGet(db,
+            req.session.isAdmin ? "SELECT * FROM dvr_series_rules WHERE id = ?" : "SELECT * FROM dvr_series_rules WHERE id = ? AND user_id = ?",
+            req.session.isAdmin ? [id] : [id, req.session.userId]);
+        if (!rule) return res.status(404).json({ error: 'Series recording not found or not authorized.' });
+        const jobs = await dbAll(db, "SELECT id FROM dvr_jobs WHERE series_rule_id = ? AND status = 'scheduled'", [id]);
+        for (const job of jobs) {
+            if (activeDvrJobs.has(job.id)) {
+                activeDvrJobs.get(job.id)?.cancel();
+                activeDvrJobs.delete(job.id);
+            }
+            await dbRun(db, "UPDATE dvr_jobs SET status = 'cancelled' WHERE id = ?", [job.id]);
+        }
+        await dbRun(db, "DELETE FROM dvr_series_rules WHERE id = ?", [id]);
+        res.json({ success: true, cancelled: jobs.length });
+    } catch (error) {
+        console.error('[DVR_SERIES] Could not delete series rule:', error);
+        res.status(500).json({ error: 'Could not delete series recording.' });
+    }
 });
 
 // MODIFIED: Endpoint logic to show all jobs to admin, or user's jobs to them.
@@ -5637,13 +6823,16 @@ app.get('/api/dvr/jobs', requireAuth, (req, res) => {
     }
 });
 
-// MODIFIED: Endpoint to show all completed recordings to everyone.
+// Completed recordings are private to their owner; admins see every user's.
 app.get('/api/dvr/recordings', requireAuth, (req, res) => {
-    // All authenticated users can see all completed recordings, with username
-    const query = "SELECT r.*, u.username FROM dvr_recordings r JOIN users u ON r.user_id = u.id ORDER BY r.startTime DESC";
-    db.all(query, [], (err, rows) => {
+    const base = "SELECT r.*, u.username FROM dvr_recordings r JOIN users u ON r.user_id = u.id";
+    const query = req.session.isAdmin
+        ? `${base} ORDER BY r.startTime DESC`
+        : `${base} WHERE r.user_id = ? ORDER BY r.startTime DESC`;
+    const params = req.session.isAdmin ? [] : [req.session.userId];
+    db.all(query, params, (err, rows) => {
         if (err) return res.status(500).json({ error: 'Failed to retrieve recordings.' });
-        const recordingsWithFilename = rows.map(r => ({ ...r, filename: path.basename(r.filePath) }));
+        const recordingsWithFilename = rows.map(({ filePath, ...r }) => ({ ...r, filename: path.basename(filePath) }));
         res.json(recordingsWithFilename);
     });
 });
@@ -5651,9 +6840,13 @@ app.get('/api/dvr/recordings', requireAuth, (req, res) => {
 // Endpoint to on-demand remux a legacy .ts recording to seekable .mp4
 app.post('/api/dvr/recordings/:id/remux', requireAuth, requireDvrAccess, async (req, res) => {
     const recordingId = req.params.id;
-    db.get("SELECT * FROM dvr_recordings WHERE id = ?", [recordingId], async (err, recording) => {
+    const query = req.session.isAdmin
+        ? "SELECT * FROM dvr_recordings WHERE id = ?"
+        : "SELECT * FROM dvr_recordings WHERE id = ? AND user_id = ?";
+    const params = req.session.isAdmin ? [recordingId] : [recordingId, req.session.userId];
+    db.get(query, params, async (err, recording) => {
         if (err || !recording) {
-            return res.status(404).json({ error: 'Recording not found.' });
+            return res.status(404).json({ error: 'Recording not found or not authorized.' });
         }
         if (!recording.filePath.endsWith('.ts')) {
             return res.json({ success: true, filename: path.basename(recording.filePath), alreadyMp4: true });
@@ -5760,24 +6953,29 @@ app.delete('/api/dvr/recordings/all', requireAuth, requireDvrAccess, (req, res) 
 });
 
 
-app.delete('/api/dvr/jobs/:id', requireAuth, requireDvrAccess, (req, res) => {
-    const { id } = req.params;
-    const jobId = parseInt(id, 10);
-    if (activeDvrJobs.has(jobId)) {
-        activeDvrJobs.get(jobId)?.cancel();
-        activeDvrJobs.delete(jobId);
-    }
-    stopRecording(jobId);
-    // MODIFIED: Admin can cancel any job, user can only cancel their own.
-    const query = req.session.isAdmin ? "UPDATE dvr_jobs SET status = 'cancelled' WHERE id = ?" : "UPDATE dvr_jobs SET status = 'cancelled' WHERE id = ? AND user_id = ?";
-    const params = req.session.isAdmin ? [jobId] : [jobId, req.session.userId];
+app.delete('/api/dvr/jobs/:id', requireAuth, requireDvrAccess, async (req, res) => {
+    try {
+        const jobId = parseInt(req.params.id, 10);
+        const job = await getDvrJobForUser(jobId, req.session);
+        if (!job) return res.status(404).json({ error: 'Job not found or not authorized to cancel.' });
 
-    db.run(query, params, function (err) {
-        if (err) return res.status(500).json({ error: 'Could not cancel job.' });
-        if (this.changes === 0) return res.status(404).json({ error: 'Job not found or not authorized to cancel.' });
+        if (activeDvrJobs.has(jobId)) {
+            activeDvrJobs.get(jobId)?.cancel();
+            activeDvrJobs.delete(jobId);
+        }
+        if (job.status === 'scheduled') {
+            await dbRun(db, "UPDATE dvr_jobs SET status = 'cancelled' WHERE id = ?", [jobId]);
+        } else if (job.status === 'recording' || job.status === 'reconnecting') {
+            stopRecording(jobId);
+        } else {
+            return res.status(400).json({ error: 'Only scheduled or active jobs can be cancelled.' });
+        }
         console.log(`[DVR_API] Cancelled job ${jobId}.`);
         res.json({ success: true });
-    });
+    } catch (error) {
+        console.error('[DVR_API] Error cancelling job:', error);
+        res.status(500).json({ error: 'Could not cancel job.' });
+    }
 });
 
 app.delete('/api/dvr/recordings/:id', requireAuth, requireDvrAccess, (req, res) => {
@@ -5801,53 +6999,62 @@ app.delete('/api/dvr/recordings/:id', requireAuth, requireDvrAccess, (req, res) 
     });
 });
 
-app.post('/api/dvr/jobs/:id/stop', requireAuth, requireDvrAccess, (req, res) => {
-    const { id } = req.params;
-    const jobId = parseInt(id, 10);
-    console.log(`[DVR_API] Received request to stop recording for job ${jobId}.`);
-    stopRecording(jobId);
-
-    const actualEndTime = new Date().toISOString();
-    // MODIFIED: Admin can stop any job, user can only stop their own.
-    const query = req.session.isAdmin
-        ? "UPDATE dvr_jobs SET status = 'completed', endTime = ? WHERE id = ?"
-        : "UPDATE dvr_jobs SET status = 'completed', endTime = ? WHERE id = ? AND user_id = ?";
-    const params = req.session.isAdmin ? [actualEndTime, jobId] : [actualEndTime, jobId, req.session.userId];
-
-    db.run(query, params, function (err) {
-        if (err) return res.status(500).json({ error: 'Could not update job status after stop.' });
-        if (this.changes === 0) return res.status(404).json({ error: 'Job not found or not authorized to stop.' });
-        broadcastDvrUpdate(req.session.userId, { jobId, status: 'completed', endTime: actualEndTime });
+app.post('/api/dvr/jobs/:id/stop', requireAuth, requireDvrAccess, async (req, res) => {
+    try {
+        const jobId = parseInt(req.params.id, 10);
+        const job = await getDvrJobForUser(jobId, req.session);
+        if (!job) return res.status(404).json({ error: 'Job not found or not authorized to stop.' });
+        if (job.status !== 'recording' && job.status !== 'reconnecting') {
+            return res.status(400).json({ error: 'This job is not recording.' });
+        }
+        console.log(`[DVR_API] Received request to stop recording for job ${jobId}.`);
+        if (activeDvrJobs.has(jobId)) {
+            activeDvrJobs.get(jobId)?.cancel();
+            activeDvrJobs.delete(jobId);
+        }
+        stopRecording(jobId);
+        const actualEndTime = new Date().toISOString();
+        await dbRun(db, "UPDATE dvr_jobs SET status = 'completed', endTime = ? WHERE id = ?", [actualEndTime, jobId]);
+        broadcastDvrUpdate(job.user_id, { jobId, status: 'completed', endTime: actualEndTime });
         res.json({ success: true, endTime: actualEndTime });
-    });
+    } catch (error) {
+        console.error('[DVR_API] Error stopping job:', error);
+        res.status(500).json({ error: 'Could not update job status after stop.' });
+    }
 });
 
-app.put('/api/dvr/jobs/:id', requireAuth, requireDvrAccess, (req, res) => {
-    const { id } = req.params;
-    const { startTime, endTime } = req.body;
-    if (!startTime || !endTime) {
-        return res.status(400).json({ error: 'Both startTime and endTime are required.' });
-    }
+app.put('/api/dvr/jobs/:id', requireAuth, requireDvrAccess, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { startTime, endTime } = req.body;
+        const dvrSettings = getSettings().dvr || {};
+        const window = validateRecordingWindow(startTime, endTime, dvrSettings.maxRecordingHours);
+        if (!window.ok) return res.status(400).json({ error: window.error });
 
-    // MODIFIED: Admin can edit any job, user can only edit their own.
-    const getQuery = req.session.isAdmin ? "SELECT * from dvr_jobs WHERE id = ?" : "SELECT * from dvr_jobs WHERE id = ? AND user_id = ?";
-    const getParams = req.session.isAdmin ? [id] : [id, req.session.userId];
-
-    db.get(getQuery, getParams, (err, job) => {
-        if (err) return res.status(500).json({ error: 'DB error fetching job.' });
+        const job = await getDvrJobForUser(id, req.session);
         if (!job) return res.status(404).json({ error: 'Job not found or unauthorized.' });
         if (job.status !== 'scheduled') return res.status(400).json({ error: 'Only scheduled jobs can be modified.' });
 
-        db.run("UPDATE dvr_jobs SET startTime = ?, endTime = ? WHERE id = ?", [startTime, endTime, id], function (err) {
-            if (err) return res.status(500).json({ error: 'Could not update job.' });
+        const startIso = new Date(window.startMs).toISOString();
+        const endIso = new Date(window.endMs).toISOString();
+        const updatedJob = { ...job, startTime: startIso, endTime: endIso };
 
-            const updatedJob = { ...job, startTime, endTime };
-            scheduleDvrJob(updatedJob);
-
-            console.log(`[DVR_API] Updated and rescheduled job ${id}.`);
-            res.json({ success: true, job: updatedJob });
+        const result = await withDvrScheduleLock(async () => {
+            const conflictingJobs = await checkForConflicts(updatedJob);
+            if (conflictingJobs.length > 0) return { conflicts: conflictingJobs };
+            await dbRun(db, "UPDATE dvr_jobs SET startTime = ?, endTime = ? WHERE id = ?", [startIso, endIso, id]);
+            return { job: updatedJob };
         });
-    });
+        if (result.conflicts) {
+            return res.status(409).json({ error: 'Recording conflict detected.', newJob: updatedJob, conflictingJobs: conflictsForResponse(result.conflicts, req.session.isAdmin) });
+        }
+        scheduleDvrJob(result.job);
+        console.log(`[DVR_API] Updated and rescheduled job ${id}.`);
+        res.json({ success: true, job: result.job });
+    } catch (error) {
+        console.error('[DVR_API] Error updating job:', error);
+        res.status(500).json({ error: 'Could not update job.' });
+    }
 });
 
 app.delete('/api/dvr/jobs/:id/history', requireAuth, requireDvrAccess, (req, res) => {
@@ -5907,16 +7114,23 @@ app.get('/api/events', requireAuth, (req, res) => {
     });
 });
 
-app.post('/api/validate-url', requireAuth, async (req, res) => {
+app.post('/api/validate-url', requireAuth, requireAdmin, async (req, res) => {
     const { url } = req.body;
     if (!url) {
         return res.status(400).json({ error: 'URL is required.' });
     }
-    console.log(`[VALIDATE_URL] Testing URL: ${url}`);
+    console.log(`[VALIDATE_URL] Testing URL: ${safeUrlForLog(url)}`);
     try {
-        await fetchUrlContent(url);
+        // safeGet blocks non-http(s) schemes and internal/private addresses on every redirect hop.
+        const { response } = await safeGet(url, { timeout: 30000 });
+        response.destroy(); // Only reachability matters; don't download the whole playlist/EPG.
         res.json({ success: true, message: 'URL is reachable and returned a successful response.' });
     } catch (error) {
+        if (error instanceof SsrfBlockedError) {
+            console.warn(`[VALIDATE_URL] Blocked: ${error.message}`);
+            const hint = /address/.test(error.message) ? ' To allow LAN sources, set SSRF_ALLOW_PRIVATE_NETWORKS=true or list the host in SSRF_ALLOWED_HOSTS.' : '';
+            return res.status(400).json({ success: false, error: `${error.message}${hint}` });
+        }
         res.status(400).json({ success: false, error: `URL is not reachable. Error: ${error.message}` });
     }
 });
@@ -5926,7 +7140,7 @@ app.get('/api/hardware', requireAuth, (req, res) => {
     res.json(detectedHardware);
 });
 
-app.get('/api/public-ip', requireAuth, (req, res) => {
+app.get('/api/public-ip', requireAuth, requireAdmin, (req, res) => {
     console.log('[IP_API] Fetching public IP address...');
     https.get('https://ifconfig.me/ip', (ipRes) => {
         let data = '';
@@ -5945,6 +7159,33 @@ app.get('/api/public-ip', requireAuth, (req, res) => {
 // --- Image Proxy Endpoint (for VOD posters) ---
 // Proxies HTTP/HTTPS images to avoid mixed content warnings
 // Now with server-side disk caching for performance
+// The proxy is open to every LAN device by design, so keep its disk use bounded.
+let lastImageCachePrune = 0;
+async function pruneImageCache() {
+    if (Date.now() - lastImageCachePrune < 10 * 60 * 1000) return;
+    lastImageCachePrune = Date.now();
+    try {
+        const entries = [];
+        for (const name of await fs.promises.readdir(IMAGE_CACHE_DIR)) {
+            try {
+                const { mtimeMs, size } = await fs.promises.stat(path.join(IMAGE_CACHE_DIR, name));
+                entries.push({ name, mtimeMs, size });
+            } catch (e) { /* raced with another prune */ }
+        }
+        let total = entries.reduce((sum, e) => sum + e.size, 0);
+        if (total <= IMAGE_CACHE_MAX_BYTES) return;
+        entries.sort((a, b) => a.mtimeMs - b.mtimeMs);
+        for (const { name, size } of entries) {
+            if (total <= IMAGE_CACHE_MAX_BYTES) break;
+            await fs.promises.unlink(path.join(IMAGE_CACHE_DIR, name)).catch(() => { });
+            total -= size;
+        }
+        console.log(`[IMAGE_PROXY] Cache pruned to ${Math.round(total / 1048576)} MB.`);
+    } catch (err) {
+        console.error('[IMAGE_PROXY] Cache prune failed:', err.message);
+    }
+}
+
 app.get('/api/image-proxy', allowLocalOrAuth, (req, res) => {
     const imageUrl = req.query.url;
 
@@ -5952,11 +7193,12 @@ app.get('/api/image-proxy', allowLocalOrAuth, (req, res) => {
         return res.status(400).send('Missing url parameter');
     }
 
-    // Validate URL
+    // Validate URL scheme and IP-literal hosts up front; hostnames are re-checked at connect time.
     try {
-        new URL(imageUrl);
+        assertSafeUrl(imageUrl);
     } catch (err) {
-        return res.status(400).send('Invalid URL');
+        console.warn(`[IMAGE_PROXY] Blocked URL ${safeUrlForLog(imageUrl)}: ${err.message}`);
+        return res.status(400).send('Invalid or disallowed URL');
     }
 
     // Generate a cache filename based on the URL hash
@@ -5968,54 +7210,71 @@ app.get('/api/image-proxy', allowLocalOrAuth, (req, res) => {
     if (fs.existsSync(cacheFilePath) && fs.existsSync(cacheMetaPath)) {
         try {
             const meta = JSON.parse(fs.readFileSync(cacheMetaPath, 'utf-8'));
-            console.log(`[IMAGE_PROXY] Serving from cache: ${imageUrl}`);
-
-            // Set headers from cached metadata
-            res.setHeader('Content-Type', meta.contentType);
-            res.setHeader('Cache-Control', 'public, max-age=2592000'); // 30 days for cached images
-            res.setHeader('X-Cache', 'HIT');
-
-            // Stream cached file
-            const fileStream = fs.createReadStream(cacheFilePath);
-            fileStream.pipe(res);
-
-            fileStream.on('error', (err) => {
-                console.error(`[IMAGE_PROXY] Error reading cached file:`, err.message);
-                // If cache is corrupted, delete and fall through to fetch
-                try {
-                    fs.unlinkSync(cacheFilePath);
-                    fs.unlinkSync(cacheMetaPath);
-                } catch (e) { }
-                res.status(500).send('Cache read error');
-            });
-
-            return;
+            const cachedType = String(meta.contentType || '').split(';')[0].trim().toLowerCase();
+            if (!IMAGE_PROXY_TYPES.has(cachedType)) {
+                // An old cache entry from before SVG was blocked: drop it and fetch again.
+                fs.unlinkSync(cacheFilePath);
+                fs.unlinkSync(cacheMetaPath);
+            } else {
+                // sendFile adds ETag and Last-Modified, answers If-None-Match with a 304 and handles Range.
+                return res.sendFile(cacheFilePath, {
+                    dotfiles: 'allow', headers: { 'Content-Type': cachedType, 'Cache-Control': IMAGE_CACHE_CONTROL, 'X-Cache': 'HIT' },
+                }, (err) => {
+                    if (err && err.code !== 'ECONNABORTED' && !res.headersSent) res.status(500).send('Cache read error');
+                });
+            }
         } catch (err) {
             console.error(`[IMAGE_PROXY] Error reading cache metadata:`, err.message);
             // Fall through to fetch fresh
         }
     }
 
-    console.log(`[IMAGE_PROXY] Fetching and caching image: ${imageUrl}`);
+    console.log(`[IMAGE_PROXY] Fetching and caching image: ${safeUrlForLog(imageUrl)}`);
 
-    // Determine protocol (http or https)
-    const protocol = imageUrl.startsWith('https') ? https : http;
-
-    protocol.get(imageUrl, (imageRes) => {
-        // Check if response is an image
-        const contentType = imageRes.headers['content-type'];
-        if (!contentType || !contentType.startsWith('image/')) {
-            console.error(`[IMAGE_PROXY] Invalid content type: ${contentType}`);
-            return res.status(400).send('URL does not point to an image');
+    safeGet(imageUrl, { timeout: 15000 }).then(({ response: imageRes }) => {
+        // Only raster images: SVG can execute script when opened directly.
+        const mime = String(imageRes.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+        if (!IMAGE_PROXY_TYPES.has(mime)) {
+            console.error(`[IMAGE_PROXY] Invalid content type: ${mime || '(none)'}`);
+            imageRes.destroy();
+            return res.status(400).send('URL does not point to a supported image');
+        }
+        const declaredLength = parseInt(imageRes.headers['content-length'], 10);
+        if (declaredLength > IMAGE_PROXY_MAX_BYTES) {
+            imageRes.destroy();
+            return res.status(413).send('Image too large');
         }
 
         // Set response headers
-        res.setHeader('Content-Type', contentType);
-        res.setHeader('Cache-Control', 'public, max-age=2592000'); // 30 days
+        res.setHeader('Content-Type', mime);
+        res.setHeader('Cache-Control', IMAGE_CACHE_CONTROL);
         res.setHeader('X-Cache', 'MISS');
 
-        // Create write stream to save to cache
-        const fileStream = fs.createWriteStream(cacheFilePath);
+        // Write to a temp file and only move it into the cache once the full image arrived,
+        // so a truncated or oversized download is never served from cache.
+        const tempCachePath = `${cacheFilePath}.${process.pid}.${Date.now()}.tmp`;
+        const fileStream = fs.createWriteStream(tempCachePath);
+        let receivedBytes = 0;
+        let aborted = false;
+
+        const discardTemp = () => fs.unlink(tempCachePath, () => { });
+
+        imageRes.on('data', (chunk) => {
+            receivedBytes += chunk.length;
+            if (receivedBytes > IMAGE_PROXY_MAX_BYTES && !aborted) {
+                aborted = true;
+                console.warn(`[IMAGE_PROXY] Image exceeded ${IMAGE_PROXY_MAX_BYTES} bytes, aborting: ${safeUrlForLog(imageUrl)}`);
+                imageRes.destroy();
+                fileStream.destroy();
+                discardTemp();
+                res.destroy();
+            }
+        });
+        imageRes.on('error', () => {
+            aborted = true;
+            fileStream.destroy();
+            discardTemp();
+        });
 
         // Pipe to both cache and response
         imageRes.pipe(fileStream);
@@ -6023,16 +7282,20 @@ app.get('/api/image-proxy', allowLocalOrAuth, (req, res) => {
 
         // Save metadata when done
         fileStream.on('finish', () => {
+            if (aborted) return discardTemp();
             const meta = {
                 url: imageUrl,
-                contentType: contentType,
+                contentType: mime,
                 cachedAt: new Date().toISOString()
             };
             try {
+                fs.renameSync(tempCachePath, cacheFilePath);
                 fs.writeFileSync(cacheMetaPath, JSON.stringify(meta, null, 2));
                 console.log(`[IMAGE_PROXY] Cached image: ${urlHash}`);
+                pruneImageCache();
             } catch (err) {
-                console.error(`[IMAGE_PROXY] Failed to write cache metadata:`, err.message);
+                console.error(`[IMAGE_PROXY] Failed to write cache entry:`, err.message);
+                discardTemp();
             }
         });
 
@@ -6041,9 +7304,13 @@ app.get('/api/image-proxy', allowLocalOrAuth, (req, res) => {
             // Continue serving even if cache write fails
         });
 
-    }).on('error', (err) => {
-        console.error(`[IMAGE_PROXY] Error fetching image from ${imageUrl}:`, err.message);
-        res.status(500).send('Failed to fetch image');
+    }).catch((err) => {
+        if (err instanceof SsrfBlockedError) {
+            console.warn(`[IMAGE_PROXY] Blocked ${safeUrlForLog(imageUrl)}: ${err.message}`);
+            return res.status(400).send('Invalid or disallowed URL');
+        }
+        console.error(`[IMAGE_PROXY] Error fetching image from ${safeUrlForLog(imageUrl)}:`, err.message);
+        res.status(502).send('Failed to fetch image');
     });
 });
 
@@ -6054,6 +7321,7 @@ const settingsUpload = multer({
         destination: (req, file, cb) => cb(null, DATA_DIR),
         filename: (req, file, cb) => cb(null, 'settings.tmp.json')
     }),
+    limits: { fileSize: 10 * 1024 * 1024, files: 1 },
     fileFilter: (req, file, cb) => {
         if (file.mimetype === 'application/json') {
             cb(null, true);
@@ -6063,7 +7331,7 @@ const settingsUpload = multer({
     }
 });
 
-app.get('/api/settings/export', requireAdmin, (req, res) => {
+app.get('/api/settings/export', requireAuth, requireAdmin, (req, res) => {
     if (fs.existsSync(SETTINGS_PATH)) {
         res.download(SETTINGS_PATH, 'viniplay-settings-backup.json', (err) => {
             if (err) {
@@ -6075,7 +7343,7 @@ app.get('/api/settings/export', requireAdmin, (req, res) => {
     }
 });
 
-app.post('/api/settings/import', requireAdmin, settingsUpload.single('settingsFile'), (req, res) => {
+app.post('/api/settings/import', requireAuth, requireAdmin, settingsUpload.single('settingsFile'), (req, res) => {
     if (!req.file) {
         return res.status(400).json({ error: 'No settings file was uploaded.' });
     }
@@ -6237,7 +7505,8 @@ app.post('/api/logs/client', requireAuth, express.text({ type: ['text/*', 'appli
             const tag = entry.tag || 'CLIENT';
             const msg = entry.message || '';
             const meta = entry.data ? ` | ${typeof entry.data === 'object' ? JSON.stringify(entry.data) : entry.data}` : '';
-            console.log(`[CLIENT:${deviceId}] [${tag}] ${msg}${meta}`);
+            // One line per entry: a newline from the browser must not forge a log record.
+            console.log(String(`[CLIENT:${deviceId}] [${tag}] ${msg}${meta}`).replace(/[\r\n]+/g, ' '));
         });
 
         res.sendStatus(204);
@@ -6248,12 +7517,29 @@ app.post('/api/logs/client', requireAuth, express.text({ type: ['text/*', 'appli
 });
 
 // --- Main Route Handling ---
+// Unknown API paths must not fall through to the SPA and look like a successful HTML 200.
+app.use('/api', (req, res) => {
+    res.status(404).json({ error: 'API endpoint not found.' });
+});
+
+// Everything real is already served by express.static above. This only handles client-side
+// routes; building a path from req.path here let `..` read files outside public/.
 app.get('*', (req, res) => {
-    const filePath = path.join(PUBLIC_DIR, req.path);
-    if (fs.existsSync(filePath) && fs.lstatSync(filePath).isFile()) {
-        return res.sendFile(filePath);
-    }
     res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
+});
+
+// Last-resort error handler: keep stack traces and SQL messages out of responses, and give
+// multer/body-parser failures a JSON status instead of the default HTML page.
+app.use((err, req, res, next) => {
+    if (res.headersSent) return next(err);
+    if (err instanceof multer.MulterError) {
+        const status = err.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+        return res.status(status).json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'File is too large.' : 'Upload failed.' });
+    }
+    if (err.type === 'entity.too.large') return res.status(413).json({ error: 'Request is too large.' });
+    if (err instanceof SyntaxError && err.status === 400) return res.status(400).json({ error: 'Invalid JSON body.' });
+    console.error('[SERVER_ERROR]', err);
+    res.status(500).json({ error: 'Internal server error.' });
 });
 
 // --- Server Start ---
@@ -6264,10 +7550,12 @@ detectHardwareAcceleration().then(() => {
         console.log(` VINI PLAY server listening at http://localhost:${port}`);
         console.log(`======================================================\n`);
 
-        processAndMergeSources().then((result) => {
+        runSourceProcessing(null, undefined, true).then((result) => {
             console.log('[INIT] Initial source processing complete.');
-            if (result.success) fs.writeFileSync(SETTINGS_PATH, JSON.stringify(result.updatedSettings, null, 2));
+            saveProcessedSettings(result.updatedSettings);
+            if (!result.success) console.warn(`[INIT] ${result.message}`);
             updateAndScheduleSourceRefreshes();
+            syncSeriesRules().catch((e) => console.error('[DVR_SERIES] Startup sync failed:', e.message));
         }).catch(error => console.error('[INIT] Initial source processing failed:', error.message));
 
         if (notificationCheckInterval) clearInterval(notificationCheckInterval);
@@ -6277,46 +7565,32 @@ detectHardwareAcceleration().then(() => {
         setInterval(cleanupInactiveStreams, 60000);
         console.log('[JANITOR] Inactive stream cleanup process started.');
 
-        schedule.scheduleJob('0 2 * * *', autoDeleteOldRecordings);
-        console.log('[DVR_STORAGE] Scheduled daily cleanup of old recordings.');
+        schedule.scheduleJob('0 2 * * *', async () => {
+            try {
+                await autoDeleteOldRecordings();
+                await enforceRecordingSizeLimit();
+                await syncSeriesRules();
+            } catch (e) {
+                console.error('[DVR_STORAGE] Daily maintenance failed:', e.message);
+            }
+        });
+        schedule.scheduleJob('15 */6 * * *', () => syncSeriesRules().catch((e) => console.error('[DVR_SERIES] Sync failed:', e.message)));
+        console.log('[DVR_STORAGE] Scheduled daily cleanup and series-rule sync.');
+
+        // stream_history and notifications were never pruned. Set STREAM_HISTORY_RETENTION_DAYS=0 to keep history forever.
+        schedule.scheduleJob('15 2 * * *', () => {
+            const cutoff = (days) => new Date(Date.now() - days * 86400000).toISOString();
+            const onError = (err) => { if (err) console.error('[DB] Nightly prune failed:', err.message); };
+            const historyDays = parseInt(process.env.STREAM_HISTORY_RETENTION_DAYS ?? '90', 10);
+            if (historyDays > 0) db.run('DELETE FROM stream_history WHERE start_time < ?', [cutoff(historyDays)], onError);
+            db.run('DELETE FROM notifications WHERE notificationTime < ?', [cutoff(30)], onError); // their deliveries go with them
+        });
+
+        // Keep the query planner's statistics fresh (cheap; only re-analyzes tables that changed a lot).
+        schedule.scheduleJob('30 2 * * *', () => db.run('PRAGMA optimize'));
 
 
     });
 });
 
 // --- Helper Functions (Full Implementation) ---
-function parseM3U(data) {
-    if (!data) return [];
-    const lines = data.split('\n');
-    const channels = [];
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i].trim();
-        if (line.startsWith('#EXTINF:')) {
-            const nextLine = lines[i + 1]?.trim();
-            // Ensure the next line is a valid URL
-            if (nextLine && (nextLine.startsWith('http') || nextLine.startsWith('rtp'))) {
-                const idMatch = line.match(/tvg-id="([^"]*)"/);
-                const logoMatch = line.match(/tvg-logo="([^"]*)"/);
-                const nameMatch = line.match(/tvg-name="([^"]*)"/);
-                const groupMatch = line.match(/group-title="([^"]*)"/);
-                const chnoMatch = line.match(/tvg-chno="([^"]*)"/);
-                const sourceMatch = line.match(/vini-source="([^"]*)"/);
-                const commaIndex = line.lastIndexOf(',');
-                const displayName = (commaIndex !== -1) ? line.substring(commaIndex + 1).trim() : 'Unknown';
-
-                channels.push({
-                    id: idMatch ? idMatch[1] : `unknown-${Math.random()}`,
-                    logo: logoMatch ? logoMatch[1] : '',
-                    name: nameMatch ? nameMatch[1] : displayName,
-                    group: groupMatch ? groupMatch[1] : 'Uncategorized',
-                    chno: chnoMatch ? chnoMatch[1] : null,
-                    source: sourceMatch ? sourceMatch[1] : 'Default',
-                    displayName: displayName,
-                    url: nextLine
-                });
-                i++; // Skip the URL line in the next iteration
-            }
-        }
-    }
-    return channels;
-}

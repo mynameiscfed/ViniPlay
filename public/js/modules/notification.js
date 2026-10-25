@@ -9,8 +9,12 @@ import { UIElements, guideState, appState } from './state.js';
 import { handleSearchAndFilter, scrollToChannel, openProgramDetails } from './guide.js';
 import { getVapidKey, subscribeToPush, addProgramNotification, getProgramNotifications, deleteProgramNotification, unsubscribeFromPush, clearPastNotifications } from './api.js';
 import { ICONS } from './icons.js'; // MODIFIED: Import the new icon library
+import { escapeHtml } from './utils.js';
 
 let isSubscribed = false;
+
+// Some TV browsers have no Notification API; treat that as blocked.
+const notificationPermission = () => typeof Notification === 'undefined' ? 'denied' : Notification.permission;
 
 const notificationChannel = new BroadcastChannel('viniplay-notifications');
 
@@ -107,7 +111,7 @@ export async function subscribeUserToPush(force = false) {
         }
     } catch (error) {
         console.error('[NOTIF] Failed to subscribe user:', error);
-        if (Notification.permission === 'denied') {
+        if (notificationPermission() === 'denied') {
             showNotification('Notifications are blocked by your browser. Please enable them manually.', true, 8000);
         } else {
             showNotification('Failed to set up notifications. Check browser console.', true);
@@ -140,7 +144,7 @@ export const addOrRemoveNotification = async (programDetails) => {
     if (existingNotification) {
         showConfirm(
             'Remove Notification?',
-            `Are you sure you want to remove the notification for "${programDetails.programTitle}"?`,
+            `Are you sure you want to remove the notification for "${escapeHtml(programDetails.programTitle)}"?`,
             async () => {
                 if (await deleteProgramNotification(existingNotification.id)) {
                     showNotification(`Notification for "${programDetails.programTitle}" removed.`);
@@ -152,12 +156,12 @@ export const addOrRemoveNotification = async (programDetails) => {
             }
         );
     } else {
-        if (Notification.permission === 'denied') {
+        if (notificationPermission() === 'denied') {
             showNotification('Notifications are blocked. Please enable them in site settings.', true, 8000);
             return;
         }
 
-        if (Notification.permission !== 'granted') {
+        if (notificationPermission() !== 'granted') {
             const permission = await Notification.requestPermission();
             if (permission !== 'granted') {
                 showNotification('Permission denied. Cannot set alert.', true);
@@ -222,18 +226,24 @@ export const renderNotificationSettings = () => {
     const settingsEl = UIElements.notificationSettingsContainer; // Corrected element ID from UIElements
     if (!settingsEl) return;
 
-    settingsEl.innerHTML = `
-        <div class="p-4 bg-gray-800/50 rounded-lg border border-gray-700/50">
-            <h3 class="text-lg font-semibold text-white mb-2">Notification Actions</h3>
-            <p class="text-sm text-gray-400 mb-4">If you're not receiving notifications on this device, try re-subscribing.</p>
-            <button id="force-resubscribe-btn" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-md transition-colors">
-                Force Re-subscription on This Device
-            </button>
-        </div>
-    `;
+    settingsEl.innerHTML = `<div class="lrow"><div class="t"><b>Not getting reminders on this device?</b><small>Re-subscribe this device to push notifications.</small></div><button id="force-resubscribe-btn" type="button" class="btn btn-ghost">Re-subscribe</button></div>`;
 
     const resubscribeBtn = document.getElementById('force-resubscribe-btn');
     resubscribeBtn?.addEventListener('click', () => subscribeUserToPush(true));
+};
+
+const dayTime = (value) => new Date(value).toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
+const clockTime = (value) => new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+
+/** One reminder row (upcoming or past): logo, programme, when, and the view / delete buttons. */
+const reminderRow = (notif, detail) => {
+    if (isNaN(new Date(notif.programStart)) || isNaN(new Date(notif.scheduledTime))) return '';
+    return `<div class="lrow" data-notification-id="${escapeHtml(notif.id)}">
+        <img class="ch-logo" src="${escapeHtml(notif.channelLogo)}" alt="" onerror="this.onerror=null;this.style.visibility='hidden'">
+        <div class="t"><b>${escapeHtml(notif.programTitle || 'Untitled Program')}</b><small>${escapeHtml(notif.channelName || 'Unknown Channel')} · ${dayTime(notif.programStart)}</small><small class="note">${detail}</small></div>
+        <button type="button" class="btn btn-ghost btn-icon view-program-btn" title="View in TV Guide" data-channel-id="${escapeHtml(notif.channelId)}" data-program-start="${escapeHtml(notif.programStart)}" data-program-id="${escapeHtml(notif.programId)}">${ICONS.goToGuide}</button>
+        <button type="button" class="btn btn-ghost btn-icon delete-notification-btn" title="Delete Notification" data-notification-id="${escapeHtml(notif.id)}">${ICONS.trash}</button>
+    </div>`;
 };
 
 export const renderNotifications = () => {
@@ -247,36 +257,15 @@ export const renderNotifications = () => {
 
     UIElements.noNotificationsMessage.classList.toggle('hidden', upcomingNotifications.length > 0);
 
+    // Count on the bell in the top bar.
+    if (UIElements.reminderBadge) {
+        UIElements.reminderBadge.textContent = upcomingNotifications.length > 99 ? '99+' : upcomingNotifications.length;
+        UIElements.reminderBadge.classList.toggle('hidden', upcomingNotifications.length === 0);
+    }
+
     notificationListEl.innerHTML = upcomingNotifications.map(notif => {
-        const programStartTime = new Date(notif.programStart);
-        const notificationTime = new Date(notif.scheduledTime);
-
-        if (isNaN(programStartTime.getTime()) || isNaN(notificationTime.getTime())) {
-            return '';
-        }
-
-        const leadTimeMinutes = Math.round((programStartTime.getTime() - notificationTime.getTime()) / 60000);
-        const formattedProgramTime = programStartTime.toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
-        const formattedNotificationTime = notificationTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
-
-        return `
-            <div class="flex items-center p-4 border-b border-gray-700/50 hover:bg-gray-800 transition-colors rounded-md" data-notification-id="${notif.id}">
-                <img src="${notif.channelLogo || 'https://placehold.co/48x48/1f2937/d1d5db?text=?;&font=Inter'}" onerror="this.onerror=null; this.src='https://placehold.co/48x48/1f2937/d1d5db?text=?';" class="w-12 h-12 object-contain mr-4 flex-shrink-0 rounded-md bg-gray-700">
-                <div class="flex-grow">
-                    <p class="font-semibold text-white text-md">${notif.programTitle || 'Untitled Program'}</p>
-                    <p class="text-gray-400 text-sm">${notif.channelName || 'Unknown Channel'} • ${formattedProgramTime}</p>
-                    <p class="text-blue-400 text-xs mt-1">Will be notified at ${formattedNotificationTime} (${leadTimeMinutes} mins before)</p>
-                </div>
-                <div class="flex items-center gap-2 flex-shrink-0 ml-4">
-                    <button class="action-btn view-program-btn p-2 rounded-full hover:bg-gray-700" title="View in TV Guide" data-channel-id="${notif.channelId}" data-program-start="${notif.programStart}" data-program-id="${notif.programId}">
-                        ${ICONS.goToGuide}
-                    </button>
-                    <button class="action-btn delete-notification-btn p-2 rounded-full hover:bg-red-900" title="Delete Notification" data-notification-id="${notif.id}">
-                        ${ICONS.trash}
-                    </button>
-                </div>
-            </div>
-        `;
+        const lead = Math.round((new Date(notif.programStart) - new Date(notif.scheduledTime)) / 60000);
+        return reminderRow(notif, `Reminder at ${clockTime(notif.scheduledTime)} (${lead} min before)`);
     }).join('');
 
     setupNotificationListEventListeners();
@@ -299,43 +288,9 @@ export const renderPastNotifications = () => {
     UIElements.clearPastNotificationsBtn.classList.toggle('hidden', pastNotifications.length === 0);
 
     pastNotificationsListEl.innerHTML = pastNotifications.map(notif => {
-        const programStartTime = new Date(notif.programStart);
-        const notificationTriggerTime = new Date(notif.triggeredAt || notif.scheduledTime);
-
-        if (isNaN(programStartTime.getTime()) || isNaN(notificationTriggerTime.getTime())) {
-            return '';
-        }
-
-        const formattedProgramTime = programStartTime.toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
-        const formattedTriggerTime = notificationTriggerTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
-
-        let statusText = '';
-        if (notif.status === 'sent') {
-            statusText = `Notified at ${formattedTriggerTime}`;
-        } else if (notif.status === 'expired') {
-            statusText = `Expired at ${formattedTriggerTime}`;
-        } else {
-            statusText = `Scheduled for ${formattedTriggerTime}`;
-        }
-
-        return `
-            <div class="flex items-center p-4 border-b border-gray-700/50 hover:bg-gray-800 transition-colors rounded-md opacity-70" data-notification-id="${notif.id}">
-                <img src="${notif.channelLogo || 'https://placehold.co/48x48/1f2937/d1d5db?text=?;&font=Inter'}" onerror="this.onerror=null; this.src='https://placehold.co/48x48/1f2937/d1d5db?text=?';" class="w-12 h-12 object-contain mr-4 flex-shrink-0 rounded-md bg-gray-700">
-                <div class="flex-grow">
-                    <p class="font-semibold text-white text-md">${notif.programTitle || 'Untitled Program'}</p>
-                    <p class="text-gray-400 text-sm">${notif.channelName || 'Unknown Channel'} • ${formattedProgramTime}</p>
-                    <p class="text-xs mt-1 text-gray-500">${statusText}</p>
-                </div>
-                <div class="flex items-center gap-2 flex-shrink-0 ml-4">
-                    <button class="action-btn view-program-btn p-2 rounded-full hover:bg-gray-700" title="View in TV Guide" data-channel-id="${notif.channelId}" data-program-start="${notif.programStart}" data-program-id="${notif.programId}">
-                        ${ICONS.goToGuide}
-                    </button>
-                    <button class="action-btn delete-notification-btn p-2 rounded-full hover:bg-red-900" title="Delete Notification" data-notification-id="${notif.id}">
-                        ${ICONS.trash}
-                    </button>
-                </div>
-            </div>
-        `;
+        const at = clockTime(notif.triggeredAt || notif.scheduledTime);
+        const status = notif.status === 'sent' ? 'Notified' : notif.status === 'expired' ? 'Expired' : 'Scheduled for';
+        return reminderRow(notif, `${status} at ${at}`);
     }).join('');
 };
 
@@ -350,7 +305,7 @@ const setupNotificationListEventListeners = () => {
             if (notification) {
                 showConfirm(
                     'Delete Notification?',
-                    `Are you sure you want to delete the notification for "${notification.programTitle}"?`,
+                    `Are you sure you want to delete the notification for "${escapeHtml(notification.programTitle)}"?`,
                     async () => {
                         if (await deleteProgramNotification(notificationId)) {
                             notificationChannel.postMessage({ type: 'refresh-notifications' });
@@ -437,7 +392,7 @@ export const navigateToProgramInGuide = async (channelId, programStart, programI
         const stableChannelIdSuffix = channelId.includes('_') ? '_' + channelId.split('_').pop() : channelId;
 
         // No need to navigate again if we are already on the guide page from the deep link
-        if (window.location.pathname !== '/tvguide' && window.location.pathname !== '/') {
+        if (window.location.pathname !== '/tvguide') {
             navigate('/tvguide');
             // Wait a moment for the page switch to happen visually.
             await new Promise(resolve => setTimeout(resolve, 50));

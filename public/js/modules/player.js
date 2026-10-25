@@ -5,13 +5,14 @@
 
 import { appState, guideState, UIElements } from './state.js';
 // MODIFIED: Added stopStream and sendRedirectHeartbeat to the import
-import { saveUserSetting, stopStream, startRedirectStream, stopRedirectStream, sendRedirectHeartbeat, saveWatchProgressApi, getWatchProgress, deleteWatchProgress } from './api.js';
-import { showNotification, openModal, closeModal } from './ui.js';
+import { apiFetch, saveUserSetting, stopStream, startRedirectStream, stopRedirectStream, sendRedirectHeartbeat, saveWatchProgressApi, getWatchProgress, deleteWatchProgress, fetchSeriesDetails } from './api.js';
+import { showNotification, openModal, closeModal, showConfirm } from './ui.js';
 import { castState, loadMedia, setLocalPlayerState } from './cast.js';
 import { logToPlayerConsole } from './player_direct.js';
-import { ICONS } from './icons.js'; // NEW: Import ICONS
 import { getCodecName } from './codecs.js'; // NEW: Import codec utility
 import { sendTelemetry, tracePlayerAction } from './telemetry.js';
+import { nowNext, escapeHtml } from './utils.js';
+import { showBar, hideBar, fmt } from './bar.js';
 
 let streamInfoInterval = null; // Interval to update stream stats
 let currentLocalStreamUrl = null; // ADDED: Track the original URL of the currently playing local stream
@@ -34,6 +35,16 @@ let currentChannelInfo = null; // Stores { url, name, channelId, logo } for retr
 let retryCount = 0;
 const MAX_RETRIES = 3;
 let retryTimeout = null;
+
+// --- Player extras ---
+let sleepTimer = null;
+const $ = (id) => document.getElementById(id);
+const closePlaybackPanel = () => $('player-panel')?.classList.add('hidden');
+let currentRecordJob = null;
+let playerFallbackUsed = false;
+let currentEpisodeContext = null;
+let selectedAudioTrack = null;
+let currentStreamTracks = null;
 
 /**
  * Acquires a Web Lock to prevent Chromium from discarding the tab while media is playing.
@@ -89,16 +100,22 @@ function stopRedirectHeartbeat() {
     }
 }
 
+/** Ends the server-side redirect session and invalidates any in-flight start. */
+function stopRedirectLogging() {
+    stopRedirectHeartbeat();
+    currentRedirectToken++;
+    if (currentRedirectHistoryId) {
+        stopRedirectStream(currentRedirectHistoryId);
+        currentRedirectHistoryId = null;
+    }
+}
+
 /**
  * Starts a redirect logging session and initiates periodic heartbeats.
  * Guards against race conditions if user switches streams before promise resolves.
  */
 function beginRedirectLogging(url, channelOrVodId, name, logo) {
-    if (currentRedirectHistoryId) {
-        stopRedirectStream(currentRedirectHistoryId);
-        currentRedirectHistoryId = null;
-    }
-    stopRedirectHeartbeat();
+    stopRedirectLogging();
 
     const token = ++currentRedirectToken;
 
@@ -153,6 +170,7 @@ export function setActiveMediaTracking(mediaInfo) {
 
     if (!mediaInfo || !mediaInfo.contentType || !mediaInfo.contentId) {
         currentActiveMedia = null;
+        currentEpisodeContext = null;
         if (progressSaveInterval) {
             clearInterval(progressSaveInterval);
             progressSaveInterval = null;
@@ -164,9 +182,22 @@ export function setActiveMediaTracking(mediaInfo) {
         contentType: mediaInfo.contentType,
         contentId: String(mediaInfo.contentId),
         title: mediaInfo.title || '',
-        duration: mediaInfo.duration || 0
+        duration: mediaInfo.duration || 0,
+        seriesId: mediaInfo.seriesId || null,
+        season: mediaInfo.season || null,
+        episode: mediaInfo.episode || null,
+        seriesTitle: mediaInfo.seriesTitle || '',
+        logo: mediaInfo.logo || ''
     };
+    currentEpisodeContext = mediaInfo.seriesId ? {
+        seriesId: String(mediaInfo.seriesId),
+        season: mediaInfo.season || null,
+        episode: mediaInfo.episode || null,
+        seriesTitle: mediaInfo.seriesTitle || '',
+        logo: mediaInfo.logo || ''
+    } : null;
     lastSavedProgressSec = -1;
+    if (currentEpisodeContext) document.dispatchEvent(new CustomEvent('playepisode')); // the bar gets previous / next buttons
 
     if (progressSaveInterval) clearInterval(progressSaveInterval);
     // Auto-save every 10 seconds during active playback
@@ -217,6 +248,7 @@ export function flushWatchProgress() {
         }
     }
     currentActiveMedia = null;
+    currentEpisodeContext = null;
     if (progressSaveInterval) {
         clearInterval(progressSaveInterval);
         progressSaveInterval = null;
@@ -465,7 +497,7 @@ export function togglePlayerLock(forceState = null) {
     const videoEl = UIElements.videoElement;
 
     // Dismiss options dropdown if open
-    document.getElementById('player-more-options-menu')?.classList.add('hidden');
+    closePlaybackPanel();
 
     if (isPlayerLocked) {
         videoModal?.classList.add('player-locked');
@@ -505,14 +537,14 @@ export function toggleAudioOnly(forceState = null) {
     const videoEl = UIElements.videoElement;
 
     // Dismiss options dropdown if open
-    document.getElementById('player-more-options-menu')?.classList.add('hidden');
+    closePlaybackPanel();
 
     if (isAudioOnly) {
         if (titleEl) {
             titleEl.textContent = currentChannelInfo?.name || UIElements.videoTitle?.textContent || 'Audio Playback';
         }
         if (logoEl) {
-            const logoSrc = currentChannelInfo?.logo || '/viniplay.png';
+            const logoSrc = currentChannelInfo?.logo || '/icons/icon-192.png';
             logoEl.src = logoSrc;
             logoEl.classList.remove('hidden');
         }
@@ -606,6 +638,14 @@ function updateFullscreenButtonState() {
  */
 function handleStreamError() {
     if (retryCount >= MAX_RETRIES) {
+        const fallbackId = guideState.settings.playerFallbackProfileId;
+        if (fallbackId && fallbackId !== currentProfileId && !playerFallbackUsed && currentChannelInfo) {
+            playerFallbackUsed = true;
+            retryCount = 0;
+            showNotification('Stream profile failed. Trying the fallback profile...', true, 3000);
+            playChannel(currentChannelInfo.url, currentChannelInfo.name, currentChannelInfo.channelId, currentChannelInfo.forceLive, fallbackId, true);
+            return;
+        }
         showNotification(`Stream failed after ${MAX_RETRIES} retries. Please try another channel.`, true, 5000);
         stopAndCleanupPlayer();
         return;
@@ -613,23 +653,18 @@ function handleStreamError() {
 
     retryCount++;
     showNotification(`Stream interrupted. Retrying... (${retryCount}/${MAX_RETRIES})`, true, 2000);
+    if (retryTimeout) clearTimeout(retryTimeout);
 
-    // Clear any previous timeout
-    if (retryTimeout) {
-        clearTimeout(retryTimeout);
-    }
-
-    // Attempt to restart after a short delay
     retryTimeout = setTimeout(() => {
+        retryTimeout = null;
         console.log(`[PLAYER_RETRY] Attempting to restart stream. Attempt ${retryCount}/${MAX_RETRIES}.`);
         if (currentChannelInfo) {
-            // Re-call playChannel which handles the full setup
-            playChannel(currentChannelInfo.url, currentChannelInfo.name, currentChannelInfo.channelId);
+            playChannel(currentChannelInfo.url, currentChannelInfo.name, currentChannelInfo.channelId, currentChannelInfo.forceLive, null, true);
         } else {
             console.error("[PLAYER_RETRY] Cannot retry: current channel info is missing.");
             stopAndCleanupPlayer();
         }
-    }, 2000); // 2-second delay before retrying
+    }, 2000);
 }
 
 
@@ -659,9 +694,13 @@ export async function forceRefreshStream() {
         appState.player.destroy();
         appState.player = null;
     }
+    if (appState.hlsPlayer) {
+        try { appState.hlsPlayer.destroy(); } catch (e) { }
+        appState.hlsPlayer = null;
+    }
 
     // Immediately try to play the channel again
-    playChannel(currentChannelInfo.url, currentChannelInfo.name, currentChannelInfo.channelId);
+    playChannel(currentChannelInfo.url, currentChannelInfo.name, currentChannelInfo.channelId, currentChannelInfo.forceLive);
 }
 
 
@@ -669,7 +708,7 @@ export async function forceRefreshStream() {
  * Stops the current local stream, cleans up the mpegts.js player instance, and closes the modal.
  * This does NOT affect an active Google Cast session.
  */
-export const stopAndCleanupPlayer = async () => { // MODIFIED: Made function async
+export const stopAndCleanupPlayer = async ({ keepSleepTimer = false } = {}) => { // bindTap passes an Event, which has no such field
     tracePlayerAction('stopAndCleanupPlayer() invoked', {
         currentLocalStreamUrl,
         currentRedirectHistoryId,
@@ -680,15 +719,8 @@ export const stopAndCleanupPlayer = async () => { // MODIFIED: Made function asy
     // Flush watch progress before tearing down players
     flushWatchProgress();
 
-    // NEW: Stop redirect heartbeat and invalidate in-flight promises
-    stopRedirectHeartbeat();
-    currentRedirectToken++;
-
-    // If we were logging a redirect stream, tell the server it has stopped.
-    if (currentRedirectHistoryId) {
-        stopRedirectStream(currentRedirectHistoryId);
-        currentRedirectHistoryId = null;
-    }
+    // NEW: Stop redirect heartbeat, invalidate in-flight promises and close the session.
+    stopRedirectLogging();
 
     // NEW: Clear any scheduled retry attempt
     if (retryTimeout) {
@@ -696,7 +728,19 @@ export const stopAndCleanupPlayer = async () => { // MODIFIED: Made function asy
         retryTimeout = null;
     }
     retryCount = 0;
+    playerFallbackUsed = false;
     currentChannelInfo = null;
+    currentRecordJob = null;
+    if (sleepTimer && !keepSleepTimer) {
+        clearTimeout(sleepTimer);
+        sleepTimer = null;
+        appState.sleep = null;
+    }
+    cancelUpNext();
+    const recordBtn = document.getElementById('record-current-btn');
+    if (recordBtn) recordBtn.classList.add('hidden');
+    hideBar();
+    document.dispatchEvent(new CustomEvent('playerstop'));
 
 
     // Explicitly tell the server to stop the stream process.
@@ -742,32 +786,11 @@ export const stopAndCleanupPlayer = async () => { // MODIFIED: Made function asy
         appState.shakaPlayer = null;
     }
 
-    // Hide timeshift controls overlay if visible
-    const timeshiftOverlay = document.getElementById('timeshift-controls-overlay') || UIElements.timeshiftControlsOverlay;
-    if (timeshiftOverlay) {
-        timeshiftOverlay.classList.add('hidden');
-    }
-
-    // Hide VOD controls overlay if visible
-    const vodOverlay = document.getElementById('vod-controls-overlay');
-    if (vodOverlay) {
-        vodOverlay.classList.add('hidden');
-        vodOverlay.style.opacity = '0';
-    }
-    if (vodTimeUpdateInterval) {
-        clearInterval(vodTimeUpdateInterval);
-        vodTimeUpdateInterval = null;
-    }
-    if (vodHideControlsTimeout) {
-        clearTimeout(vodHideControlsTimeout);
-        vodHideControlsTimeout = null;
-    }
     if (seekDebounceTimeout) {
         clearTimeout(seekDebounceTimeout);
         seekDebounceTimeout = null;
     }
     pendingSeekTarget = null;
-    isVodSeeking = false;
 
     // Stop active timeshift session on server if running
     if (appState.activeTimeshiftJobId) {
@@ -819,6 +842,7 @@ export const stopAndCleanupPlayer = async () => { // MODIFIED: Made function asy
         UIElements.videoElement.style.opacity = '1';
         UIElements.videoElement.style.pointerEvents = 'auto';
         UIElements.videoElement.controls = true;
+        UIElements.videoElement.playbackRate = 1;
     }
 
     // NEW: Exit fullscreen if container was in fullscreen mode
@@ -834,7 +858,7 @@ export const stopAndCleanupPlayer = async () => { // MODIFIED: Made function asy
     const refreshBtn = document.getElementById('refresh-stream-btn');
     if (refreshBtn) refreshBtn.classList.remove('hidden');
 
-    document.getElementById('player-more-options-menu')?.classList.add('hidden');
+    closePlaybackPanel();
     UIElements.videoModal?.classList.remove('pip-active');
     closeModal(UIElements.videoModal);
 };
@@ -868,126 +892,320 @@ function updateStreamInfo() {
 }
 
 
+const REC_STATES = { idle: ['Record', 'Record current programme'], scheduled: ['Scheduled', 'Cancel scheduled recording'], recording: ['REC', 'Stop recording'] };
+
+function setRecordState(btn, state) {
+    btn.dataset.rec = state;
+    btn.title = REC_STATES[state][1];
+    btn.querySelector('[data-rec-state]').textContent = REC_STATES[state][0];
+}
+
+export async function refreshPlayerRecordState() {
+    const btn = document.getElementById('record-current-btn');
+    if (!btn) return;
+    const canDvr = appState.currentUser?.isAdmin || appState.currentUser?.canUseDvr;
+    if (!canDvr || !currentChannelInfo?.channelId) {
+        btn.classList.add('hidden');
+        currentRecordJob = null;
+        return;
+    }
+    btn.classList.remove('hidden');
+    setRecordState(btn, 'idle');
+    currentRecordJob = null;
+    try {
+        const res = await apiFetch('/api/dvr/jobs');
+        if (!res) return;
+        const jobs = await res.json();
+        const currentProgram = nowNext(currentChannelInfo.channelId).now;
+        currentRecordJob = jobs.find(job => {
+            if (String(job.channelId) !== String(currentChannelInfo.channelId)) return false;
+            if (job.status === 'recording' || job.status === 'reconnecting') return true;
+            if (job.status !== 'scheduled' || !currentProgram || !job.programStart) return false;
+            return Math.abs(Date.parse(job.programStart) - Date.parse(currentProgram.start)) < 60000;
+        }) || null;
+    } catch (e) {
+        console.warn('[PLAYER] Could not refresh recording state:', e);
+        return;
+    }
+    const recording = currentRecordJob && (currentRecordJob.status === 'recording' || currentRecordJob.status === 'reconnecting');
+    setRecordState(btn, recording ? 'recording' : currentRecordJob ? 'scheduled' : 'idle');
+}
+
+async function scheduleCurrentChannel() {
+    if (!currentChannelInfo?.channelId) return;
+    const channel = guideState.channels.find(c => c.id === currentChannelInfo.channelId);
+    const current = nowNext(currentChannelInfo.channelId).now;
+    const body = current && Date.parse(current.stop) > Date.now()
+        ? {
+            channelId: currentChannelInfo.channelId,
+            channelName: channel?.displayName || channel?.name || currentChannelInfo.name,
+            programTitle: current.title,
+            programStart: current.start,
+            programStop: current.stop,
+        }
+        : {
+            channelId: currentChannelInfo.channelId,
+            channelName: channel?.displayName || channel?.name || currentChannelInfo.name,
+            programTitle: `${currentChannelInfo.name} (manual)`,
+            startTime: new Date().toISOString(),
+            endTime: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        };
+    const endpoint = current && Date.parse(current.stop) > Date.now() ? '/api/dvr/schedule' : '/api/dvr/schedule/manual';
+    const res = await apiFetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+    if (res) {
+        showNotification(current ? `Recording "${current.title}".` : 'Recording for 60 minutes.', false, 2500);
+        refreshPlayerRecordState();
+    }
+}
+
+async function toggleCurrentRecording() {
+    if (!currentRecordJob) return scheduleCurrentChannel();
+    const scheduled = currentRecordJob.status === 'scheduled';
+    showConfirm(scheduled ? 'Cancel Recording?' : 'Stop Recording?', scheduled ? 'This recording has not started yet. Remove it from the schedule?' : 'Stop this recording and keep what has been captured so far?', async () => {
+        const endpoint = scheduled
+            ? `/api/dvr/jobs/${currentRecordJob.id}`
+            : `/api/dvr/jobs/${currentRecordJob.id}/stop`;
+        const method = scheduled ? 'DELETE' : 'POST';
+        if (await apiFetch(endpoint, { method })) {
+            showNotification(scheduled ? 'Recording cancelled.' : 'Recording stopped.');
+            refreshPlayerRecordState();
+        }
+    });
+}
+
+export function jumpToLive() {
+    const video = UIElements.videoElement;
+    if (!video || !currentChannelInfo?.channelId) return;
+    try {
+        if (video.seekable && video.seekable.length > 0) {
+            video.currentTime = Math.max(0, video.seekable.end(video.seekable.length - 1) - 0.5);
+            video.play().catch(() => {});
+        } else {
+            showNotification('Rejoining live...', false, 1500);
+            forceRefreshStream();
+        }
+    } catch (e) {
+        showNotification('Could not jump to live.', true);
+    }
+}
+
+async function playLiveRewind(url, name, channelId, logo, profileId) {
+    const streamUrl = `/api/livebuffer/${encodeURIComponent(channelId)}/stream.m3u8?_t=${Date.now()}`;
+    currentStreamUrlToPlay = streamUrl;
+    currentLocalStreamUrl = null;
+    currentProfileId = null;
+    if (appState.player) {
+        appState.player.destroy();
+        appState.player = null;
+    }
+    if (appState.hlsPlayer) {
+        try { appState.hlsPlayer.destroy(); } catch (e) { }
+        appState.hlsPlayer = null;
+    }
+    if (streamInfoInterval) {
+        clearInterval(streamInfoInterval);
+        streamInfoInterval = null;
+    }
+    // Casting cannot use the cookie-protected live-buffer URL, so keep a normal /stream URL for the Cast sender.
+    const settings = guideState.settings;
+    const profile = (settings.streamProfiles || []).find(p => p.id === profileId);
+    const castUrl = profile && profile.command !== 'redirect'
+        ? `/stream?url=${encodeURIComponent(url)}&profileId=${profileId}&userAgentId=${settings.activeUserAgentId}`
+        : url;
+    setLocalPlayerState(castUrl, name, logo, null, null);
+    UIElements.videoModal?.classList.remove('pip-active');
+    UIElements.videoTitle.textContent = name;
+    updateMediaSession(name, logo);
+    requestScreenWakeLock();
+    openModal(UIElements.videoModal);
+    showBar({ live: true, seekable: true, goLive: jumpToLive });
+    refreshPlayerRecordState();
+    setPrimaryPlayerButtons(true);
+
+    let fellBack = false;
+    const fallback = () => {
+        if (fellBack || !currentChannelInfo || String(currentChannelInfo.channelId) !== String(channelId)) return;
+        fellBack = true;
+        hideBar();
+        if (appState.hlsPlayer) {
+            try { appState.hlsPlayer.destroy(); } catch (e) { }
+            appState.hlsPlayer = null;
+        }
+        showNotification('Live rewind is unavailable. Playing live.', true, 3000);
+        playChannel(url, name, channelId, true, profileId);
+    };
+
+    if (window.Hls && Hls.isSupported()) {
+        try {
+            const hls = new Hls({
+                enableWorker: true,
+                lowLatencyMode: false,
+                backBufferLength: 300,
+                maxBufferLength: 60,
+                maxMaxBufferLength: 120,
+            });
+            appState.hlsPlayer = hls;
+            hls.loadSource(streamUrl);
+            hls.attachMedia(UIElements.videoElement);
+            hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                UIElements.videoElement.play().catch(e => console.warn('[LIVE_REWIND] Autoplay prevented:', e));
+            });
+            hls.on(Hls.Events.ERROR, (event, data) => {
+                if (data.fatal) {
+                    console.warn('[LIVE_REWIND] Playback error:', data.type, data.details);
+                    fallback();
+                }
+            });
+            return;
+        } catch (e) {
+            console.warn('[LIVE_REWIND] HLS setup failed:', e);
+            fallback();
+            return;
+        }
+    }
+    if (UIElements.videoElement.canPlayType('application/vnd.apple.mpegurl')) {
+        UIElements.videoElement.src = streamUrl;
+        UIElements.videoElement.addEventListener('error', fallback, { once: true });
+        UIElements.videoElement.play().catch(e => console.warn('[LIVE_REWIND] Autoplay prevented:', e));
+        return;
+    }
+    fallback();
+}
+
 /**
  * Initializes and starts playing a channel stream, either locally or on a Cast device.
  * @param {string} url - The URL of the channel stream.
  * @param {string} name - The name of the channel to display.
  * @param {string} channelId - The unique ID of the channel.
+ * @param {boolean} [forceLive=false] - Skip the rewind buffer and use the normal live path.
+ * @param {string|null} [profileOverride=null] - Optional profile for retry/fallback.
  */
-export const playChannel = (url, name, channelId) => {
+export const playChannel = async (url, name, channelId, forceLive = false, profileOverride = null, isRetry = false) => {
     // Unhide refresh button for live channel streams
     const refreshBtn = document.getElementById('refresh-stream-btn');
     if (refreshBtn) refreshBtn.classList.remove('hidden');
 
     isUserInitiatedPause = false;
-    // Prime / request wake lock immediately inside user click gesture
     requestScreenWakeLock();
-
-    // On a fresh play request (not a retry), reset the retry counter
-    if (!retryTimeout) {
+    if (!isRetry) {
         retryCount = 0;
+        playerFallbackUsed = false;
     }
 
     const channel = guideState.channels.find(c => c.id === channelId);
     const logo = channel ? channel.logo : '';
-
-    // Store current channel info for potential retries and overlays
-    currentChannelInfo = { url, name, channelId, logo };
+    const channelChanged = !currentChannelInfo || String(currentChannelInfo.channelId) !== String(channelId) || currentChannelInfo.url !== url;
+    if (channelChanged) {
+        selectedAudioTrack = null;
+        currentStreamTracks = null;
+    }
+    currentChannelInfo = { url, name, channelId, logo, forceLive };
+    document.dispatchEvent(new CustomEvent('playchannel', { detail: channelId }));
     sendTelemetry('PLAYER_PLAY_CHANNEL', `playChannel initiated for "${name}" (${channelId})`, {
         url,
-        profileId: guideState.settings.activeStreamProfileId
+        profileId: profileOverride || guideState.settings.activeStreamProfileId
     });
 
-    // Update and save recent channels regardless of playback target
     if (channelId) {
         const recentChannels = [channelId, ...(guideState.settings.recentChannels || []).filter(id => id !== channelId)].slice(0, 15);
         guideState.settings.recentChannels = recentChannels;
         saveUserSetting('recentChannels', recentChannels);
     }
 
-    const profileId = guideState.settings.activeStreamProfileId;
+    const profileId = profileOverride || guideState.settings.activeStreamProfileId;
     const userAgentId = guideState.settings.activeUserAgentId;
     if (!profileId || !userAgentId) {
         showNotification("Active stream profile or user agent not set. Please check settings.", true);
         return;
     }
     const profile = (guideState.settings.streamProfiles || []).find(p => p.id === profileId);
-    if (!profile) {
-        return showNotification("Stream profile not found.", true);
+    if (!profile) return showNotification("Stream profile not found.", true);
+    const supportsAudioSelection = /^https?:/i.test(url) && profile.command !== 'redirect' && !profile.command.includes('-f mp4');
+    if (!supportsAudioSelection) selectedAudioTrack = null;
+
+    // Tear down the previous local stream and player before replacing them.
+    if (appState.hlsPlayer) {
+        try { appState.hlsPlayer.destroy(); } catch (e) { }
+        appState.hlsPlayer = null;
     }
-
-    // --- Activity Logging for Redirect Streams ---
-    if (profile.command === 'redirect') {
-        const channel = guideState.channels.find(c => c.id === channelId);
-        beginRedirectLogging(url, channelId, name, channel ? channel.logo : '');
-    }
-    // --- End Activity Logging ---
-
-    const streamUrlToPlay = profile.command === 'redirect' ? url : `/stream?url=${encodeURIComponent(url)}&profileId=${profileId}&userAgentId=${userAgentId}`;
-    currentStreamUrlToPlay = streamUrlToPlay;
-    if (isAudioOnly) {
-        toggleAudioOnly(false);
-    }
-
-    if (castState.isCasting) {
-        console.log(`[PLAYER] Already casting. Loading new channel "${name}" to remote device.`);
-        // CRITICAL FIX: Chromecast needs absolute URLs, not relative
-        const absoluteStreamUrl = streamUrlToPlay.startsWith('http')
-            ? streamUrlToPlay
-            : `${window.location.origin}${streamUrlToPlay}`;
-        loadMedia(absoluteStreamUrl, name, logo);
-        openModal(UIElements.videoModal);
-        return;
-    }
-
-    // --- Local Playback Logic ---
-    currentLocalStreamUrl = url;
-    currentProfileId = profileId; // Store the profile ID
-    console.log(`[PLAYER] Playing channel "${name}" locally. Tracking URL for cleanup: ${currentLocalStreamUrl}, Profile: ${currentProfileId}`);
-
-    setLocalPlayerState(streamUrlToPlay, name, logo, url, profileId);
-
     if (appState.player) {
         appState.player.destroy();
         appState.player = null;
+    }
+    if (currentLocalStreamUrl) {
+        const oldUrl = currentLocalStreamUrl;
+        const oldProfile = currentProfileId;
+        currentLocalStreamUrl = null;
+        currentProfileId = null;
+        await stopStream(oldUrl, oldProfile || undefined).catch(() => {});
     }
     if (streamInfoInterval) {
         clearInterval(streamInfoInterval);
         streamInfoInterval = null;
     }
+    hideBar();
+    setActiveMediaTracking(null);
+    UIElements.videoElement.playbackRate = 1;
+    if (isAudioOnly) toggleAudioOnly(false);
+
+    // A new play request replaces the old one, even when the new profile transcodes or
+    // uses live rewind. Without this, a redirect heartbeat kept the old session alive.
+    stopRedirectLogging();
+
+    if (!castState.isCasting && !forceLive && guideState.settings.liveRewind?.enabled === true && channelId) {
+        return playLiveRewind(url, name, channelId, logo, profileId);
+    }
+
+    if (profile.command === 'redirect') {
+        beginRedirectLogging(url, channelId, name, logo);
+    }
+
+    let streamUrlToPlay = profile.command === 'redirect' ? url : `/stream?url=${encodeURIComponent(url)}&profileId=${profileId}&userAgentId=${userAgentId}`;
+    if (supportsAudioSelection && selectedAudioTrack !== null) streamUrlToPlay += `&audioTrack=${selectedAudioTrack}`;
+    currentStreamUrlToPlay = streamUrlToPlay;
+
+    if (castState.isCasting) {
+        console.log(`[PLAYER] Already casting. Loading new channel "${name}" to remote device.`);
+        const absoluteStreamUrl = streamUrlToPlay.startsWith('http') ? streamUrlToPlay : `${window.location.origin}${streamUrlToPlay}`;
+        loadMedia(absoluteStreamUrl, name, logo);
+        openModal(UIElements.videoModal);
+        return;
+    }
+
+    currentLocalStreamUrl = url;
+    currentProfileId = profileId;
+    setLocalPlayerState(streamUrlToPlay, name, logo, url, profileId);
+    console.log(`[PLAYER] Playing channel "${name}" locally. Tracking URL for cleanup: ${currentLocalStreamUrl}, Profile: ${currentProfileId}`);
 
     if (mpegts.isSupported()) {
         const mpegtsConfig = {
             enableStashBuffer: true,
             stashInitialSize: 4096,
-            liveBufferLatency: 2.0,
+            liveBufferLatencyChasing: true,
+            liveBufferLatencyMaxLatency: 5.0,
+            liveBufferLatencyMinRemain: 1.0,
         };
 
-        appState.player = mpegts.createPlayer({
-            type: 'mse',
-            isLive: true,
-            url: streamUrlToPlay
-        }, mpegtsConfig);
+        appState.player = mpegts.createPlayer({ type: 'mse', isLive: true, url: streamUrlToPlay }, mpegtsConfig);
 
-        // --- NEW: Robust Error Handling ---
         appState.player.on(mpegts.Events.ERROR, (errorType, errorDetail) => {
             console.error(`[PLAYER] MPEGTS Player Error: Type=${errorType}, Detail=${errorDetail}`);
-            // We only want to auto-retry on unrecoverable network/media errors.
             if (errorType === 'NetworkError' || errorType === 'MediaError') {
-                // To prevent a retry loop if the user has manually closed the player
-                if (appState.player) {
-                    handleStreamError();
-                }
+                if (appState.player) handleStreamError();
             } else {
                 showNotification(`Player Error: ${errorDetail}`, true);
                 stopAndCleanupPlayer();
             }
         });
 
-        // When playback starts successfully, reset the retry counter.
         appState.player.on(mpegts.Events.MEDIA_INFO, () => {
             console.log('[PLAYER] Media info received, playback started successfully.');
             retryCount = 0;
+            playerFallbackUsed = false;
             if (retryTimeout) {
                 clearTimeout(retryTimeout);
                 retryTimeout = null;
@@ -1001,32 +1219,26 @@ export const playChannel = (url, name, channelId) => {
         requestScreenWakeLock();
         appState.player.attachMediaElement(UIElements.videoElement);
         appState.player.load();
+        showBar({ live: true, goLive: jumpToLive });
+        refreshPlayerRecordState();
+        setPrimaryPlayerButtons(true);
 
-        // NEW: Enforce aspect ratio when metadata is loaded to ensure controls are visible (desktop only)
         UIElements.videoElement.addEventListener('loadedmetadata', () => {
             if (window.innerWidth >= 768 && isAspectRatioLocked && UIElements.videoElement.videoWidth) {
                 const videoRatio = UIElements.videoElement.videoWidth / UIElements.videoElement.videoHeight;
                 const currentWidth = UIElements.videoModalContainer.offsetWidth;
-
-                // Calculate header height
                 const header = UIElements.videoModalContainer.querySelector('.flex.justify-between');
                 const headerHeight = header ? header.offsetHeight : 0;
-
-                const targetHeight = (currentWidth / videoRatio) + headerHeight;
-                UIElements.videoModalContainer.style.height = `${targetHeight}px`;
+                UIElements.videoModalContainer.style.height = `${(currentWidth / videoRatio) + headerHeight}px`;
             }
         }, { once: true });
 
         UIElements.videoElement.volume = parseFloat(localStorage.getItem('iptvPlayerVolume') || 0.5);
-
         appState.player.play().catch((err) => {
             console.error("MPEGTS Player play() caught an error:", err);
-            // This initial play error is often critical, so we start the retry process.
             handleStreamError();
         });
-
         streamInfoInterval = setInterval(updateStreamInfo, 2000);
-
     } else {
         showNotification('Your browser does not support Media Source Extensions (MSE).', true);
     }
@@ -1047,7 +1259,7 @@ export const playRecordingOrDirectVideo = async (url, title, logo = '', isVod = 
     console.log(`[PLAYER] Playing direct/recording video: "${title}" from ${url} (isVod: ${isVod}, startTime: ${startTime})`);
 
     // 1. Cleanly stop any existing active stream
-    await stopAndCleanupPlayer();
+    await stopAndCleanupPlayer({ keepSleepTimer: true });
     isUserInitiatedPause = false;
     currentStreamUrlToPlay = url;
     if (isAudioOnly) {
@@ -1059,7 +1271,7 @@ export const playRecordingOrDirectVideo = async (url, title, logo = '', isVod = 
         UIElements.videoTitle.textContent = title;
     }
     currentChannelInfo = { url, name: title, channelId: null, logo };
-    updateMediaSession(title, logo || '/viniplay.png');
+    updateMediaSession(title, logo || '/icons/icon-192.png');
 
     // 3. Hide live-only buttons (like refresh-stream-btn)
     const refreshBtn = document.getElementById('refresh-stream-btn');
@@ -1092,6 +1304,7 @@ export const playRecordingOrDirectVideo = async (url, title, logo = '', isVod = 
         UIElements.videoElement.src = url;
         UIElements.videoElement.load();
         UIElements.videoElement.volume = parseFloat(localStorage.getItem('iptvPlayerVolume') || 0.5);
+        UIElements.videoElement.playbackRate = parseFloat(localStorage.getItem('iptvPlaybackRate') || '1');
 
         if (startTime > 0) {
             const applyStartTime = () => {
@@ -1116,6 +1329,9 @@ export const playRecordingOrDirectVideo = async (url, title, logo = '', isVod = 
     UIElements.videoModal?.classList.remove('pip-active');
     openModal(UIElements.videoModal);
     requestScreenWakeLock();
+    showBar({ seekable: true });
+    setPrimaryPlayerButtons(false);
+    refreshPlayerRecordState();
 
     try {
         await UIElements.videoElement.play();
@@ -1127,39 +1343,20 @@ export const playRecordingOrDirectVideo = async (url, title, logo = '', isVod = 
 
 // State tracking for transcoded VOD seeking via -ss on /stream
 let currentVodTranscodeSession = null;
-let vodTimeUpdateInterval = null;
-let vodHideControlsTimeout = null;
-let isVodSeeking = false;
 let pendingSeekTarget = null;
 let seekDebounceTimeout = null;
-
-function formatTimeSeconds(seconds) {
-    const s = Math.max(0, Math.floor(seconds));
-    const hrs = Math.floor(s / 3600);
-    const mins = Math.floor((s % 3600) / 60);
-    const secs = s % 60;
-    if (hrs > 0) {
-        return `${hrs}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-    }
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
-}
 
 export function seekVodRelative(delta) {
     if (!currentVodTranscodeSession) return;
     const curElapsed = UIElements.videoElement?.currentTime || 0;
-    const baseTime = pendingSeekTarget !== null 
-        ? pendingSeekTarget 
+    const baseTime = pendingSeekTarget !== null
+        ? pendingSeekTarget
         : (currentVodTranscodeSession.currentSeekTime + curElapsed);
-    
+
     const maxTime = currentVodTranscodeSession.duration || 86400;
     pendingSeekTarget = Math.max(0, Math.min(maxTime, baseTime + delta));
-    
-    const currentTimeEl = document.getElementById('vod-current-time');
-    const progressBar = document.getElementById('vod-progress-bar');
-    if (currentTimeEl) currentTimeEl.textContent = formatTimeSeconds(pendingSeekTarget);
-    if (progressBar) progressBar.value = pendingSeekTarget;
 
-    showNotification(`Seeking to ${formatTimeSeconds(pendingSeekTarget)}...`, false, 1200);
+    showNotification(`Seeking to ${fmt(pendingSeekTarget)}...`, false, 1200);
 
     if (seekDebounceTimeout) clearTimeout(seekDebounceTimeout);
     seekDebounceTimeout = setTimeout(() => {
@@ -1173,154 +1370,46 @@ export function performVodSeek(targetTime) {
     if (!currentVodTranscodeSession) return;
     const session = currentVodTranscodeSession;
     const safeTarget = Math.max(0, Math.floor(targetTime));
-    playVOD(session.url, session.title, session.logo, safeTarget, session.duration);
+    // Pass the active tracking info along: playVOD tears the player down, which clears it.
+    const mediaInfo = currentActiveMedia ? {
+        contentType: currentActiveMedia.contentType,
+        contentId: currentActiveMedia.contentId,
+        title: currentActiveMedia.title,
+        duration: session.duration || currentActiveMedia.duration || 0,
+        seriesId: currentActiveMedia.seriesId,
+        season: currentActiveMedia.season,
+        episode: currentActiveMedia.episode,
+        seriesTitle: currentActiveMedia.seriesTitle,
+        logo: currentActiveMedia.logo,
+    } : null;
+    playVOD(session.url, session.title, session.logo, safeTarget, session.duration, mediaInfo, true);
 }
 
-function updateVodControlsUI() {
-    const video = UIElements.videoElement;
-    if (!video || !currentVodTranscodeSession) return;
+// How the bar reads a transcoded movie: the stream restarts at an offset, so time is that offset plus what has played since.
+const vodBar = {
+    seekable: true,
+    position: () => pendingSeekTarget ?? ((currentVodTranscodeSession?.currentSeekTime || 0) + (UIElements.videoElement?.currentTime || 0)),
+    total: () => currentVodTranscodeSession?.duration || 0,
+    seek: performVodSeek,
+    skip: seekVodRelative,
+};
 
-    if (isVodSeeking || pendingSeekTarget !== null) return;
-
-    const curElapsed = video.currentTime || 0;
-    const curTotalTime = currentVodTranscodeSession.currentSeekTime + curElapsed;
-
-    const currentTimeEl = document.getElementById('vod-current-time');
-    const totalTimeEl = document.getElementById('vod-total-time');
-    const progressBar = document.getElementById('vod-progress-bar');
-    const playPauseBtn = document.getElementById('vod-play-pause-btn');
-
-    if (currentTimeEl) currentTimeEl.textContent = formatTimeSeconds(curTotalTime);
-    
-    const duration = currentVodTranscodeSession.duration;
-    if (duration && duration > 0) {
-        if (progressBar) {
-            progressBar.max = duration;
-            progressBar.value = Math.min(duration, curTotalTime);
-        }
-        if (totalTimeEl) totalTimeEl.textContent = formatTimeSeconds(duration);
-    } else {
-        if (progressBar) {
-            progressBar.max = Math.max(curTotalTime + 60, parseFloat(progressBar.max) || 100);
-            progressBar.value = curTotalTime;
-        }
-        if (totalTimeEl) totalTimeEl.textContent = '--:--';
-    }
-
-    if (playPauseBtn) {
-        playPauseBtn.innerHTML = video.paused ? ICONS.play : ICONS.pause;
-    }
-}
-
-function setupVodControlsOverlay(profileName) {
-    const overlay = document.getElementById('vod-controls-overlay');
-    if (!overlay) return;
-
-    overlay.classList.remove('hidden');
-    overlay.style.opacity = '1';
-
-    const progressBar = document.getElementById('vod-progress-bar');
-    const currentTimeEl = document.getElementById('vod-current-time');
-    const totalTimeEl = document.getElementById('vod-total-time');
-    const playPauseBtn = document.getElementById('vod-play-pause-btn');
-    const rewind60Btn = document.getElementById('vod-rewind-60-btn');
-    const rewind15Btn = document.getElementById('vod-rewind-15-btn');
-    const forward15Btn = document.getElementById('vod-forward-15-btn');
-    const forward60Btn = document.getElementById('vod-forward-60-btn');
-    const volumeBtn = document.getElementById('vod-volume-btn');
-    const volumeBar = document.getElementById('vod-volume-bar');
-    const fullscreenBtn = document.getElementById('vod-fullscreen-btn');
-    const profileBadge = document.getElementById('vod-profile-badge');
-
-    if (profileBadge) profileBadge.textContent = profileName || 'Transcoding';
-
-    const initialSeek = currentVodTranscodeSession?.currentSeekTime || 0;
-    const initialDur = currentVodTranscodeSession?.duration || 0;
-
-    if (currentTimeEl) currentTimeEl.textContent = formatTimeSeconds(initialSeek);
-    if (totalTimeEl) totalTimeEl.textContent = initialDur > 0 ? formatTimeSeconds(initialDur) : '--:--';
-    if (progressBar) {
-        progressBar.min = 0;
-        progressBar.max = initialDur > 0 ? initialDur : Math.max(100, initialSeek + 60);
-        progressBar.value = initialSeek;
-    }
-
-    if (playPauseBtn) {
-        playPauseBtn.innerHTML = ICONS.pause;
-        playPauseBtn.onclick = () => {
-            if (UIElements.videoElement) {
-                if (UIElements.videoElement.paused) UIElements.videoElement.play();
-                else UIElements.videoElement.pause();
-                playPauseBtn.innerHTML = UIElements.videoElement.paused ? ICONS.play : ICONS.pause;
+/**
+ * Probes the total duration of a VOD file in the background (when not already known);
+ * the bar picks it up on its next tick.
+ */
+function probeVodDuration(url, title) {
+    if (!currentVodTranscodeSession || currentVodTranscodeSession.duration) return;
+    fetch(`/api/vod/duration?url=${encodeURIComponent(url)}`)
+        .then(res => res.json())
+        .then(data => {
+            if (data && data.duration && currentVodTranscodeSession && currentVodTranscodeSession.url === url) {
+                currentVodTranscodeSession.duration = data.duration;
+                if (currentActiveMedia) currentActiveMedia.duration = data.duration;
+                console.log(`[VOD_PLAYER] Probed duration for "${title}": ${data.duration}s`);
             }
-        };
-    }
-
-    if (rewind60Btn) rewind60Btn.onclick = () => seekVodRelative(-60);
-    if (rewind15Btn) rewind15Btn.onclick = () => seekVodRelative(-15);
-    if (forward15Btn) forward15Btn.onclick = () => seekVodRelative(15);
-    if (forward60Btn) forward60Btn.onclick = () => seekVodRelative(60);
-
-    if (progressBar) {
-        progressBar.oninput = (e) => {
-            isVodSeeking = true;
-            if (currentTimeEl) currentTimeEl.textContent = formatTimeSeconds(parseFloat(e.target.value));
-        };
-        progressBar.onchange = (e) => {
-            isVodSeeking = false;
-            const targetSec = parseFloat(e.target.value);
-            performVodSeek(targetSec);
-        };
-    }
-
-    if (volumeBar && UIElements.videoElement) {
-        volumeBar.value = UIElements.videoElement.volume;
-        volumeBar.oninput = (e) => {
-            const val = parseFloat(e.target.value);
-            UIElements.videoElement.volume = val;
-            UIElements.videoElement.muted = val === 0;
-            localStorage.setItem('iptvPlayerVolume', val);
-        };
-    }
-
-    if (volumeBtn && UIElements.videoElement) {
-        volumeBtn.onclick = () => {
-            UIElements.videoElement.muted = !UIElements.videoElement.muted;
-            if (volumeBar) {
-                volumeBar.value = UIElements.videoElement.muted ? 0 : UIElements.videoElement.volume;
-            }
-        };
-    }
-
-    if (fullscreenBtn) {
-        fullscreenBtn.onclick = () => {
-            const fsBtn = document.getElementById('player-fullscreen-btn');
-            if (fsBtn) fsBtn.click();
-        };
-    }
-
-    // Auto-hide controls overlay during active playback
-    const container = UIElements.videoModalContainer || document.getElementById('video-modal-container');
-    const showControls = () => {
-        if (overlay) overlay.style.opacity = '1';
-        if (vodHideControlsTimeout) clearTimeout(vodHideControlsTimeout);
-        vodHideControlsTimeout = setTimeout(() => {
-            const video = UIElements.videoElement;
-            if (video && !video.paused && !isVodSeeking && pendingSeekTarget === null) {
-                if (overlay) overlay.style.opacity = '0';
-            }
-        }, 3500);
-    };
-
-    if (container) {
-        container.onmousemove = showControls;
-        container.ontouchstart = showControls;
-    }
-    showControls();
-
-    // Start interval
-    if (vodTimeUpdateInterval) clearInterval(vodTimeUpdateInterval);
-    vodTimeUpdateInterval = setInterval(updateVodControlsUI, 500);
+        })
+        .catch(e => console.warn('[VOD_PLAYER] Could not fetch duration:', e));
 }
 
 /**
@@ -1332,15 +1421,16 @@ function setupVodControlsOverlay(profileName) {
  * @param {number} [startTime=0] - Starting timestamp offset in seconds for seeking.
  * @param {number|null} [knownDuration=null] - Preserved total duration in seconds.
  * @param {object|null} [mediaInfo=null] - Media tracking metadata { contentType, contentId, title, duration }.
+ * @param {boolean} [isSeek=false] - True when re-requesting the stream to seek (also seeks back to 0).
  */
-export const playVOD = async (url, title, logo = '', startTime = 0, knownDuration = null, mediaInfo = null) => {
+export const playVOD = async (url, title, logo = '', startTime = 0, knownDuration = null, mediaInfo = null, isSeek = false) => {
     const useDirectPlay = guideState.settings.vodDirectPlayEnabled === true;
     console.log(`[VOD_PLAYER] Attempting to play VOD: "${title}" | Direct Play: ${useDirectPlay} | StartTime: ${startTime}`);
 
     const preservedDuration = knownDuration !== null ? knownDuration : (currentVodTranscodeSession?.url === url ? currentVodTranscodeSession?.duration : (mediaInfo?.duration || null));
 
     // 1. Stop any existing player (live or VOD), regardless of play method chosen
-    await stopAndCleanupPlayer();
+    await stopAndCleanupPlayer({ keepSleepTimer: true });
     await new Promise(r => setTimeout(r, 50)); // Short micro-yield to allow browser MSE decoder to flush
 
     // 2. Get necessary settings
@@ -1349,18 +1439,11 @@ export const playVOD = async (url, title, logo = '', startTime = 0, knownDuratio
     const userAgentId = settings.activeUserAgentId;
     const profile = (settings.streamProfiles || []).find(p => p.id === profileId);
 
-    // Hide VOD controls overlay if not transcoding
-    const vodOverlay = document.getElementById('vod-controls-overlay');
-
     // --- DIRECT PLAY / REDIRECT LOGIC ---
     // If Direct Play is explicitly enabled OR the active profile is 'redirect' (no transcoding),
     // always use native HTML5 <video> playback. Never pass direct MKV/MP4 files into mpegts.js.
     if (useDirectPlay || !profile || profile.command === 'redirect') {
         currentVodTranscodeSession = null;
-        if (vodOverlay) {
-            vodOverlay.classList.add('hidden');
-            vodOverlay.style.opacity = '0';
-        }
         await playRecordingOrDirectVideo(url, title, logo, true, startTime, mediaInfo);
         return;
     }
@@ -1381,7 +1464,7 @@ export const playVOD = async (url, title, logo = '', startTime = 0, knownDuratio
     };
 
     let streamUrlToPlay = `/stream?url=${encodeURIComponent(url)}&profileId=${profileId}&userAgentId=${userAgentId}&vodName=${encodeURIComponent(title)}&vodLogo=${encodeURIComponent(logo)}`;
-    if (startTime > 0) {
+    if (startTime > 0 || isSeek) {
         streamUrlToPlay += `&startTime=${Math.floor(startTime)}`;
     }
 
@@ -1397,10 +1480,42 @@ export const playVOD = async (url, title, logo = '', startTime = 0, knownDuratio
     console.log(`[VOD_PLAYER] Final stream URL: ${streamUrlToPlay}`);
     logToPlayerConsole(`Final stream URL: ${streamUrlToPlay}`);
 
-    // If profile outputs MP4 container (fMP4), play directly via native video element
+    // If profile outputs MP4 container (fMP4), play via the native video element. The piped fMP4
+    // has no duration or byte ranges, so the video element cannot seek: the bar
+    // restarts FFmpeg at the requested offset (-ss) just like the MPEG-TS path.
     if (profile.command && profile.command.includes('-f mp4')) {
         console.log(`[VOD_PLAYER] Profile uses fMP4. Playing via native video element: ${streamUrlToPlay}`);
-        await playRecordingOrDirectVideo(streamUrlToPlay, title, logo, false, 0, mediaInfo);
+        if (mediaInfo) {
+            setActiveMediaTracking(mediaInfo);
+        }
+        UIElements.videoTitle.textContent = title;
+        currentChannelInfo = { url, name: title, channelId: null, logo };
+        updateMediaSession(title, logo || '/icons/icon-192.png');
+        const refreshBtn = document.getElementById('refresh-stream-btn');
+        if (refreshBtn) refreshBtn.classList.add('hidden');
+
+        const video = UIElements.videoElement;
+        video.src = streamUrlToPlay;
+        video.load();
+        video.volume = parseFloat(localStorage.getItem('iptvPlayerVolume') || 0.5);
+        video.playbackRate = parseFloat(localStorage.getItem('iptvPlaybackRate') || '1');
+
+        UIElements.videoModal?.classList.remove('pip-active');
+        openModal(UIElements.videoModal);
+        requestScreenWakeLock();
+        showBar(vodBar);
+        setPrimaryPlayerButtons(false);
+        refreshPlayerRecordState();
+        probeVodDuration(url, title);
+
+        try {
+            await video.play();
+        } catch (playErr) {
+            if (playErr.name !== 'AbortError') {
+                console.warn('[VOD_PLAYER] play() interrupted:', playErr);
+            }
+        }
+        setLocalPlayerState(streamUrlToPlay, title, null);
         return;
     }
 
@@ -1447,32 +1562,14 @@ export const playVOD = async (url, title, logo = '', startTime = 0, knownDuratio
             currentChannelInfo = { url, name: title, channelId: null, logo };
             updateMediaSession(title, logo);
             requestScreenWakeLock();
-
-            // Hide native controls so our VOD overlay takes over without "LIVE" scrubber locking
+            showBar(vodBar);
+            setPrimaryPlayerButtons(false);
+            refreshPlayerRecordState();
             if (UIElements.videoElement) {
-                UIElements.videoElement.controls = false;
+                UIElements.videoElement.playbackRate = parseFloat(localStorage.getItem('iptvPlaybackRate') || '1');
             }
 
-            // Setup and display VOD controls overlay
-            setupVodControlsOverlay(profile.name);
-
-            // Fetch duration in background if not known
-            if (!currentVodTranscodeSession.duration) {
-                fetch(`/api/vod/duration?url=${encodeURIComponent(url)}`)
-                    .then(res => res.json())
-                    .then(data => {
-                        if (data && data.duration && currentVodTranscodeSession && currentVodTranscodeSession.url === url) {
-                            currentVodTranscodeSession.duration = data.duration;
-                            if (currentActiveMedia) currentActiveMedia.duration = data.duration;
-                            const totalTimeEl = document.getElementById('vod-total-time');
-                            const progressBar = document.getElementById('vod-progress-bar');
-                            if (totalTimeEl) totalTimeEl.textContent = formatTimeSeconds(data.duration);
-                            if (progressBar) progressBar.max = data.duration;
-                            console.log(`[VOD_PLAYER] Probed duration for "${title}": ${data.duration}s`);
-                        }
-                    })
-                    .catch(e => console.warn('[VOD_PLAYER] Could not fetch duration:', e));
-            }
+            probeVodDuration(url, title);
 
             // Attach and play
             appState.player.attachMediaElement(UIElements.videoElement);
@@ -1515,116 +1612,261 @@ export const playVOD = async (url, title, logo = '', startTime = 0, knownDuratio
     }
 };
 
-/**
- * Detects and populates available audio tracks in the menu.
- */
-function updateAudioTrackList() {
-    const video = UIElements.videoElement;
-    const audioTracks = video.audioTracks;
-    const listEl = document.getElementById('audio-track-list');
-    const btnEl = document.getElementById('audio-track-btn');
-
-    console.log('[AUDIO_TRACKS] Checking for audio tracks...');
-    console.log('[AUDIO_TRACKS] audioTracks object:', audioTracks);
-    console.log('[AUDIO_TRACKS] Number of tracks:', audioTracks ? audioTracks.length : 0);
-
-    if (!audioTracks || audioTracks.length <= 1) {
-        // Hide button if no multiple tracks
-        console.log('[AUDIO_TRACKS] Not enough tracks, hiding button');
-        btnEl?.classList.add('hidden');
-        return;
-    }
-
-    console.log('[AUDIO_TRACKS] Multiple tracks found! Showing button and populating menu');
-    btnEl?.classList.remove('hidden');
-    if (!listEl) return;
-
-    listEl.innerHTML = '';
-
-    for (let i = 0; i < audioTracks.length; i++) {
-        const track = audioTracks[i];
-        console.log(`[AUDIO_TRACKS] Track ${i}:`, { label: track.label, language: track.language, enabled: track.enabled });
-        const item = document.createElement('div');
-        item.className = `px-4 py-2 cursor-pointer hover:bg-gray-700 transition-colors ${track.enabled ? 'bg-blue-600 font-semibold' : ''}`;
-        item.textContent = track.label || track.language || `Track ${i + 1}`;
-        item.onclick = () => selectAudioTrack(i);
-        listEl.appendChild(item);
-    }
+function isTranscodedLive(profileId = currentProfileId) {
+    const profile = (guideState.settings.streamProfiles || []).find(p => p.id === profileId);
+    return !!(currentChannelInfo?.channelId && /^https?:/i.test(currentChannelInfo.url || '') &&
+        profile && profile.command !== 'redirect' && !profile.command.includes('-f mp4'));
 }
 
-/**
- * Selects an audio track by index.
- */
+function fillSelect(select, options, selected) {
+    select.innerHTML = options.map(([value, label]) => `<option value="${escapeHtml(String(value))}">${escapeHtml(label)}</option>`).join('');
+    select.value = String(selected);
+}
+
+/** Selects an audio track of the video element by index. */
 function selectAudioTrack(index) {
     const audioTracks = UIElements.videoElement.audioTracks;
     if (!audioTracks) return;
-
-    for (let i = 0; i < audioTracks.length; i++) {
-        audioTracks[i].enabled = (i === index);
-    }
-    updateAudioTrackList();
-    document.getElementById('audio-track-menu')?.classList.add('hidden');
-    showNotification(`Audio track switched`, false, 1500);
+    for (let i = 0; i < audioTracks.length; i++) audioTracks[i].enabled = (i === index);
+    showNotification('Audio track switched', false, 1500);
 }
 
-/**
- * Detects and populates available subtitle tracks in the menu.
- */
+function selectServerAudioTrack(ordinal) {
+    selectedAudioTrack = ordinal;
+    showNotification(`Audio track ${ordinal + 1} selected.`, false, 1500);
+    closePlaybackPanel();
+    if (!currentChannelInfo?.channelId) return;
+    const forceLive = !!appState.hlsPlayer || currentChannelInfo.forceLive === true;
+    playChannel(currentChannelInfo.url, currentChannelInfo.name, currentChannelInfo.channelId, forceLive, currentProfileId);
+}
+
+/** The audio row: the video's own tracks, else the server's tracks of a transcoded channel, else (rewind) a reason. */
+async function refreshAudioRow() {
+    const row = document.getElementById('pp-audio-row');
+    const select = document.getElementById('pp-audio');
+    const note = document.getElementById('pp-audio-note');
+    const channel = currentChannelInfo;
+    const native = Array.from(UIElements.videoElement.audioTracks || []);
+    select.disabled = false;
+    note.textContent = '';
+    row.classList.add('hidden');
+    if (native.length > 1) {
+        fillSelect(select, native.map((t, i) => [i, t.label || t.language || `Track ${i + 1}`]), Math.max(0, native.findIndex(t => t.enabled)));
+        select.onchange = () => selectAudioTrack(Number(select.value));
+        row.classList.remove('hidden');
+    } else if (channel?.channelId && appState.hlsPlayer) {
+        if (!isTranscodedLive(guideState.settings.activeStreamProfileId)) return;
+        fillSelect(select, [['', 'Default']], '');
+        select.disabled = true;
+        note.textContent = 'Not available with rewind';
+        row.classList.remove('hidden');
+    } else if (isTranscodedLive()) {
+        try {
+            if (!currentStreamTracks) {
+                const res = await apiFetch(`/api/stream/tracks?url=${encodeURIComponent(channel.url)}&userAgentId=${encodeURIComponent(guideState.settings.activeUserAgentId || '')}`);
+                currentStreamTracks = res ? await res.json() : null;
+            }
+        } catch (e) { console.warn('[PLAYER] Could not read audio tracks:', e); }
+        const tracks = currentStreamTracks?.audio || [];
+        if (tracks.length < 2 || currentChannelInfo !== channel) return;
+        fillSelect(select, tracks.map(t => [t.ordinal, t.title || t.language || `Audio ${t.ordinal + 1}`]), selectedAudioTrack ?? tracks[0].ordinal);
+        select.onchange = () => selectServerAudioTrack(Number(select.value));
+        row.classList.remove('hidden');
+    }
+}
+
+/** The subtitle row and the CC button appear when the stream carries subtitle tracks. */
 function updateSubtitleTrackList() {
-    const video = UIElements.videoElement;
-    const textTracks = video.textTracks;
-    const listEl = document.getElementById('subtitle-track-list');
-    const btnEl = document.getElementById('subtitle-track-btn');
-
-    console.log('[SUBTITLES] Checking for subtitle tracks...');
-    console.log('[SUBTITLES] textTracks object:', textTracks);
-    console.log('[SUBTITLES] Number of tracks:', textTracks ? textTracks.length : 0);
-
-    if (!textTracks || textTracks.length === 0) {
-        console.log('[SUBTITLES] No subtitle tracks found, hiding button');
-        btnEl?.classList.add('hidden');
-        return;
-    }
-
-    console.log('[SUBTITLES] Subtitle tracks found! Showing button and populating menu');
-    btnEl?.classList.remove('hidden');
-    if (!listEl) return;
-
-    listEl.innerHTML = '';
-
-    // Add "Off" option
-    const offItem = document.createElement('div');
-    const anyShowing = Array.from(textTracks).some(t => t.mode === 'showing');
-    offItem.className = `px-4 py-2 cursor-pointer hover:bg-gray-700 transition-colors ${!anyShowing ? 'bg-blue-600 font-semibold' : ''}`;
-    offItem.textContent = 'Off';
-    offItem.onclick = () => selectSubtitleTrack(-1);
-    listEl.appendChild(offItem);
-
-    // Add each track
-    for (let i = 0; i < textTracks.length; i++) {
-        const track = textTracks[i];
-        console.log(`[SUBTITLES] Track ${i}:`, { label: track.label, language: track.language, kind: track.kind, mode: track.mode });
-        const item = document.createElement('div');
-        item.className = `px-4 py-2 cursor-pointer hover:bg-gray-700 transition-colors ${track.mode === 'showing' ? 'bg-blue-600 font-semibold' : ''}`;
-        item.textContent = track.label || track.language || `Subtitle ${i + 1}`;
-        item.onclick = () => selectSubtitleTrack(i);
-        listEl.appendChild(item);
-    }
+    const tracks = Array.from(UIElements.videoElement.textTracks || []);
+    document.getElementById('pp-subs-row').classList.toggle('hidden', !tracks.length);
+    document.getElementById('pb-cc').classList.toggle('hidden', !tracks.length);
+    if (!tracks.length) return;
+    const select = document.getElementById('pp-subs');
+    fillSelect(select, [[-1, 'Off'], ...tracks.map((t, i) => [i, t.label || t.language || `Subtitle ${i + 1}`])], tracks.findIndex(t => t.mode === 'showing'));
+    select.onchange = () => selectSubtitleTrack(Number(select.value));
 }
 
-/**
- * Selects a subtitle track by index (-1 for off).
- */
+/** Shows track `index` (-1 for off). */
 function selectSubtitleTrack(index) {
     const textTracks = UIElements.videoElement.textTracks;
     if (!textTracks) return;
-
-    for (let i = 0; i < textTracks.length; i++) {
-        textTracks[i].mode = (i === index) ? 'showing' : 'hidden';
-    }
+    for (let i = 0; i < textTracks.length; i++) textTracks[i].mode = (i === index) ? 'showing' : 'hidden';
     updateSubtitleTrackList();
-    document.getElementById('subtitle-track-menu')?.classList.add('hidden');
     showNotification(index === -1 ? 'Subtitles off' : 'Subtitle track switched', false, 1500);
+}
+
+/** The CC button and the C key: off, then each track in turn. */
+export function cycleSubtitles() {
+    const tracks = Array.from(UIElements.videoElement.textTracks || []);
+    const next = tracks.findIndex(t => t.mode === 'showing') + 1;
+    if (tracks.length) selectSubtitleTrack(next < tracks.length ? next : -1);
+}
+
+let seriesCache = null; // the episodes of the series on screen, so prev/next and Up next ask the server once
+let upNext = null; // { timer, go } while the Up next card is counting down
+
+async function neighbourEpisode(delta, context = currentEpisodeContext) {
+    if (!context?.seriesId) return null;
+    if (seriesCache?.id !== context.seriesId) {
+        const series = await fetchSeriesDetails(context.seriesId);
+        if (!series?.seasons) return null;
+        seriesCache = {
+            id: context.seriesId,
+            name: series.name,
+            episodes: Object.values(series.seasons).flat().sort((a, b) => (a.season - b.season) || (a.episode - b.episode)),
+        };
+    }
+    const { episodes } = seriesCache;
+    const at = episodes.findIndex(ep => Number(ep.season) === Number(context.season) && Number(ep.episode) === Number(context.episode));
+    return at >= 0 ? episodes[at + delta] || null : null;
+}
+
+function playEpisode(ep, context) {
+    playVOD(ep.url, ep.name, context.logo, 0, ep.duration_secs || null, {
+        contentType: 'vod_episode',
+        contentId: String(ep.id),
+        title: ep.name,
+        duration: ep.duration_secs || 0,
+        seriesId: context.seriesId,
+        season: ep.season,
+        episode: ep.episode,
+        seriesTitle: seriesCache?.name || context.seriesTitle,
+        logo: context.logo,
+    });
+}
+
+/** The bar's previous / next episode buttons. */
+export async function stepEpisode(delta) {
+    const context = currentEpisodeContext;
+    if (!context) return;
+    try {
+        const ep = await neighbourEpisode(delta, context);
+        if (ep) playEpisode(ep, context);
+        else showNotification(delta > 0 ? 'No next episode' : 'No previous episode', false, 1500);
+    } catch (e) {
+        showNotification('Could not load the episode list', true);
+    }
+}
+
+export function cancelUpNext() {
+    if (!upNext) return;
+    clearInterval(upNext.timer);
+    upNext = null;
+    $('player-upnext').classList.add('hidden');
+}
+
+/** When an episode ends the next one is offered for ten seconds, then plays unless cancelled. */
+async function maybePlayNextEpisode() {
+    const context = currentEpisodeContext;
+    if (!context?.seriesId || localStorage.getItem('iptvAutoplayNext') === 'off') return;
+    try {
+        const next = await neighbourEpisode(1, context);
+        if (!next || context !== currentEpisodeContext) return; // no next one, or the viewer already moved on
+        let left = 10;
+        const count = $('un-count');
+        $('un-title').textContent = next.name;
+        count.textContent = left;
+        const go = () => { cancelUpNext(); playEpisode(next, context); };
+        upNext = { go, timer: setInterval(() => { count.textContent = --left; if (left <= 0) go(); }, 1000) };
+        $('player-upnext').classList.remove('hidden');
+        $('un-play').focus({ preventScroll: true });
+    } catch (e) {
+        console.warn('[PLAYER] Could not offer the next episode:', e);
+    }
+}
+
+const SPEEDS = [1, 1.25, 1.5, 2, 0.75, 0.5];
+
+export function setPlaybackSpeed(speed) {
+    UIElements.videoElement.playbackRate = speed;
+    localStorage.setItem('iptvPlaybackRate', String(speed));
+}
+
+export function cyclePlaybackSpeed() {
+    const video = UIElements.videoElement;
+    if (!video) return;
+    setPlaybackSpeed(SPEEDS[(SPEEDS.indexOf(Number(video.playbackRate) || 1) + 1) % SPEEDS.length] || 1);
+}
+
+export const sleepMinutes = () => appState.sleep?.min || 0;
+
+export function setSleepTimer(minutes) {
+    clearTimeout(sleepTimer);
+    sleepTimer = null;
+    appState.sleep = minutes > 0 ? { min: minutes, ends: Date.now() + minutes * 60000 } : null; // the bar shows the time left
+    if (minutes > 0) {
+        sleepTimer = setTimeout(() => {
+            showNotification('Sleep timer ended. Stopping playback.', false, 3000);
+            stopAndCleanupPlayer();
+        }, minutes * 60 * 1000);
+    }
+    showNotification(minutes > 0 ? `Sleep timer: ${minutes} minutes` : 'Sleep timer off', false, 1500);
+}
+
+function setPrimaryPlayerButtons(isLive) {
+    UIElements.videoModal?.classList.toggle('is-live', isLive);
+    const on = localStorage.getItem('iptvAutoplayNext') !== 'off';
+    document.getElementById('player-autoplay-badge').textContent = on ? 'On' : 'Off';
+    refreshQualityMenu(isLive);
+}
+
+function refreshQualityMenu(isLive) {
+    const row = document.getElementById('player-quality-row');
+    const select = document.getElementById('player-quality-select');
+    if (!row || !select) return;
+    const allowed = guideState.settings.allowUserQualitySwitch === true;
+    if (!allowed || !isLive || !currentChannelInfo?.channelId) {
+        row.classList.add('hidden');
+        return;
+    }
+    const hardware = guideState.hardware || {};
+    const profiles = (guideState.settings.streamProfiles || []).filter(profile => {
+        if (profile.id.includes('fmp4')) return false;
+        if (profile.id.includes('nvidia') && !hardware.nvidia) return false;
+        if (profile.id === 'ffmpeg-intel' && !hardware.intel_qsv) return false;
+        if (profile.id === 'ffmpeg-vaapi' && !hardware.intel_vaapi) return false;
+        if (profile.id === 'ffmpeg-vaapi-amd' && !hardware.radeon_vaapi) return false;
+        return true;
+    });
+    select.innerHTML = profiles.map(profile => `<option value="${escapeHtml(profile.id)}">${escapeHtml(profile.name)}</option>`).join('');
+    select.value = currentProfileId || guideState.settings.activeStreamProfileId;
+    select.onchange = () => {
+        if (!currentChannelInfo?.channelId) return;
+        closePlaybackPanel();
+        const forceLive = !!appState.hlsPlayer || currentChannelInfo.forceLive === true;
+        playChannel(currentChannelInfo.url, currentChannelInfo.name, currentChannelInfo.channelId, forceLive, select.value);
+    };
+    row.classList.remove('hidden');
+}
+
+function downloadHref() {
+    const media = currentActiveMedia;
+    if (guideState.settings.downloads?.enabled === false || document.documentElement.classList.contains('tv')) return null;
+    if (media?.contentType === 'vod_movie') return `/api/vod/download/movie/${encodeURIComponent(media.contentId)}`;
+    if (media?.contentType === 'vod_episode') return `/api/vod/download/episode/${encodeURIComponent(media.contentId)}`;
+    return currentStreamUrlToPlay?.startsWith('/dvr/') ? currentStreamUrlToPlay : null;
+}
+
+const markOn = (group, isOn) => Array.from(group.children).forEach(button => button.classList.toggle('on', isOn(button)));
+
+/** Brings every row of the Playback panel up to date with what is playing; called when it opens. */
+export function refreshPlaybackPanel() {
+    const video = UIElements.videoElement;
+    const channelId = currentChannelInfo?.channelId;
+    const rewind = !!channelId && !!appState.hlsPlayer;
+    $('pp-speed-row').classList.toggle('hidden', !!channelId);
+    markOn($('pp-speed'), b => Number(b.dataset.speed) === (video.playbackRate || 1));
+    markOn($('pp-sleep'), b => Number(b.dataset.min) === sleepMinutes());
+    $('player-quality-select').disabled = rewind;
+    $('pp-quality-note').textContent = rewind ? 'Fixed while rewind is on' : '';
+    updateSubtitleTrackList();
+    refreshAudioRow();
+    const program = channelId && (appState.currentUser?.isAdmin || appState.currentUser?.canUseDvr) ? nowNext(channelId).now : null;
+    $('player-autoplay-btn').classList.toggle('hidden', !currentEpisodeContext);
+    $('pp-series-btn').classList.toggle('hidden', !program);
+    $('pp-series-name').textContent = program ? program.title : '';
+    $('pp-download-btn').classList.toggle('hidden', !downloadHref());
+    $('pip-btn').classList.toggle('hidden', !document.pictureInPictureEnabled);
 }
 
 /**
@@ -1640,78 +1882,62 @@ export function setupPlayerEventListeners() {
         } catch (e) {}
     }
 
-    // NEW: Add event listener for the refresh button
-    const refreshBtn = document.getElementById('refresh-stream-btn');
-    if (refreshBtn) {
-        bindTap(refreshBtn, forceRefreshStream);
-    }
+    bindTap(document.getElementById('refresh-stream-btn'), () => { closePlaybackPanel(); forceRefreshStream(); });
+
+    const recordBtn = document.getElementById('record-current-btn');
+    if (recordBtn) bindTap(recordBtn, toggleCurrentRecording);
+    bindTap(document.getElementById('pb-speed'), cyclePlaybackSpeed);
+    bindTap(document.getElementById('pb-cc'), cycleSubtitles);
+    bindTap(document.getElementById('player-autoplay-btn'), () => {
+        const next = localStorage.getItem('iptvAutoplayNext') === 'off' ? 'on' : 'off';
+        localStorage.setItem('iptvAutoplayNext', next);
+        showNotification(`Autoplay next episode ${next}.`, false, 1500);
+        setPrimaryPlayerButtons(false);
+    });
+
+    // Speed and sleep timer are choices on a row, not buttons that cycle blind.
+    document.getElementById('pp-speed').addEventListener('click', (e) => {
+        const button = e.target.closest('[data-speed]');
+        if (button) { setPlaybackSpeed(Number(button.dataset.speed)); refreshPlaybackPanel(); }
+    });
+    document.getElementById('pp-sleep').addEventListener('click', (e) => {
+        const button = e.target.closest('[data-min]');
+        if (button) { setSleepTimer(Number(button.dataset.min)); refreshPlaybackPanel(); }
+    });
+    bindTap(document.getElementById('pp-series-btn'), async () => {
+        closePlaybackPanel();
+        const program = nowNext(currentChannelInfo?.channelId).now;
+        if (!program) return;
+        const { addSeriesRule } = await import('./dvr.js'); // dvr.js imports this file, so it loads on use
+        addSeriesRule({ channelId: currentChannelInfo.channelId, title: program.title });
+    });
+    bindTap(document.getElementById('pp-download-btn'), () => {
+        closePlaybackPanel();
+        Object.assign(document.createElement('a'), { href: downloadHref(), download: '' }).click();
+        showNotification('Download started.', false, 2000);
+    });
 
     bindTap(UIElements.pipBtn, () => {
+        closePlaybackPanel();
         if (document.pictureInPictureEnabled && UIElements.videoElement && (UIElements.videoElement.readyState >= 1 || !UIElements.videoElement.paused)) {
             requestScreenWakeLock();
             UIElements.videoElement.requestPictureInPicture().catch(() => showNotification("Could not enter Picture-in-Picture.", true));
         }
     });
 
-    // More Options Dropdown Toggle & Outside Click
-    const moreOptionsBtn = document.getElementById('player-more-options-btn');
-    const moreOptionsMenu = document.getElementById('player-more-options-menu');
-    if (moreOptionsBtn && moreOptionsMenu) {
-        bindTap(moreOptionsBtn, (e) => {
-            if (e && e.stopPropagation) e.stopPropagation();
-            moreOptionsMenu.classList.toggle('hidden');
-        });
-
-        // Close on outside click
-        document.addEventListener('click', (e) => {
-            if (!moreOptionsBtn.contains(e.target) && !moreOptionsMenu.contains(e.target)) {
-                moreOptionsMenu.classList.add('hidden');
-            }
-        });
-
-        // Close on Escape key or seek transcoded VOD on ArrowLeft/Right
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape' && !moreOptionsMenu.classList.contains('hidden')) {
-                moreOptionsMenu.classList.add('hidden');
-                return;
-            }
-
-            // Keyboard seeking for transcoded VOD streams via -ss
-            if (currentVodTranscodeSession && UIElements.videoModal && !UIElements.videoModal.classList.contains('hidden')) {
-                // Ignore if typing in an input (except if it's the vod-progress-bar)
-                if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName) && document.activeElement?.id !== 'vod-progress-bar') return;
-
-                if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
-                    e.preventDefault();
-                    const delta = (e.shiftKey ? 60 : 15) * (e.key === 'ArrowRight' ? 1 : -1);
-                    seekVodRelative(delta);
-                } else if (e.key === ' ' || e.code === 'Space') {
-                    e.preventDefault();
-                    if (UIElements.videoElement) {
-                        if (UIElements.videoElement.paused) UIElements.videoElement.play();
-                        else UIElements.videoElement.pause();
-                    }
-                }
-            }
-        });
-    }
+    // A click anywhere outside the Playback panel closes it.
+    document.addEventListener('click', (e) => {
+        if (!e.target.closest('#player-panel, #pb-panel-btn')) closePlaybackPanel();
+    });
 
     bindTap(UIElements.streamInfoToggleBtn, () => {
         UIElements.streamInfoOverlay.classList.toggle('hidden');
-        document.getElementById('player-more-options-menu')?.classList.add('hidden');
+        closePlaybackPanel();
     });
-
-    // NEW: Aspect Ratio Lock Toggle
-    const aspectRatioLockBtn = document.getElementById('aspect-ratio-lock-btn');
-    if (aspectRatioLockBtn) {
-        bindTap(aspectRatioLockBtn, toggleAspectRatioLock);
-        // Initialize button state
-        updateAspectRatioLockButton();
-    }
 
     if (UIElements.castBtn) {
         bindTap(UIElements.castBtn, () => {
-            document.getElementById('player-more-options-menu')?.classList.add('hidden');
+            closePlaybackPanel();
             console.log('[PLAYER] Custom cast button clicked. Requesting session...');
             try {
                 const castContext = cast.framework.CastContext.getInstance();
@@ -1810,6 +2036,9 @@ export function setupPlayerEventListeners() {
             isUserInitiatedPause = true;
         }
     });
+    $('un-play').addEventListener('click', () => upNext?.go());
+    $('un-cancel').addEventListener('click', cancelUpNext);
+    UIElements.videoElement.addEventListener('playing', cancelUpNext); // replaying or scrubbing back cancels the offer
     UIElements.videoElement.addEventListener('ended', () => {
         if (currentActiveMedia) {
             saveWatchProgressApi(currentActiveMedia.contentType, currentActiveMedia.contentId, 0, currentActiveMedia.duration || 0);
@@ -1818,6 +2047,7 @@ export function setupPlayerEventListeners() {
         releaseScreenWakeLock();
         releaseTabDiscardLock();
         if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'none';
+        maybePlayNextEpisode();
     });
 
     // Handle tab visibility changes: restore video playback when returning to foreground if not paused by user
@@ -1882,50 +2112,16 @@ export function setupPlayerEventListeners() {
         }
     });
 
-    // Audio track button
-    const audioTrackBtn = document.getElementById('audio-track-btn');
-    if (audioTrackBtn) {
-        audioTrackBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            document.getElementById('player-more-options-menu')?.classList.add('hidden');
-            const menu = document.getElementById('audio-track-menu');
-            menu?.classList.toggle('hidden');
-            document.getElementById('subtitle-track-menu')?.classList.add('hidden');
-        });
-    }
-
-    // Subtitle track button
-    const subtitleTrackBtn = document.getElementById('subtitle-track-btn');
-    if (subtitleTrackBtn) {
-        subtitleTrackBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            document.getElementById('player-more-options-menu')?.classList.add('hidden');
-            const menu = document.getElementById('subtitle-track-menu');
-            menu?.classList.toggle('hidden');
-            document.getElementById('audio-track-menu')?.classList.add('hidden');
-        });
-    }
-
-    // Close menus when clicking outside
-    document.addEventListener('click', () => {
-        document.getElementById('audio-track-menu')?.classList.add('hidden');
-        document.getElementById('subtitle-track-menu')?.classList.add('hidden');
-    });
-
     // Update track lists when stream loads
     UIElements.videoElement.addEventListener('loadedmetadata', () => {
         console.log('[PLAYER] Media metadata loaded, checking for audio/subtitle tracks...');
         // Small delay to ensure tracks are fully loaded
-        setTimeout(() => {
-            updateAudioTrackList();
-            updateSubtitleTrackList();
-        }, 500);
+        setTimeout(updateSubtitleTrackList, 500);
     });
 
     // Also check when tracks change
     UIElements.videoElement.addEventListener('addtrack', () => {
         console.log('[PLAYER] Track added, updating lists...');
-        updateAudioTrackList();
         updateSubtitleTrackList();
     });
 
@@ -1954,44 +2150,7 @@ export function setupPlayerEventListeners() {
 }
 
 // --- Aspect Ratio Logic ---
-let isAspectRatioLocked = true; // Default to locked
-
-export const toggleAspectRatioLock = () => {
-    isAspectRatioLocked = !isAspectRatioLocked;
-    updateAspectRatioLockButton();
-    document.getElementById('player-more-options-menu')?.classList.add('hidden');
-    showNotification(isAspectRatioLocked ? 'Aspect ratio locked to 16:9' : 'Aspect ratio free resize enabled', false, 1500);
-};
-
-const updateAspectRatioLockButton = () => {
-    const btn = document.getElementById('aspect-ratio-lock-btn');
-    if (!btn) return;
-
-    const statusBadge = document.getElementById('aspect-ratio-status');
-    const iconContainer = btn.querySelector('.aspect-ratio-icon-container');
-
-    if (isAspectRatioLocked) {
-        btn.classList.add('text-blue-400');
-        btn.classList.remove('text-gray-400');
-        if (statusBadge) {
-            statusBadge.textContent = '16:9 Locked';
-            statusBadge.className = 'text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-400 border border-blue-500/30';
-        }
-        if (iconContainer) {
-            iconContainer.className = 'p-1.5 rounded-md bg-blue-600/30 text-blue-400 transition-colors flex-shrink-0 aspect-ratio-icon-container';
-        }
-    } else {
-        btn.classList.remove('text-blue-400');
-        btn.classList.add('text-gray-400');
-        if (statusBadge) {
-            statusBadge.textContent = 'Free Resize';
-            statusBadge.className = 'text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-gray-800 text-gray-400 border border-gray-700';
-        }
-        if (iconContainer) {
-            iconContainer.className = 'p-1.5 rounded-md bg-gray-800/80 text-gray-400 transition-colors flex-shrink-0 aspect-ratio-icon-container';
-        }
-    }
-};
+const isAspectRatioLocked = true; // the player is full-bleed, so its window is always kept at the video's ratio
 
 export const shouldMaintainAspectRatio = () => {
     return isAspectRatioLocked;

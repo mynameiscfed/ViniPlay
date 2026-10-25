@@ -8,6 +8,7 @@ import { appState, guideState, UIElements } from './state.js';
 import { apiFetch, stopStream, startRedirectStream, stopRedirectStream, sendRedirectHeartbeat } from './api.js';
 import { showNotification, openModal, closeModal, showConfirm } from './ui.js';
 import { ICONS } from './icons.js';
+import { escapeHtml } from './utils.js';
 
 let grid;
 const players = new Map();
@@ -109,6 +110,13 @@ async function pauseAndClearAllPlayers() {
             console.warn(`[MultiView] Tab Hide: Error pausing player for widget ${widgetId}. It might already be detached.`, e);
         }
     }
+
+    // Redirect streams have their own server sessions and heartbeats.
+    for (const historyId of redirectHistoryIds.values()) {
+        stopPromises.push(stopRedirectStream(historyId));
+    }
+    redirectHistoryIds.clear();
+    checkAndStopMultiviewHeartbeats();
 
     // Wait for all server stop requests to be sent
     await Promise.all(stopPromises);
@@ -412,7 +420,7 @@ function addPlayerWidget(channel = null, layout = {}) {
                 <button class="play-pause-btn" title="Play/Pause">${ICONS.pause}</button>
                 <button class="mute-btn" title="Mute">${ICONS.unmute}</button>
                 <input type="range" min="0" max="1" step="0.05" value="0.5" class="volume-slider">
-                <button class="fullscreen-btn" title="Fullscreen">${ICONS.fullscreen}</button>
+                <button class="fullscreen-btn" title="Open in player">${ICONS.fullscreen}</button>
                 <button class="stop-btn" title="Stop Channel">${ICONS.stop}</button>
                 <button class="remove-widget-btn" title="Remove Player">${ICONS.removeWidget}</button>
             </div>
@@ -622,11 +630,14 @@ function attachWidgetEventListeners(widgetContentEl, widgetId) {
         }
     });
 
-    widgetContentEl.querySelector('.fullscreen-btn').addEventListener('click', (e) => {
+    // The main player has the full control bar, CH +/- and fullscreen; a bare fullscreen video has none of them.
+    widgetContentEl.querySelector('.fullscreen-btn').addEventListener('click', async (e) => {
         e.stopPropagation();
-        if (videoEl.requestFullscreen) {
-            videoEl.requestFullscreen();
-        }
+        const channel = guideState.channels.find(c => c.id === playerPlaceholderEl?.dataset.channelId);
+        if (!channel) return;
+        stopAndCleanupPlayer(widgetId, true);
+        const { playChannel } = await import('./player.js');
+        playChannel(channel.url, channel.displayName || channel.name, channel.id);
     });
 
     widgetContentEl.addEventListener('click', () => {
@@ -709,7 +720,7 @@ async function playChannelInWidget(widgetId, channel, gridstackItemContentEl) {
 
     if (isVOD) {
         // For VOD files, auto-select fMP4 profile (same as Direct Player)
-        const hasNVIDIA = settings.hasNvidiaGpu;
+        const hasNVIDIA = !!guideState.hardware?.nvidia;
         profileIdToUse = hasNVIDIA ? 'ffmpeg-fmp4-nvidia' : 'ffmpeg-fmp4';
         console.log(`[MultiView] Auto-selected ${hasNVIDIA ? 'NVIDIA' : 'CPU'} fMP4 profile for VOD`);
 
@@ -777,7 +788,9 @@ async function playChannelInWidget(widgetId, channel, gridstackItemContentEl) {
             const mpegtsConfig = {
                 enableStashBuffer: true,
                 stashInitialSize: 4096,
-                liveBufferLatency: 2.0,
+                liveBufferLatencyChasing: true,
+                liveBufferLatencyMaxLatency: 5.0,
+                liveBufferLatencyMinRemain: 1.0,
             };
 
             const player = mpegts.createPlayer({
@@ -922,14 +935,14 @@ export function populateChannelSelector() {
 
     listEl.innerHTML = channelsToDisplay.map(channel => `
         <div class="channel-item flex items-center p-2 rounded-md hover:bg-gray-700 cursor-pointer" 
-             data-id="${channel.id}" 
-             data-name="${channel.displayName || channel.name}" 
-             data-url="${channel.url}"
-             data-logo="${channel.logo}">
-            <img src="${channel.logo}" onerror="this.onerror=null; this.src='https://placehold.co/40x40/1f2937/d1d5db?text=?';" class="w-10 h-10 object-contain mr-3 rounded-md bg-gray-700 flex-shrink-0">
+             data-id="${escapeHtml(channel.id)}" 
+             data-name="${escapeHtml(channel.displayName || channel.name)}" 
+             data-url="${escapeHtml(channel.url)}"
+             data-logo="${escapeHtml(channel.logo)}">
+            <img src="${escapeHtml(channel.logo)}" onerror="this.onerror=null; this.src='https://placehold.co/40x40/1f2937/d1d5db?text=?';" class="w-10 h-10 object-contain mr-3 rounded-md bg-gray-700 flex-shrink-0">
             <div class="overflow-hidden">
-                <p class="font-semibold text-white text-sm truncate">${channel.displayName || channel.name}</p>
-                <p class="text-gray-400 text-xs truncate">${channel.group || 'Uncategorized'}</p>
+                <p class="font-semibold text-white text-sm truncate">${escapeHtml(channel.displayName || channel.name)}</p>
+                <p class="text-gray-400 text-xs truncate">${escapeHtml(channel.group || 'Uncategorized')}</p>
             </div>
         </div>
     `).join('');

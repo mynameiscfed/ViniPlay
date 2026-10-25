@@ -1,14 +1,23 @@
-# This GitHub Actions workflow automates building and pushing your Docker image.
+# Builds, tests and publishes the ViniPlay container image.
 #
-# It pushes to two different container registries:
-# 1. GitHub Container Registry (ghcr.io)
-# 2. Docker Hub (docker.io)
+# Pipeline:
+#   1. test    - syntax-checks all JavaScript (npm test).
+#   2. docker  - builds the image, boots it and runs the container smoke test
+#                (test/container-smoke.sh), then pushes a multi-arch image
+#                (amd64 + arm64) only if every check passed.
 #
-# TRIGGERS:
-# 1. On a push to the 'main' branch (automatic).
-# 2. When a new version tag 'v*.*.*' is pushed (automatic).
-# 3. On a pull request to 'main' (automatic, build-only validation).
-# 4. Manually for any branch, using the 'Run workflow' button (manual).
+# Registries:
+#   - GitHub Container Registry (ghcr.io/<owner>/<repo>) always, using the
+#     built-in GITHUB_TOKEN. No secrets needed.
+#   - Docker Hub, optionally: set the repository variable DOCKERHUB_USERNAME
+#     and the secret DOCKERHUB_TOKEN, and images also go to
+#     docker.io/<DOCKERHUB_USERNAME>/viniplay.
+#
+# Triggers:
+#   - push to main        -> test, build, push (:main, :latest, :sha-xxxxxxx)
+#   - push of a v*.*.* tag -> test, build, push (:1.2.3, :1.2, :sha-xxxxxxx)
+#   - pull request to main -> test and build only, nothing is pushed
+#   - manual run           -> test, build, push (:<branch>, :sha-xxxxxxx)
 #
 name: Docker Image CI/CD
 
@@ -16,68 +25,150 @@ on:
   push:
     branches: [ "main" ]
     tags:
-      - 'v*.*.*' # Trigger on version tags like v1.0, v1.2.3
+      - 'v*.*.*'
     paths-ignore:
-      - 'README.md' # This will prevent the workflow from running on changes to README.md
+      - '**.md'
   pull_request:
     branches: [ "main" ]
-  workflow_dispatch: # Allows you to manually run this workflow
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  SMOKE_IMAGE: viniplay:ci
 
 jobs:
-  build_and_push:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '18' # Matches the Node.js version installed in the Dockerfile
+          cache: npm
+
+      # Tests that load server modules (e.g. sqlite3) need the dependencies.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+  docker:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    env:
+      PUSH: ${{ github.event_name != 'pull_request' }}
+      DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+
+      - name: Compute image names
+        id: images
+        run: |
+          # Registries require lowercase repository names.
+          {
+            echo "list<<EOF"
+            echo "ghcr.io/${GITHUB_REPOSITORY,,}"
+            if [ -n "$DOCKERHUB_USERNAME" ]; then echo "docker.io/${DOCKERHUB_USERNAME,,}/viniplay"; fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Extract metadata (tags and labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ steps.images.outputs.list }}
+          tags: |
+            # Branch name on push or manual run, e.g. :main or :dev
+            type=ref,event=branch
+            # PR number, for the (unpushed) PR build, e.g. :pr-12
+            type=ref,event=pr
+            # Short commit SHA, e.g. :sha-1a2b3c4, so every build can be pinned
+            type=sha
+            # Version tags from git tags, e.g. v1.2.3 -> :1.2.3 and :1.2
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            # :latest only for the default branch (main)
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # Build the amd64 image into the local Docker engine so it can be tested.
+      - name: Build image for testing
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: ${{ env.SMOKE_IMAGE }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Report image size
+        run: |
+          {
+            echo "### Image size (linux/amd64)"
+            echo '```'
+            docker image ls "$SMOKE_IMAGE" --format 'unpacked: {{.Size}}'
+            docker save "$SMOKE_IMAGE" | gzip -1 | wc -c | awk '{ printf "compressed (approx. registry size): %.0f MB\n", $1/1e6 }'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Container smoke test
+        run: bash test/container-smoke.sh "$SMOKE_IMAGE"
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+        if: env.PUSH == 'true'
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log in to Docker Hub
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
+        if: env.PUSH == 'true' && env.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@v4
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          username: ${{ env.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Extract metadata (tags and labels) for Docker
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: |
-            ghcr.io/${{ github.repository }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/viniplay
-          tags: |
-            # Tag with branch name on push or manual run.
-            # e.g., a manual run on 'dev' branch will create a 'dev' tag.
-            type=ref,event=branch
-
-            # Creates the 'latest' tag when a push is made to the default branch (main).
-            type=raw,value=latest,enable={{is_default_branch}}
-
-            # Creates version tags when a git tag is pushed (e.g., v1.2.3 -> 1.2.3 and 1.2).
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v6
+      # Only reached when the tests above passed. Reuses the amd64 layers from
+      # the test build via the cache and adds arm64.
+      - name: Build and push multi-arch image
+        if: env.PUSH == 'true'
+        uses: docker/build-push-action@v7
         with:
           context: .
-          push: ${{ github.event_name != 'pull_request' }} # Don't push on pull requests
+          platforms: linux/amd64,linux/arm64
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        if: env.PUSH == 'true'
+        run: |
+          {
+            echo "### Published image"
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

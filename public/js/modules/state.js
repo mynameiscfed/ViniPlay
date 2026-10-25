@@ -29,20 +29,27 @@ export const guideState = {
     vodSeries: [],
     settings: {
         // Add a default for channelColumnWidth
-        channelColumnWidth: window.innerWidth < 768 ? 64 : 180, // Default based on screen size
+        channelColumnWidth: window.innerWidth < 768 ? 120 : 240, // Default based on screen size
         notificationLeadTime: 10, // Default notification lead time in minutes
         multiviewLayouts: [], // To store saved layouts for the user
         adminPageSize: 25, // NEW: Default page size for the admin history table
         vodDirectPlayEnabled: true, // Default to true (native <video> playback with full seeking)
-        // Default timezone offset based on browser's timezone (will be overridden by server settings)
-        timezoneOffset: Math.round(-(new Date().getTimezoneOffset() / 60)),
+        downloads: { enabled: true, maxConcurrent: 2 },
+        liveRewind: { enabled: false, minutes: 15, diskCapMb: 4096 },
+        playerFallbackProfileId: null,
+        allowUserQualitySwitch: false,
+        // IANA zone plus its current offset as a fallback (will be overridden by server settings).
+        timeZone: null,
+        timezoneOffset: -(new Date().getTimezoneOffset() / 60),
     }, // This will hold both GLOBAL and USER settings, merged.
+    hardware: null,
     guideDurationHours: 48,
     hourWidthPixels: window.innerWidth < 768 ? 200 : 300,
     currentDate: new Date(),
     channelGroups: new Set(),
     channelSources: new Set(), // For the source filter
     visibleChannels: [],
+    view: null, // 'list' (now and next) or 'grid' (timeline); set from the device in guide.js
     scrollHandler: null, // Holds the reference to the throttled scroll handler for virtualization
     userNotifications: [], // Stores active program notifications for the current user
 };
@@ -51,6 +58,7 @@ export const guideState = {
 export const dvrState = {
     scheduledJobs: [],
     completedRecordings: [],
+    seriesRules: [],
 };
 
 // NEW: State specific to the Admin Activity page
@@ -88,18 +96,6 @@ export const UIElements = {
     videoTitle: null,
     closeModalBtn: null,
 
-
-    // --- Timeshift Controls Overlay Elements ---
-    timeshiftControlsOverlay: null,
-    timeshiftProgressBar: null,
-    timeshiftCurrentTime: null,
-    timeshiftTotalTime: null,
-    timeshiftLiveEdgeBtn: null,
-    timeshiftLiveDot: null,
-    timeshiftPlayPauseBtn: null,
-    timeshiftRewind15Btn: null,
-    timeshiftForward15Btn: null,
-    timeshiftStatusText: null,
 
     // --- Program Details Modal Elements ---
     programDetailsContainer: null,

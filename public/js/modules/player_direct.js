@@ -6,6 +6,7 @@
  */
 
 import { UIElements, guideState, appState } from './state.js';
+import { escapeHtml } from './utils.js';
 import { showNotification } from './ui.js';
 // MODIFIED: Import stopStream to explicitly kill the server process.
 import { saveUserSetting, stopStream, startRedirectStream, stopRedirectStream, sendRedirectHeartbeat } from './api.js';
@@ -98,7 +99,7 @@ export function logToPlayerConsole(message, isError = false) {
 
     const timestamp = new Date().toLocaleTimeString();
     const logEntry = document.createElement('p');
-    logEntry.innerHTML = `<span class="text-gray-500">${timestamp}:</span> <span class="${isError ? 'text-red-400' : 'text-gray-300'}">${message}</span>`;
+    logEntry.innerHTML = `<span class="text-gray-500">${timestamp}:</span> <span class="${isError ? 'text-red-400' : 'text-gray-300'}">${escapeHtml(message)}</span>`;
 
     consoleEl.appendChild(logEntry);
     consoleEl.scrollTop = consoleEl.scrollHeight; // Auto-scroll to the bottom
@@ -149,11 +150,11 @@ function renderRecentLinks() {
     links.forEach(link => {
         const tr = document.createElement('tr');
         tr.innerHTML = `
-            <td class="max-w-md truncate" title="${link}">
-                <a href="#" class="replay-link text-blue-400 hover:underline" data-url="${link}">${link}</a>
+            <td class="max-w-md truncate" title="${escapeHtml(link)}">
+                <a href="#" class="replay-link text-blue-400 hover:underline" data-url="${escapeHtml(link)}">${escapeHtml(link)}</a>
             </td>
             <td class="text-right">
-                <button class="action-btn delete-recent-link-btn p-1" title="Delete Link" data-url="${link}">
+                <button class="action-btn delete-recent-link-btn p-1" title="Delete Link" data-url="${escapeHtml(link)}">
                     <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd" /></svg>
                 </button>
             </td>
@@ -300,18 +301,16 @@ export function isDirectPlayerActive() {
  * Main dispatcher function that detects stream type and routes to appropriate player.
  * @param {string} url The URL of the stream or video file.
  */
-function playDirectStream(url) {
+async function playDirectStream(url) {
     console.log(`[DEBUG] playDirectStream: Called with URL: ${url}`);
 
-    // Only stop the current stream if we're playing a different URL
-    if (currentStreamUrl && currentStreamUrl !== url) {
-        console.log(`[DEBUG] playDirectStream: Stopping previous stream (different URL).`);
-        stopAndCleanupDirectPlayer();
-    } else if (!currentStreamUrl) {
-        console.log(`[DEBUG] playDirectStream: No active stream to stop.`);
-        stopAndCleanupDirectPlayer();
-    } else {
+    // Cleanup is async: it waits for /api/stream/stop. Starting the new player before
+    // it finishes lets cleanup destroy the new player and hide the controls.
+    if (currentStreamUrl && currentStreamUrl === url) {
         console.log(`[DEBUG] playDirectStream: Same URL already playing, not stopping.`);
+    } else {
+        console.log(`[DEBUG] playDirectStream: Stopping previous stream before starting the new one.`);
+        await stopAndCleanupDirectPlayer();
     }
 
     const consoleEl = UIElements.directPlayerConsole;
@@ -564,9 +563,11 @@ function playLiveStream(url, streamType) {
             const mpegtsConfig = {
                 enableStashBuffer: true,
                 stashInitialSize: 4096,
-                liveBufferLatency: 2.0,
+                liveBufferLatencyChasing: true,
+                liveBufferLatencyMaxLatency: 5.0,
+                liveBufferLatencyMinRemain: 1.0,
             };
-            logToPlayerConsole(`Player config: stashInitialSize=${mpegtsConfig.stashInitialSize}KB, liveBufferLatency=${mpegtsConfig.liveBufferLatency}s`);
+            logToPlayerConsole(`Player config: stashInitialSize=${mpegtsConfig.stashInitialSize}KB, live latency chase up to ${mpegtsConfig.liveBufferLatencyMaxLatency}s`);
 
             const newPlayer = mpegts.createPlayer({
                 type: 'mse',

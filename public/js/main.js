@@ -10,7 +10,7 @@ import { apiFetch, fetchConfig, getDeviceSetting, saveDeviceSetting } from './mo
 import { checkAuthStatus, setupAuthEventListeners } from './modules/auth.js';
 import { handleGuideLoad, finalizeGuideLoad, setupGuideEventListeners } from './modules/guide.js';
 //-- ENHANCEMENT: Import playChannel to handle the remote channel change event.
-import { setupPlayerEventListeners, playChannel, stopAndCleanupPlayer, shouldMaintainAspectRatio } from './modules/player.js';
+import { setupPlayerEventListeners, playChannel, stopAndCleanupPlayer, shouldMaintainAspectRatio, refreshPlayerRecordState } from './modules/player.js';
 import { setupSettingsEventListeners, populateTimezoneSelector, updateUIFromSettings } from './modules/settings.js';
 // MODIFIED: Imported showBroadcastMessage
 import { makeModalResizable, handleRouteChange, switchTab, handleConfirm, closeModal, makeColumnResizable, openMobileMenu, closeMobileMenu, showNotification, showBroadcastMessage, updateProcessingStatus, showConfirm, refreshGuideAfterProcessing } from './modules/ui.js';
@@ -24,6 +24,11 @@ import { ICONS } from './modules/icons.js'; // MODIFIED: Import the new icon lib
 //-- ENHANCEMENT: Import the new handler for channel selector clicks from the admin page.
 import { initActivityPage, setupAdminEventListeners, handleActivityUpdate, handleAdminChannelClick } from './modules/admin.js';
 import { initTelemetry } from './modules/telemetry.js';
+import { refreshHome } from './modules/home.js';
+import { initTableLabels } from './modules/tablelabels.js';
+import { initFocus } from './modules/focus.js';
+import { setupPalette } from './modules/palette.js';
+import { setupOsd } from './modules/osd.js';
 
 // The initializeCastApi function is no longer called directly from here,
 // but the cast.js module will handle its own initialization via the window callback.
@@ -126,7 +131,7 @@ function initializeSse() {
 
         // Check which player is active and change its channel
         const currentPage = window.location.pathname;
-        if (currentPage.startsWith('/tvguide') || currentPage === '/') {
+        if (currentPage.startsWith('/tvguide') || currentPage === '/' || currentPage.startsWith('/home')) {
             // Stop the main player if it's open, then play the new channel.
             stopAndCleanupPlayer().then(() => {
                 showNotification(`An administrator has changed your channel to: ${channel.name}`, false, 4000);
@@ -160,6 +165,7 @@ function initializeSse() {
     // NEW: Listen for real-time DVR recording updates
     eventSource.addEventListener('dvr-update', (event) => {
         console.log('[SSE] Received "dvr-update" event from server.');
+        refreshPlayerRecordState();
         if (window.location.pathname.startsWith('/dvr')) {
             initDvrPage();
         }
@@ -190,6 +196,7 @@ export async function initMainApp() {
     setupDvrEventListeners();
     setupDirectPlayerEventListeners();
     setupAdminEventListeners(); // NEW: Setup admin event listeners
+    initTableLabels();
     // REMOVED: The direct call to initializeCastApi() is no longer needed here.
     // The cast.js module will now be initialized automatically by the Google Cast SDK callback.
     console.log('[MAIN] All event listeners set up.');
@@ -208,6 +215,9 @@ export async function initMainApp() {
 
         console.log('[MAIN] Configuration loaded:', config);
         Object.assign(guideState.settings, config.settings || {}); // Merge server settings into guideState
+        apiFetch('/api/hardware').then(res => res && res.ok ? res.json() : null).then(hardware => {
+            if (hardware) guideState.hardware = hardware;
+        }).catch(() => { });
 
         // --- NEW: Load VOD data into state ---
         guideState.vodMovies = config.vodMovies || [];
@@ -431,14 +441,70 @@ function restoreDimensions() {
     }
 
     // 3. Channel column width
-    const defaultChannelWidth = window.innerWidth < 768 ? 64 : 180;
+    const isMobile = window.innerWidth < 768;
+    const defaultChannelWidth = isMobile ? 120 : 240;
     const channelWidth = getDeviceSetting('channelColumnWidth', guideState.settings?.channelColumnWidth || defaultChannelWidth);
     if (UIElements.guideGrid) {
-        const safeWidth = Math.min(window.innerWidth - 80, Math.max(50, channelWidth));
+        // On mobile the column can't be resized, so enforce a width that still fits a wrapped channel name
+        // (older saved values of 64px only had room for the logo) without eating more than ~40% of the screen.
+        const safeWidth = isMobile
+            ? Math.min(Math.max(110, Math.round(window.innerWidth * 0.4)), Math.max(110, channelWidth))
+            : Math.min(window.innerWidth - 80, Math.max(50, channelWidth));
         UIElements.guideGrid.style.setProperty('--channel-col-width', `${safeWidth}px`);
         if (guideState.settings) guideState.settings.channelColumnWidth = safeWidth;
         console.log(`[MAIN] Restored channel column width for this device: ${safeWidth}px`);
     }
+}
+
+/**
+ * Account menu in the top bar: Open a stream URL, shortcuts, theme and TV mode, sign out.
+ */
+function setupAccountMenu() {
+    const btn = UIElements.avatarBtn;
+    const menu = UIElements.avatarMenu;
+    if (!btn || !menu) return;
+
+    const close = () => { menu.classList.add('hidden'); btn.setAttribute('aria-expanded', 'false'); };
+    const open = () => { menu.classList.remove('hidden'); btn.setAttribute('aria-expanded', 'true'); menu.querySelector('.mi')?.focus(); };
+
+    btn.addEventListener('click', (e) => { e.stopPropagation(); menu.classList.contains('hidden') ? open() : close(); });
+    document.addEventListener('click', (e) => { if (!menu.contains(e.target)) close(); });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !menu.classList.contains('hidden')) { close(); btn.focus(); } });
+    // Picking a destination or signing out closes the menu; the segmented controls stay open.
+    menu.addEventListener('click', (e) => { if (e.target.closest('.mi')) close(); });
+
+    // Theme: dark, light or follow the system.
+    const themeSeg = UIElements.themeSeg;
+    const paintTheme = () => {
+        const saved = localStorage.getItem('viniplay.theme') || 'system';
+        themeSeg.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.themePref === saved));
+    };
+    themeSeg.addEventListener('click', (e) => {
+        const b = e.target.closest('[data-theme-pref]');
+        if (!b) return;
+        const pref = b.dataset.themePref;
+        const root = document.documentElement;
+        if (pref === 'system') { localStorage.removeItem('viniplay.theme'); root.removeAttribute('data-theme'); }
+        else { localStorage.setItem('viniplay.theme', pref); root.setAttribute('data-theme', pref); }
+        paintTheme();
+    });
+    paintTheme();
+
+    // TV mode: auto-detect (default), always on, or always off.
+    const tvSeg = UIElements.tvSeg;
+    const paintTv = () => {
+        const saved = localStorage.getItem('viniplay.tv') || 'auto';
+        tvSeg.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.tvPref === saved));
+    };
+    tvSeg.addEventListener('click', (e) => {
+        const b = e.target.closest('[data-tv-pref]');
+        if (!b) return;
+        if (b.dataset.tvPref === 'auto') localStorage.removeItem('viniplay.tv');
+        else localStorage.setItem('viniplay.tv', b.dataset.tvPref);
+        // The mode changes sizes across the whole page, so reload to apply it cleanly.
+        window.location.reload();
+    });
+    paintTv();
 }
 
 /**
@@ -461,7 +527,8 @@ function setupCoreEventListeners() {
         });
     };
 
-    // Desktop Tabs
+    // Rail and top bar
+    setupTabListener(UIElements.tabHome, 'home', refreshHome);
     setupTabListener(UIElements.tabGuide, 'guide');
     setupTabListener(UIElements.tabMultiview, 'multiview', initMultiView);
     setupTabListener(UIElements.tabPlayer, 'player', initDirectPlayer);
@@ -471,25 +538,21 @@ function setupCoreEventListeners() {
     setupTabListener(UIElements.tabNotifications, 'notifications', loadAndScheduleNotifications);
     setupTabListener(UIElements.tabSettings, 'settings');
 
-    // Mobile Navigation
+    // Phone tab bar and "More" sheet
     UIElements.mobileMenuToggle?.addEventListener('click', openMobileMenu);
     UIElements.mobileMenuClose?.addEventListener('click', closeMobileMenu);
     UIElements.mobileMenuOverlay?.addEventListener('click', closeMobileMenu);
 
+    UIElements.mobileNavHome?.addEventListener('click', () => switchTab('home'));
     UIElements.mobileNavGuide?.addEventListener('click', () => switchTab('guide'));
     UIElements.mobileNavMultiview?.addEventListener('click', () => switchTab('multiview'));
     UIElements.mobileNavPlayer?.addEventListener('click', () => switchTab('player'));
     UIElements.mobileNavDvr?.addEventListener('click', () => switchTab('dvr'));
     UIElements.mobileNavVod?.addEventListener('click', () => switchTab('vod'));
-    UIElements.mobileNavActivity?.addEventListener('click', () => switchTab('activity')); // NEW
-    UIElements.mobileNavNotifications?.addEventListener('click', () => switchTab('notifications'));
+    UIElements.mobileNavActivity?.addEventListener('click', () => switchTab('activity'));
     UIElements.mobileNavSettings?.addEventListener('click', () => switchTab('settings'));
 
-    UIElements.mobileNavLogoutBtn?.addEventListener('click', () => {
-        const logoutButton = document.getElementById('logout-btn');
-        if (logoutButton) logoutButton.click();
-        closeMobileMenu();
-    });
+    setupAccountMenu();
 
     // --- Browser and Document Listeners ---
     window.addEventListener('popstate', () => { console.log('[NAV] Popstate event (browser back/forward).'); handleRouteChange(); });
@@ -575,18 +638,6 @@ function setupCoreEventListeners() {
         makeColumnResizable(UIElements.channelColumnResizeHandle, UIElements.guideGrid, 100, 'channelColumnWidth', '--channel-col-width');
     }
 
-    // --- Header Resize Observer ---
-    if (UIElements.mainHeader && UIElements.unifiedGuideHeader) {
-        const mainHeaderObserver = new ResizeObserver(entries => {
-            for (let entry of entries) {
-                if (entry.target === UIElements.mainHeader) {
-                    document.documentElement.style.setProperty('--main-header-height', `${entry.contentRect.height}px`);
-                }
-            }
-        });
-        mainHeaderObserver.observe(UIElements.mainHeader);
-    }
-
     // monitor the processes of channel sources
     document.addEventListener('background-process-finished', () => {
         console.log('[MAIN] Detected background process has finished.');
@@ -600,8 +651,18 @@ function setupCoreEventListeners() {
 
 
 // --- App Start ---
+// The entry point must be wired once even if this module is imported through two URLs.
+if (!window.viniplayBooted) {
+window.viniplayBooted = true;
 document.addEventListener('DOMContentLoaded', () => {
     initTelemetry();
+    // main.js is evaluated twice (index.html loads it with ?v=, auth.js without), so wire the UI layer once.
+    if (!window.uiReady) {
+        window.uiReady = true;
+        initFocus();
+        setupPalette();
+        setupOsd();
+    }
     // NEW: Check for notification deep link parameters on initial load.
     const urlParams = new URLSearchParams(window.location.search);
     const channelId = urlParams.get('channelId');
@@ -627,12 +688,10 @@ document.addEventListener('DOMContentLoaded', () => {
             .then(swReg => {
                 console.log('[APP_START] Service Worker registered successfully:', swReg);
                 appState.swRegistration = swReg;
-                // The following function is now INSIDE the .then() block
-                // This ensures it only runs after the service worker is ready.
-                return subscribeUserToPush();
-            })
-            .then(() => {
-                console.log('[MAIN] Push notification subscription process initiated after SW registration.');
+                // Push subscription starts in initMainApp, after authentication. Running it here
+                // called an authenticated endpoint on the login screen and showed a false
+                // "session has expired" error.
+                console.log('[MAIN] Service Worker ready; push subscription waits for login.');
             })
             .catch(error => {
                 console.error('[APP_START] Service Worker registration or Push Subscription failed:', error);
@@ -648,3 +707,4 @@ document.addEventListener('DOMContentLoaded', () => {
     console.log('[APP_START] Checking authentication status...');
     checkAuthStatus(); // This initiates the main app flow
 });
+}

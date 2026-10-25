@@ -11,7 +11,9 @@ import { handleSearchAndFilter } from './guide.js';
 import { navigateToProgramInGuide } from './notification.js';
 import { populateChannelSelector } from './multiview.js';
 import { ICONS } from './icons.js';
+import { escapeHtml } from './utils.js';
 import { stopAndCleanupPlayer, playRecordingOrDirectVideo, setActiveMediaTracking } from './player.js';
+import { showBar } from './bar.js';
 
 /**
  * Initializes the DVR page by fetching all required data from the backend.
@@ -42,10 +44,12 @@ export async function initDvrPage() {
 
     if (hasDvrPermission) {
         promises.push(loadScheduledJobs());
+        promises.push(loadSeriesRules());
     } else {
         // Explicitly hide these elements if user has no DVR permission
         if (UIElements.noDvrJobsMessage) UIElements.noDvrJobsMessage.classList.add('hidden');
         if (UIElements.dvrJobsTableContainer) UIElements.dvrJobsTableContainer.classList.add('hidden');
+        document.getElementById('dvr-series-container')?.classList.add('hidden');
     }
 
     await Promise.all(promises);
@@ -64,6 +68,67 @@ async function loadScheduledJobs() {
     } else {
         showNotification('Could not load scheduled recordings.', true);
     }
+}
+
+/**
+ * Fetches recurring series rules for the current user/admin.
+ */
+export async function loadSeriesRules() {
+    const res = await apiFetch('/api/dvr/series');
+    if (res && res.ok) {
+        dvrState.seriesRules = await res.json();
+        renderSeriesRules();
+    } else {
+        dvrState.seriesRules = [];
+        renderSeriesRules();
+    }
+}
+
+function renderSeriesRules() {
+    const container = document.getElementById('dvr-series-container');
+    const list = document.getElementById('dvr-series-list');
+    if (!container || !list) return;
+    const rules = dvrState.seriesRules || [];
+    container.classList.toggle('hidden', rules.length === 0);
+    list.innerHTML = '';
+    rules.forEach(rule => {
+        const row = document.createElement('div');
+        row.className = 'flex items-center justify-between gap-3 bg-gray-900/60 border border-gray-700/60 rounded-lg px-3 py-2';
+        row.innerHTML = `
+            <div class="min-w-0">
+                <p class="text-sm font-medium text-white truncate" title="${escapeHtml(rule.programTitle)}">${escapeHtml(rule.programTitle)}</p>
+                <p class="text-xs text-gray-400 truncate">${escapeHtml(rule.channelName || rule.channelId)}</p>
+            </div>
+            <button class="delete-series-rule-btn text-gray-400 hover:text-red-400 p-1.5 flex-shrink-0" data-rule-id="${escapeHtml(rule.id)}" title="Delete Series Recording">
+                ${ICONS.trash}
+            </button>`;
+        list.appendChild(row);
+    });
+}
+
+export function findSeriesRuleForProgram(program) {
+    return (dvrState.seriesRules || []).find(rule =>
+        String(rule.channelId) === String(program.channelId) &&
+        String(rule.programTitle).trim() === String(program.title || program.programTitle || '').trim()
+    );
+}
+
+export async function addSeriesRule(programData) {
+    const res = await apiFetch('/api/dvr/series', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            channelId: programData.channelId,
+            programTitle: programData.title || programData.programTitle,
+        }),
+    });
+    if (res) {
+        const data = await res.json().catch(() => ({}));
+        showNotification(data.scheduled ? `Series recording set. ${data.scheduled} episode(s) scheduled.` : 'Series recording set.', false, 3000);
+        await loadSeriesRules();
+        await loadScheduledJobs();
+    }
+    return !!res;
 }
 
 /**
@@ -95,27 +160,7 @@ async function loadStorageInfo() {
 }
 
 /**
- * Plays an in-progress recording using the main mpegts.js player.
- * @param {object} job - The DVR job object that is currently recording.
- */
-let timeshiftUpdateInterval = null;
-let timeshiftHideTimeout = null;
-let isUserSeeking = false;
-
-function formatTimeshiftTime(seconds) {
-    if (isNaN(seconds) || seconds < 0) seconds = 0;
-    const totalSecs = Math.floor(seconds);
-    const hrs = Math.floor(totalSecs / 3600);
-    const mins = Math.floor((totalSecs % 3600) / 60);
-    const secs = totalSecs % 60;
-    if (hrs > 0) {
-        return `${hrs}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-    }
-    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-}
-
-/**
- * Plays an in-progress recording using Hls.js with custom timeshift seekbar controls.
+ * Plays an in-progress recording with Hls.js and the control bar.
  * @param {object} job - The DVR job object that is currently recording.
  */
 async function playTimeshiftStream(job, startTime = 0) {
@@ -159,49 +204,13 @@ async function playTimeshiftStream(job, startTime = 0) {
 
     appState.activeTimeshiftJobId = job.id;
 
-    // Hide native controls so our timeshift overlay takes over without interference
-    videoElement.controls = false;
-
-    const overlay = document.getElementById('timeshift-controls-overlay') || UIElements.timeshiftControlsOverlay;
-    if (overlay) {
-        overlay.classList.remove('hidden');
-        overlay.style.opacity = '1';
-    }
-
-    const progressBar = document.getElementById('timeshift-progress-bar') || UIElements.timeshiftProgressBar;
-    const currentTimeEl = document.getElementById('timeshift-current-time') || UIElements.timeshiftCurrentTime;
-    const totalTimeEl = document.getElementById('timeshift-total-time') || UIElements.timeshiftTotalTime;
-    const liveEdgeBtn = document.getElementById('timeshift-live-edge-btn') || UIElements.timeshiftLiveEdgeBtn;
-    const liveDot = document.getElementById('timeshift-live-dot') || UIElements.timeshiftLiveDot;
-    const playPauseBtn = document.getElementById('timeshift-play-pause-btn') || UIElements.timeshiftPlayPauseBtn;
-    const rewind15Btn = document.getElementById('timeshift-rewind-15-btn') || UIElements.timeshiftRewind15Btn;
-    const forward15Btn = document.getElementById('timeshift-forward-15-btn') || UIElements.timeshiftForward15Btn;
-
-    if (progressBar) {
-        progressBar.value = seekTarget;
-        progressBar.max = Math.max(100, seekTarget);
-    }
-    if (currentTimeEl) currentTimeEl.textContent = formatTimeshiftTime(seekTarget);
-    if (totalTimeEl) totalTimeEl.textContent = '00:00';
-
-    const getTotalDuration = (hlsInstance) => {
-        let dur = 0;
-        if (videoElement.seekable && videoElement.seekable.length > 0) {
-            dur = videoElement.seekable.end(videoElement.seekable.length - 1);
-        }
-        if ((!dur || isNaN(dur) || dur === Infinity) && hlsInstance?.levels && hlsInstance.levels[hlsInstance.currentLevel]) {
-            dur = hlsInstance.levels[hlsInstance.currentLevel].details?.totalduration || 0;
-        }
-        return (dur && !isNaN(dur) && dur !== Infinity) ? dur : (videoElement.currentTime || 0);
-    };
-
     if (window.Hls && Hls.isSupported()) {
         try {
             const hls = new Hls({
                 startPosition: seekTarget, // Force playback to start from seekTarget (or 00:00)
                 enableWorker: true,
                 lowLatencyMode: false,
-                backBufferLength: Infinity, // Retain past segments in memory for seamless backward scrubbing
+                backBufferLength: 300,
                 maxBufferLength: 60,
                 maxMaxBufferLength: 120,
             });
@@ -248,103 +257,7 @@ async function playTimeshiftStream(job, startTime = 0) {
                 }
             });
 
-            // Start UI updater
-            if (timeshiftUpdateInterval) clearInterval(timeshiftUpdateInterval);
-            timeshiftUpdateInterval = setInterval(() => {
-                if (!appState.activeTimeshiftJobId) {
-                    clearInterval(timeshiftUpdateInterval);
-                    timeshiftUpdateInterval = null;
-                    return;
-                }
-                const total = getTotalDuration(hls);
-                const cur = videoElement.currentTime || 0;
-
-                if (totalTimeEl) totalTimeEl.textContent = formatTimeshiftTime(total);
-                if (currentTimeEl && !isUserSeeking) currentTimeEl.textContent = formatTimeshiftTime(cur);
-
-                if (progressBar && !isUserSeeking) {
-                    progressBar.max = Math.max(1, total);
-                    progressBar.value = cur;
-                }
-
-                // Check if user is at the live edge (within 8 seconds of latest segment)
-                const isNearLive = total > 5 && (total - cur) < 8;
-                if (liveDot && liveEdgeBtn) {
-                    if (isNearLive) {
-                        liveDot.className = 'w-2 h-2 rounded-full bg-white animate-pulse inline-block';
-                        liveEdgeBtn.className = 'ml-1 px-2.5 py-1 text-xs font-bold rounded-md bg-red-600 text-white transition-colors flex items-center gap-1.5 flex-shrink-0 cursor-pointer';
-                    } else {
-                        liveDot.className = 'w-2 h-2 rounded-full bg-gray-400 inline-block';
-                        liveEdgeBtn.className = 'ml-1 px-2.5 py-1 text-xs font-bold rounded-md bg-gray-700 text-gray-300 hover:bg-red-600 hover:text-white transition-colors flex items-center gap-1.5 flex-shrink-0 cursor-pointer';
-                    }
-                }
-
-                if (playPauseBtn) {
-                    playPauseBtn.innerHTML = videoElement.paused ? ICONS.play : ICONS.pause;
-                }
-            }, 250);
-
-            // Scrubber interaction
-            if (progressBar) {
-                progressBar.oninput = (e) => {
-                    isUserSeeking = true;
-                    if (currentTimeEl) currentTimeEl.textContent = formatTimeshiftTime(parseFloat(e.target.value));
-                };
-                progressBar.onchange = (e) => {
-                    isUserSeeking = false;
-                    const targetSec = parseFloat(e.target.value);
-                    videoElement.currentTime = targetSec;
-                };
-            }
-
-            if (rewind15Btn) {
-                rewind15Btn.onclick = () => {
-                    videoElement.currentTime = Math.max(0, (videoElement.currentTime || 0) - 15);
-                };
-            }
-
-            if (forward15Btn) {
-                forward15Btn.onclick = () => {
-                    const total = getTotalDuration(hls);
-                    videoElement.currentTime = Math.min(total, (videoElement.currentTime || 0) + 15);
-                };
-            }
-
-            if (liveEdgeBtn) {
-                liveEdgeBtn.onclick = () => {
-                    const total = getTotalDuration(hls);
-                    if (total > 2) {
-                        videoElement.currentTime = total - 2;
-                    }
-                };
-            }
-
-            if (playPauseBtn) {
-                playPauseBtn.onclick = () => {
-                    if (videoElement.paused) videoElement.play();
-                    else videoElement.pause();
-                };
-            }
-
-            // Auto-hide controls overlay during active playback
-            const container = UIElements.videoModalContainer || document.getElementById('video-modal-container');
-            const showControls = () => {
-                if (overlay) overlay.style.opacity = '1';
-                if (timeshiftHideTimeout) clearTimeout(timeshiftHideTimeout);
-                timeshiftHideTimeout = setTimeout(() => {
-                    if (!videoElement.paused && !isUserSeeking && overlay && appState.activeTimeshiftJobId) {
-                        overlay.style.opacity = '0';
-                    }
-                }, 3500);
-            };
-            if (container) {
-                container.onmousemove = showControls;
-                container.onmouseleave = () => {
-                    if (!videoElement.paused && !isUserSeeking && overlay && appState.activeTimeshiftJobId) {
-                        overlay.style.opacity = '0';
-                    }
-                };
-            }
+            showBar({ live: true, seekable: true });
 
         } catch (err) {
             console.error('[HLS_TIMESHIFT] Setup error:', err);
@@ -352,7 +265,7 @@ async function playTimeshiftStream(job, startTime = 0) {
             await stopAndCleanupPlayer();
         }
     } else if (videoElement.canPlayType('application/vnd.apple.mpegurl')) {
-        // Native HLS fallback (Safari/iOS)
+        // Native HLS fallback (Safari/iOS): use the native controls, which work reliably there.
         setActiveMediaTracking({
             contentType: 'dvr_job',
             contentId: String(job.id),
@@ -360,8 +273,12 @@ async function playTimeshiftStream(job, startTime = 0) {
         });
         videoElement.src = streamUrl;
         openModal(playerModal);
-        videoElement.currentTime = seekTarget;
-        videoElement.play().catch(e => console.warn('[TIMESHIFT] Autoplay prevented:', e));
+        const applySeek = () => {
+            if (seekTarget > 0) videoElement.currentTime = seekTarget;
+            videoElement.play().catch(e => console.warn('[TIMESHIFT] Autoplay prevented:', e));
+        };
+        if (videoElement.readyState >= 1) applySeek();
+        else videoElement.addEventListener('loadedmetadata', applySeek, { once: true });
     } else {
         showNotification('Your browser does not support HLS timeshift playback.', true);
         await stopAndCleanupPlayer();
@@ -483,15 +400,6 @@ async function playCompletedTsFile(recording) {
 }
 
 
-function escapeHtml(str) {
-    if (!str) return '';
-    return String(str)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#039;');
-}
 
 let liveHeroTicker = null;
 
@@ -693,36 +601,32 @@ function renderScheduledJobs() {
         filteredUpcoming.forEach(job => {
             const startTime = new Date(job.startTime).toLocaleString();
             const endTime = new Date(job.endTime).toLocaleString();
-            const statusHTML = `<span class="status-badge ${job.status}">${job.status}</span>`;
+            const statusHTML = `<span class="status-badge ${escapeHtml(job.status)}">${escapeHtml(job.status)}</span>`;
             const conflictIcon = job.isConflicting ?
                 `<svg class="h-5 w-5 text-yellow-400" fill="currentColor" viewBox="0 0 20 20" title="This recording conflicts with another scheduled recording."><path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.21 3.03-1.742 3.03H4.42c-1.532 0-2.492-1.696-1.742-3.03l5.58-9.92zM10 13a1 1 0 110-2 1 1 0 010 2zm-1.75-5.25a.75.75 0 00-1.5 0v3.5a.75.75 0 001.5 0v-3.5z" clip-rule="evenodd" /></svg>` : '';
-            const userColumn = isAdmin ? `<td>${job.username || 'N/A'}</td>` : '';
+            const userColumn = isAdmin ? `<td class="nw">${escapeHtml(job.username || 'N/A')}</td>` : '';
 
             const tr = document.createElement('tr');
             tr.dataset.jobId = job.id;
             tr.innerHTML = `
-                <td class="max-w-xs truncate font-medium text-white" title="${job.programTitle}">${job.programTitle}</td>
-                <td class="max-w-xs truncate">
-                    <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-gray-700/80 text-gray-200 text-xs font-medium border border-gray-600">
-                        ${job.channelName}
-                    </span>
-                </td>
+                <td class="cell-main" title="${escapeHtml(job.programTitle)}">${escapeHtml(job.programTitle)}</td>
+                <td class="cell-sub">${escapeHtml(job.channelName)}</td>
                 ${userColumn}
-                <td class="font-mono text-xs text-gray-300">${startTime}</td>
-                <td class="font-mono text-xs text-gray-300">${endTime}</td>
+                <td class="nw num">${startTime}</td>
+                <td class="nw num">${endTime}</td>
                 <td>${statusHTML}</td>
                 <td class="text-center">${conflictIcon}</td>
-                <td class="text-right">
-                    <div class="flex items-center justify-end gap-2">
-                        <button class="action-btn go-to-guide-btn" title="View in TV Guide" data-channel-id="${job.channelId}" data-program-start="${job.programStart || job.startTime}">
+                <td class="act">
+                    <div class="flex items-center justify-end gap-1">
+                        <button class="action-btn go-to-guide-btn" title="View in TV Guide" data-channel-id="${escapeHtml(job.channelId)}" data-program-start="${escapeHtml(job.programStart || job.startTime)}">
                             ${ICONS.goToGuide}
                         </button>
                         ${job.status === 'scheduled' ? `
-                            <button class="action-btn edit-job-btn" title="Edit Schedule" data-job-id="${job.id}">
+                            <button class="action-btn edit-job-btn" title="Edit Schedule" data-job-id="${escapeHtml(job.id)}">
                                 ${ICONS.edit}
                             </button>
                         ` : ''}
-                        <button class="action-btn cancel-job-btn" title="Cancel Recording" data-job-id="${job.id}">
+                        <button class="action-btn cancel-job-btn" title="Cancel Recording" data-job-id="${escapeHtml(job.id)}">
                             ${ICONS.cancel}
                         </button>
                     </div>
@@ -747,29 +651,25 @@ function renderScheduledJobs() {
             const startTime = new Date(job.startTime).toLocaleString();
             const endTime = new Date(job.endTime).toLocaleString();
             const statusHTML = job.status === 'error' && job.errorMessage
-                ? `<button class="status-badge ${job.status} view-error-btn" data-job-id="${job.id}">${job.status}</button>`
-                : `<span class="status-badge ${job.status}">${job.status}</span>`;
-            const userColumn = isAdmin ? `<td>${job.username || 'N/A'}</td>` : '';
+                ? `<button class="status-badge ${escapeHtml(job.status)} view-error-btn" data-job-id="${escapeHtml(job.id)}">${escapeHtml(job.status)}</button>`
+                : `<span class="status-badge ${escapeHtml(job.status)}">${escapeHtml(job.status)}</span>`;
+            const userColumn = isAdmin ? `<td class="nw">${escapeHtml(job.username || 'N/A')}</td>` : '';
 
             const tr = document.createElement('tr');
             tr.dataset.jobId = job.id;
             tr.innerHTML = `
-                <td class="max-w-xs truncate font-medium text-white" title="${job.programTitle}">${job.programTitle}</td>
-                <td class="max-w-xs truncate">
-                    <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-gray-700/80 text-gray-200 text-xs font-medium border border-gray-600">
-                        ${job.channelName}
-                    </span>
-                </td>
+                <td class="cell-main" title="${escapeHtml(job.programTitle)}">${escapeHtml(job.programTitle)}</td>
+                <td class="cell-sub">${escapeHtml(job.channelName)}</td>
                 ${userColumn}
-                <td class="font-mono text-xs text-gray-300">${startTime}</td>
-                <td class="font-mono text-xs text-gray-300">${endTime}</td>
+                <td class="nw num">${startTime}</td>
+                <td class="nw num">${endTime}</td>
                 <td>${statusHTML}</td>
-                <td class="text-right">
-                    <div class="flex items-center justify-end gap-2">
-                        <button class="action-btn go-to-guide-btn" title="View in TV Guide" data-channel-id="${job.channelId}" data-program-start="${job.programStart || job.startTime}">
+                <td class="act">
+                    <div class="flex items-center justify-end gap-1">
+                        <button class="action-btn go-to-guide-btn" title="View in TV Guide" data-channel-id="${escapeHtml(job.channelId)}" data-program-start="${escapeHtml(job.programStart || job.startTime)}">
                             ${ICONS.goToGuide}
                         </button>
-                        <button class="action-btn delete-history-btn" title="Remove From History" data-job-id="${job.id}">
+                        <button class="action-btn delete-history-btn" title="Remove From History" data-job-id="${escapeHtml(job.id)}">
                             ${ICONS.cancel}
                         </button>
                     </div>
@@ -787,6 +687,7 @@ function renderScheduledJobs() {
 function renderCompletedRecordings() {
     const recordings = dvrState.completedRecordings || [];
     const isAdmin = appState.currentUser?.isAdmin;
+    const canDownload = guideState.settings.downloads?.enabled !== false;
 
     // Update count badge
     if (UIElements.dvrRecordingsCount) {
@@ -817,34 +718,26 @@ function renderCompletedRecordings() {
 
         filteredRecordings.forEach(rec => {
             const recordedOn = new Date(rec.startTime).toLocaleString();
-            const userColumn = isAdmin ? `<td class="max-w-xs truncate" title="${rec.username}">${rec.username || 'N/A'}</td>` : '';
+            const userColumn = isAdmin ? `<td class="cell-sub nw" title="${escapeHtml(rec.username)}">${escapeHtml(rec.username || 'N/A')}</td>` : '';
 
             const tr = document.createElement('tr');
             tr.dataset.recordingId = rec.id;
             tr.className = 'hover:bg-gray-700/30 transition-colors';
             tr.innerHTML = `
-                <td class="max-w-xs truncate font-medium text-white" title="${rec.programTitle}">
-                    <div class="flex items-center gap-3">
-                        <button class="play-recording-btn w-7 h-7 rounded-full bg-blue-600 hover:bg-blue-500 text-white flex items-center justify-center transition-colors shadow flex-shrink-0" title="Play Recording">
-                            <svg class="w-3.5 h-3.5 fill-current ml-0.5" viewBox="0 0 20 20"><polygon points="5 3 19 10 5 17 5 3"/></svg>
-                        </button>
-                        <span class="truncate font-semibold">${rec.programTitle}</span>
-                    </div>
-                </td>
-                <td class="max-w-xs truncate">
-                    <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-gray-700/80 text-gray-200 text-xs font-medium border border-gray-600">
-                        ${rec.channelName}
-                    </span>
-                </td>
+                <td class="cell-main" title="${escapeHtml(rec.programTitle)}">${escapeHtml(rec.programTitle)}</td>
+                <td class="cell-sub">${escapeHtml(rec.channelName)}</td>
                 ${userColumn}
-                <td class="font-mono text-xs text-gray-300">${recordedOn}</td>
-                <td class="font-mono text-xs font-medium">${formatDuration(rec.durationSeconds)}</td>
-                <td class="font-mono text-xs text-gray-400">${formatBytes(rec.fileSizeBytes)}</td>
-                <td class="text-right">
-                    <div class="flex items-center justify-end gap-2">
+                <td class="nw num">${recordedOn}</td>
+                <td class="nw num">${formatDuration(rec.durationSeconds)}</td>
+                <td class="nw num">${formatBytes(rec.fileSizeBytes)}</td>
+                <td class="act">
+                    <div class="flex items-center justify-end gap-1">
                         <button class="action-btn play-recording-btn text-blue-400 hover:text-blue-300" title="Play Recording">
                             ${ICONS.play}
                         </button>
+                        ${canDownload ? `<a class="action-btn download-recording-btn text-gray-400 hover:text-white" href="/dvr/${encodeURIComponent(rec.filename)}" download title="Download Recording">
+                            ${ICONS.export}
+                        </a>` : ''}
                         <button class="action-btn delete-recording-btn text-red-400 hover:text-red-300" title="Delete Recording">
                             ${ICONS.trash}
                         </button>
@@ -867,11 +760,11 @@ function renderCompletedRecordings() {
             card.innerHTML = `
                 <div>
                     <div class="flex items-center justify-between gap-2">
-                        <span class="text-xs bg-gray-800 text-gray-200 px-2 py-0.5 rounded font-medium border border-gray-700 truncate max-w-[150px]">${rec.channelName}</span>
+                        <span class="text-xs bg-gray-800 text-gray-200 px-2 py-0.5 rounded font-medium border border-gray-700 truncate max-w-[150px]">${escapeHtml(rec.channelName)}</span>
                         <span class="text-[11px] font-mono text-gray-400">${formatBytes(rec.fileSizeBytes)}</span>
                     </div>
-                    <h4 class="font-bold text-white text-base mt-2.5 line-clamp-2 group-hover:text-blue-400 transition-colors" title="${rec.programTitle}">
-                        ${rec.programTitle}
+                    <h4 class="font-bold text-white text-base mt-2.5 line-clamp-2 group-hover:text-blue-400 transition-colors" title="${escapeHtml(rec.programTitle)}">
+                        ${escapeHtml(rec.programTitle)}
                     </h4>
                     <p class="text-xs text-gray-400 mt-1.5 flex items-center gap-1.5">
                         <svg class="w-3.5 h-3.5 text-gray-500" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
@@ -881,14 +774,20 @@ function renderCompletedRecordings() {
                         <span class="inline-block text-xs font-mono bg-blue-900/40 text-blue-300 px-2 py-0.5 rounded border border-blue-800/30">
                             Duration: ${formatDuration(rec.durationSeconds)}
                         </span>
+                        ${isAdmin ? `<span class="pill ml-1" title="Recorded by">${escapeHtml(rec.username || 'N/A')}</span>` : ''}
                     </div>
                 </div>
 
                 <div class="flex items-center justify-between mt-4 pt-3 border-t border-gray-800">
-                    <button class="play-recording-btn bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold py-1.5 px-3 rounded flex items-center gap-1.5 transition-colors shadow">
-                        <svg class="w-3.5 h-3.5 fill-current" viewBox="0 0 20 20"><polygon points="5 3 19 10 5 17 5 3"/></svg>
-                        Play
-                    </button>
+                    <div class="flex items-center gap-1.5">
+                        <button class="play-recording-btn bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold py-1.5 px-3 rounded flex items-center gap-1.5 transition-colors shadow">
+                            <svg class="w-3.5 h-3.5 fill-current" viewBox="0 0 20 20"><polygon points="5 3 19 10 5 17 5 3"/></svg>
+                            Play
+                        </button>
+                        ${canDownload ? `<a class="download-recording-btn text-gray-400 hover:text-white p-1.5 transition-colors" href="/dvr/${encodeURIComponent(rec.filename)}" download title="Download Recording">
+                            ${ICONS.export}
+                        </a>` : ''}
+                    </div>
                     <button class="delete-recording-btn text-gray-400 hover:text-red-400 p-1.5 transition-colors" title="Delete Recording">
                         ${ICONS.trash}
                     </button>
@@ -1065,7 +964,7 @@ export function setupDvrEventListeners() {
         if (stopBtn) {
             const jobId = stopBtn.dataset.jobId;
             const job = dvrState.scheduledJobs?.find(j => j.id == jobId);
-            const title = job ? ` "${job.programTitle}"` : '';
+            const title = job ? ` "${escapeHtml(job.programTitle)}"` : '';
             showConfirm('Stop Recording?', `Are you sure you want to stop the live capture${title}?`, async () => {
                 if (await apiFetch(`/api/dvr/jobs/${jobId}/stop`, { method: 'POST' })) {
                     showNotification('Recording stopped.');
@@ -1192,6 +1091,18 @@ export function setupDvrEventListeners() {
                 }
             });
         }
+    });
+
+    // 8b. Series rules list
+    document.getElementById('dvr-series-list')?.addEventListener('click', async (e) => {
+        const btn = e.target.closest('.delete-series-rule-btn');
+        if (!btn) return;
+        showConfirm('Delete Series Recording?', 'Future episodes from this rule will be cancelled.', async () => {
+            if (await apiFetch(`/api/dvr/series/${btn.dataset.ruleId}`, { method: 'DELETE' })) {
+                showNotification('Series recording removed.');
+                await Promise.all([loadScheduledJobs(), loadSeriesRules()]);
+            }
+        });
     });
 
     // 9. History Table click delegation
@@ -1412,11 +1323,11 @@ function showConflictModal(conflictData) {
     const { newJob, conflictingJobs } = conflictData;
     let conflictList = '';
     conflictingJobs.forEach(job => {
-        conflictList += `<li class="text-sm">- ${job.programTitle} on ${job.channelName}</li>`;
+        conflictList += `<li class="text-sm">- ${escapeHtml(job.programTitle)} on ${escapeHtml(job.channelName)}</li>`;
     });
 
     const message = `
-        Could not schedule "${newJob.programTitle}".
+        Could not schedule "${escapeHtml(newJob.programTitle)}".
         <br><br>
         Your maximum number of simultaneous recordings would be exceeded.
         It conflicts with the following scheduled recording(s):

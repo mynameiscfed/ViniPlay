@@ -5,12 +5,16 @@
  */
 
 import { appState, guideState, UIElements } from './state.js';
-import { apiFetch, saveGlobalSetting, saveUserSetting, fetchAppVersion } from './api.js';
+import { apiFetch, lastApiError, saveGlobalSetting, saveUserSetting, fetchAppVersion } from './api.js';
 // MODIFIED: Import isProcessingRunning for the button logic
-import { showNotification, openModal, closeModal, showConfirm, setButtonLoadingState, showProcessingModal, isProcessingRunning } from './ui.js';
+import { showNotification, openModal, closeModal, showConfirm, setButtonLoadingState, showProcessingModal, updateProcessingStatus, isProcessingRunning } from './ui.js';
 import { handleGuideLoad } from './guide.js';
 import { navigate } from './ui.js';
 import { ICONS } from './icons.js';
+import { escapeHtml } from './utils.js';
+import { renderEpgMap, setupEpgMap } from './epgmap.js';
+import { renderEpgAi, setupEpgAi } from './epgai.js';
+import { zoneOffsetHours } from './time.js';
 
 let currentSourceTypeForEditor = 'url';
 let hardwareChecked = false; // Flag to prevent re-checking hardware on every UI update
@@ -184,7 +188,7 @@ function populateHardwareInfoModal(hardware) {
         contentHTML += `
             <div class="mt-4 pt-4 border-t border-gray-700">
                 <h4 class="text-lg font-semibold text-white">Intel (VA-API)</h4>
-                <p class="text-xs text-gray-400 mb-2">GPU: ${hardware.intel_vaapi}</p>
+                <p class="text-xs text-gray-400 mb-2">GPU: ${escapeHtml(hardware.intel_vaapi)}</p>
                 <p class="text-sm mb-2">Uses the integrated GPU on Intel processors. A great low-power option for transcoding.</p>
                 <p class="text-sm font-semibold mb-1">Example Stream Command:</p>
                 <pre class="bg-gray-900 p-2 rounded-md text-xs text-gray-300 font-mono"><code>-hwaccel vaapi -hwaccel_output_format vaapi -i "{streamUrl}" -vf "format=nv12|vaapi,hwupload" -c:v h264_vaapi -preset medium -c:a aac -b:a 128k -f mpegts pipe:1</code></pre>
@@ -198,7 +202,7 @@ function populateHardwareInfoModal(hardware) {
         contentHTML += `
             <div class="mt-4 pt-4 border-t border-gray-700">
                 <h4 class="text-lg font-semibold text-white">AMD Radeon (VA-API)</h4>
-                <p class="text-xs text-gray-400 mb-2">GPU: ${hardware.radeon_vaapi}</p>
+                <p class="text-xs text-gray-400 mb-2">GPU: ${escapeHtml(hardware.radeon_vaapi)}</p>
                 <p class="text-sm mb-2">Uses the integrated GPU on Radeon processors. A great low-power option for transcoding.</p>
                 <p class="text-sm font-semibold mb-1">Example Stream Command:</p>
                 <pre class="bg-gray-900 p-2 rounded-md text-xs text-gray-300 font-mono"><code>-vaapi_device /dev/dri/renderD128 -hwaccel vaapi -hwaccel_output_format vaapi -i "{streamUrl}" -c:v h264_vaapi -qp 20 -vf scale_vaapi=format=nv12 -c:a aac -ac 2 -b:a 128k -f mpegts pipe:1</code></pre>
@@ -222,6 +226,7 @@ async function handleHardwareDetection() {
         hardwareChecked = true; // Mark as checked to prevent re-running
         const hardware = await res.json();
         detectedHardwareInfo = hardware;
+        guideState.hardware = hardware;
         let infoText = 'None';
 
         if (hardware.nvidia) {
@@ -332,7 +337,7 @@ const renderUserSourceList = (user) => {
             <td class="px-3 py-2 text-center">
                 <input type="checkbox" class="user-source-checkbox h-4 w-4 text-blue-600 bg-gray-700 border-gray-600 rounded focus:ring-blue-500" ${isAllowed ? 'checked' : ''}>
             </td>
-            <td class="px-3 py-2 text-gray-300 font-medium">${source.name}</td>
+            <td class="px-3 py-2 text-gray-300 font-medium">${escapeHtml(source.name)}</td>
             <td class="px-3 py-2 text-right">
                 <button type="button" class="user-group-filter-btn text-xs font-bold py-1 px-3 rounded-full transition-colors ${isAllowed ? 'bg-blue-600 hover:bg-blue-500 text-white' : 'bg-gray-600 text-gray-400 cursor-not-allowed'}" ${isAllowed ? '' : 'disabled'}>
                     ${groupCount > 0 ? `${groupCount} Groups` : 'All Groups'}
@@ -538,8 +543,8 @@ const updateUserGroupFilterList = (type, selectedGroups, searchTerm = '') => {
     }
 
     listEl.innerHTML = filteredGroups.map(group => `
-        <div class="group-filter-item ${currentSelectedSet.has(group) ? 'selected' : ''}" data-group-name="${group.replace(/"/g, '&quot;')}">
-            ${group}
+        <div class="group-filter-item ${currentSelectedSet.has(group) ? 'selected' : ''}" data-group-name="${escapeHtml(group)}">
+            ${escapeHtml(group)}
         </div>
     `).join('');
 };
@@ -592,8 +597,8 @@ const updateGroupFilterList = (type, selectedGroups, searchTerm = '') => {
     }
 
     listEl.innerHTML = filteredGroups.map(group => `
-        <div class="group-filter-item ${currentSelectedSet.has(group) ? 'selected' : ''}" data-group-name="${group.replace(/"/g, '&quot;')}">
-            ${group}
+        <div class="group-filter-item ${currentSelectedSet.has(group) ? 'selected' : ''}" data-group-name="${escapeHtml(group)}">
+            ${escapeHtml(group)}
         </div>
     `).join('');
 };
@@ -624,91 +629,203 @@ const switchGroupFilterTab = (type) => {
 /**
  * Populates the timezone selector dropdown.
  */
+const FALLBACK_TIME_ZONES = [
+    'UTC', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
+    'America/Sao_Paulo', 'Europe/London', 'Europe/Berlin', 'Europe/Paris', 'Europe/Madrid',
+    'Europe/Rome', 'Europe/Warsaw', 'Europe/Moscow', 'Africa/Cairo', 'Africa/Johannesburg',
+    'Asia/Dubai', 'Asia/Karachi', 'Asia/Kolkata', 'Asia/Dhaka', 'Asia/Bangkok',
+    'Asia/Shanghai', 'Asia/Tokyo', 'Asia/Seoul', 'Australia/Sydney', 'Pacific/Auckland',
+];
+
 export const populateTimezoneSelector = () => {
-    UIElements.timezoneOffsetSelect.innerHTML = '';
-    for (let i = 14; i >= -12; i--) {
-        UIElements.timezoneOffsetSelect.innerHTML += `<option value="${i}">UTC${i >= 0 ? '+' : ''}${i}:00</option>`;
+    const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    const current = guideState.settings.timeZone || browserZone;
+    let zones = [];
+    try {
+        zones = Intl.supportedValuesOf ? Intl.supportedValuesOf('timeZone') : FALLBACK_TIME_ZONES;
+    } catch (e) {
+        zones = FALLBACK_TIME_ZONES;
     }
+    if (!zones.includes(current)) zones = [current, ...zones];
+
+    UIElements.timezoneOffsetSelect.innerHTML = '';
+    zones.forEach((zone) => {
+        const option = document.createElement('option');
+        option.value = zone;
+        option.textContent = zone;
+        UIElements.timezoneOffsetSelect.appendChild(option);
+    });
 };
 
 /**
  * Renders the M3U or EPG source table.
  * @param {('m3u'|'epg')} sourceType - The type of source to render.
  */
+// Each source is a card: health at a glance, its own Refresh, and no table to scroll sideways.
 const renderSourceTable = (sourceType) => {
-    const tbody = UIElements[`${sourceType}SourcesTbody`];
+    const list = UIElements[`${sourceType}SourcesTbody`];
     const sources = guideState.settings[`${sourceType}Sources`] || [];
-    tbody.innerHTML = '';
 
     if (sources.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="8" class="text-center text-gray-500 py-4">No ${sourceType.toUpperCase()} sources added.</td></tr>`;
+        list.innerHTML = `<p class="text-center text-gray-500 py-4 col-span-full">No ${sourceType.toUpperCase()} sources added.</p>`;
         return;
     }
 
-    sources.forEach(source => {
+    list.innerHTML = sources.map(source => {
         const pathDisplay = source.type === 'file' ? (source.path.split('/').pop() || source.path.split('\\').pop()) : source.path;
-        const lastUpdated = new Date(source.lastUpdated).toLocaleString();
-        const refreshText = (source.type === 'url' || source.type === 'xc') && source.refreshHours > 0 ? `Every ${source.refreshHours}h` : 'Disabled';
-        const tr = document.createElement('tr');
-        tr.dataset.sourceId = source.id;
-        tr.innerHTML = `
-            <td>${source.name}</td>
-            <td><span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${source.type === 'file' ? 'bg-blue-200 text-blue-800' : 'bg-purple-200 text-purple-800'}">${source.type}</span></td>
-            <td class="max-w-xs truncate" title="${pathDisplay}">${pathDisplay}</td>
-            <td><span class="text-xs font-medium text-gray-400">${source.statusMessage || 'N/A'}</span></td>
-            <td>${lastUpdated}</td>
-            <td>${refreshText}</td>
-            <td>
-                <label class="switch">
-                    <input type="checkbox" class="activate-switch" ${source.isActive ? 'checked' : ''}>
+        const failed = /failed|not found/i.test(source.statusMessage || '');
+        const health = !source.isActive ? 'Off' : failed ? 'Failed' : source.lastUpdated ? 'OK' : 'Not refreshed yet';
+        const dot = !source.isActive ? 'bg-gray-500' : failed ? 'bg-red-500' : 'bg-green-500';
+        const refreshText = (source.type === 'url' || source.type === 'xc') && source.refreshHours > 0 ? `Refreshes every ${source.refreshHours} h` : 'Manual refresh';
+        const updated = source.lastUpdated ? new Date(source.lastUpdated).toLocaleString() : 'never';
+        return `
+        <div class="source-card bg-gray-900/50 rounded-lg p-4 flex flex-col gap-2 border ${failed && source.isActive ? 'border-red-500/60' : 'border-transparent'}${source.isActive ? '' : ' opacity-70'}" data-source-id="${escapeHtml(source.id)}">
+            <div class="flex items-center gap-2 min-w-0">
+                <span class="w-2.5 h-2.5 rounded-full flex-none ${dot}" title="${health}"></span>
+                <span class="font-bold text-white truncate flex-grow">${escapeHtml(source.name)}</span>
+                <span class="text-xs uppercase text-gray-400">${escapeHtml(source.type)}</span>
+                <label class="switch" title="${source.isActive ? 'Turn off' : 'Turn on'}">
+                    <input type="checkbox" class="activate-switch" aria-label="${escapeHtml(source.name)} active" ${source.isActive ? 'checked' : ''}>
                     <span class="slider"></span>
                 </label>
-            </td>
-            <td class="text-right">
-                <div class="flex items-center justify-end gap-3">
-                    <button class="action-btn edit-source-btn" title="Edit Source">
-                        ${ICONS.edit}
-                    </button>
-                     <button class="action-btn delete-source-btn" title="Delete Source">
-                        ${ICONS.trash}
-                    </button>
-                </div>
-            </td>
-        `;
-        tbody.appendChild(tr);
-    });
+            </div>
+            <div class="text-xs text-gray-500 truncate" title="${escapeHtml(pathDisplay)}">${escapeHtml(pathDisplay)}</div>
+            <div class="text-sm ${failed ? 'text-red-400' : 'text-gray-400'}">${health} · ${escapeHtml(source.statusMessage || 'No status yet')}</div>
+            <div class="text-xs text-gray-500">Updated ${escapeHtml(updated)} · ${refreshText}</div>
+            <div class="flex items-center gap-2 mt-auto pt-1">
+                ${source.isActive ? `<button type="button" class="refresh-source-btn chip">${ICONS.refresh} Refresh</button>` : ''}
+                <button type="button" class="edit-source-btn chip">${ICONS.edit} Edit</button>
+                <button type="button" class="delete-source-btn chip ml-auto" aria-label="Delete ${escapeHtml(source.name)}" title="Delete source">${ICONS.trash}</button>
+            </div>
+        </div>`;
+    }).join('');
 };
 
 /**
  * Updates all settings UI elements based on the current state.
  * MODIFIED: Removed redundant admin checks as this page is now admin-only.
  */
+// Settings is split into pages. Each card joins the page that lists its heading; anything unlisted goes to System.
+const SETTINGS_PAGES = [
+    ['overview', 'Overview', []],
+    ['sources', 'Sources', ['Guide Data Sources']],
+    ['channels', 'Channels & guide', ['Channel EPG', 'AI Matching']],
+    ['playback', 'Players & profiles', ['Player Settings', 'Chromecast Settings']],
+    ['recording', 'Recording', ['DVR Settings', 'Storage Management']],
+    ['users', 'Users', ['User Management']],
+    ['system', 'System', []],
+];
+const headingText = (h) => h.textContent.replace(/\s+/g, ' ').trim();
+const pageOfHeading = (text) => (SETTINGS_PAGES.find(([, , heads]) => heads.includes(text)) || SETTINGS_PAGES[6])[0];
+const settingsCards = () => [...document.querySelectorAll('#page-settings h2')].map((h) => ({ h, card: h.closest('.rounded-xl'), page: pageOfHeading(headingText(h)) })).filter((c) => c.card);
+let settingsPage = (() => { try { return localStorage.getItem('viniplay.settingsPage') || 'overview'; } catch { return 'overview'; } })();
+
+/** Every settings card as a search target for the palette. */
+export const settingsSearchIndex = () => settingsCards().map(({ h, page }) => ({ title: headingText(h), page, pageLabel: SETTINGS_PAGES.find((p) => p[0] === page)[1] }));
+
+export const showSettingsPage = (page, headingTitle) => {
+    settingsPage = SETTINGS_PAGES.some((p) => p[0] === page) ? page : 'overview';
+    try { localStorage.setItem('viniplay.settingsPage', settingsPage); } catch { /* private mode: page is not remembered */ }
+    settingsCards().forEach(({ card, page: p }) => { card.dataset.settingsPage = p; card.hidden = p !== settingsPage; });
+    document.getElementById('settings-overview').hidden = settingsPage !== 'overview';
+    document.querySelectorAll('#settings-nav [data-page]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.page === settingsPage)));
+    if (settingsPage === 'overview') renderSettingsOverview();
+    const target = headingTitle && settingsCards().find((c) => headingText(c.h) === headingTitle);
+    const scroller = document.getElementById('page-settings');
+    scroller.scrollTop = target ? scroller.scrollTop + target.card.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 16 : 0;
+};
+
+function renderSettingsOverview() {
+    const box = document.getElementById('settings-overview');
+    const sources = [...(guideState.settings.m3uSources || []), ...(guideState.settings.epgSources || [])];
+    const failing = sources.filter((src) => /failed|not found/i.test(src.statusMessage || ''));
+    const overrides = guideState.settings.epgOverrides || {};
+    const channels = guideState.channels || [];
+    const noGuide = channels.filter((ch) => !overrides[ch.id] && !guideState.programs?.[ch.id]?.length).length;
+    const attention = [
+        noGuide && [`${noGuide.toLocaleString()} channel${noGuide === 1 ? ' has' : 's have'} no guide data`, 'The guide shows them as empty rows.', 'channels', 'Review channels'],
+        ...failing.map((src) => [`${src.name} failed to refresh`, src.statusMessage, 'sources', 'Fix source']),
+    ].filter(Boolean);
+    const status = {
+        sources: `${sources.length} source${sources.length === 1 ? '' : 's'}${failing.length ? `, ${failing.length} failing` : ''}`,
+        channels: `${(channels.length - noGuide).toLocaleString()} of ${channels.length.toLocaleString()} channels have guide data`,
+        playback: 'Stream, user agent and Chromecast profiles',
+        recording: 'Recording profile, padding and storage',
+        users: 'Accounts, roles and source access',
+        system: 'Timezone, logs, backup and reset',
+    };
+    box.innerHTML = `<h2 class="sr-only">Overview</h2>${attention.map(([title, detail, page, label]) => `
+        <div class="flex flex-wrap items-center gap-3 rounded-xl p-4 mb-3" style="background:var(--tint-am);border:1px solid rgb(var(--c-am) / .4)">
+            <div class="flex-grow min-w-0"><div class="font-bold text-white">${escapeHtml(title)}</div><div class="text-sm text-gray-400">${escapeHtml(detail)}</div></div>
+            <button type="button" class="chip" data-page="${page}">${label}</button>
+        </div>`).join('')}
+        <div class="grid gap-3" style="grid-template-columns:repeat(auto-fill,minmax(15rem,1fr))">${SETTINGS_PAGES.slice(1).map(([key, label]) => `
+            <button type="button" class="text-left bg-gray-800 hover:bg-gray-700 rounded-xl p-4" data-page="${key}">
+                <div class="font-bold text-white">${label}</div><div class="text-sm text-gray-400 mt-1">${escapeHtml(status[key])}</div>
+            </button>`).join('')}</div>`;
+}
+
+// Number fields get - and + buttons: big targets for touch and a remote, and one save when the clicking stops.
+function addSteppers() {
+    document.querySelectorAll('#page-settings input[type="number"]:not([data-stepper])').forEach((input) => {
+        input.dataset.stepper = '1';
+        let timer = 0;
+        const btn = (label, step) => {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.className = 'chip flex-none justify-center';
+            b.textContent = label;
+            b.setAttribute('aria-label', `${step > 0 ? 'Increase' : 'Decrease'} ${input.labels?.[0]?.textContent.trim() || 'value'}`);
+            b.addEventListener('click', () => {
+                if (step > 0) input.stepUp(); else input.stepDown();
+                clearTimeout(timer);
+                timer = setTimeout(() => input.dispatchEvent(new Event('change', { bubbles: true })), 600);
+            });
+            return b;
+        };
+        const wrap = document.createElement('div');
+        wrap.className = 'flex items-center gap-2';
+        input.replaceWith(wrap);
+        input.classList.add('text-center', 'min-w-0');
+        wrap.append(btn('−', -1), input, btn('+', 1));
+    });
+}
+
+export const renderSettingsNav = () => {
+    addSteppers();
+    const nav = document.getElementById('settings-nav');
+    if (!document.getElementById('settings-overview')) nav.insertAdjacentHTML('afterend', '<section id="settings-overview" aria-label="Overview"></section>');
+    nav.innerHTML = SETTINGS_PAGES.map(([key, label]) => `<button type="button" class="chip" data-page="${key}">${label}</button>`).join('');
+    const go = (e) => {
+        const b = e.target.closest('[data-page]');
+        if (b) showSettingsPage(b.dataset.page);
+    };
+    nav.onclick = go;
+    document.getElementById('settings-overview').onclick = go;
+    showSettingsPage(settingsPage);
+};
+
 export const updateUIFromSettings = async () => {
+    // Hardware detection may save new profiles and replace guideState.settings.
+    const hardware = await handleHardwareDetection();
     const settings = guideState.settings;
 
-    // Run hardware detection which may add new profiles to the state
-    const hardware = await handleHardwareDetection();
-
-    // One-time timezone auto-detection and setting.
-    const timezoneSetFlag = localStorage.getItem('vini_timezone_auto_set');
-    if (!timezoneSetFlag) {
-        const browserOffset = Math.round(-(new Date().getTimezoneOffset() / 60));
+    // First run (or a settings file from before IANA zones): store the browser zone.
+    // The numeric offset stays as a fallback for old clients and EPG sources without one.
+    const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    const browserOffset = -(new Date().getTimezoneOffset() / 60);
+    if (!settings.timeZone) {
+        settings.timeZone = browserZone;
         settings.timezoneOffset = browserOffset;
-        console.log(`[SETTINGS] First-run timezone detection. Setting to browser offset: ${browserOffset} and saving.`);
-        saveGlobalSetting({ timezoneOffset: browserOffset });
-        localStorage.setItem('vini_timezone_auto_set', 'true');
+        console.log(`[SETTINGS] First-run timezone detection. Setting to ${browserZone} (UTC${browserOffset >= 0 ? '+' : ''}${browserOffset}) and saving.`);
+        if (appState.currentUser?.isAdmin) saveGlobalSetting({ timeZone: browserZone, timezoneOffset: browserOffset });
     } else {
-        settings.timezoneOffset = settings.timezoneOffset ?? Math.round(-(new Date().getTimezoneOffset() / 60));
+        settings.timezoneOffset = settings.timezoneOffset ?? browserOffset;
     }
 
-    try {
-        const userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-        if (userTimezone && UIElements.detectedTimezoneInfo) {
-            UIElements.detectedTimezoneInfo.textContent = `We've pre-selected your browser's timezone (${userTimezone}).`;
-            UIElements.detectedTimezoneInfo.classList.remove('hidden');
-        }
-    } catch (e) {
-        console.warn("Could not detect user's IANA timezone.", e);
+    if (UIElements.detectedTimezoneInfo) {
+        UIElements.detectedTimezoneInfo.textContent = `Guide times use ${settings.timeZone}.`;
+        UIElements.detectedTimezoneInfo.classList.remove('hidden');
     }
 
     settings.searchScope = settings.searchScope || 'all_channels_unfiltered';
@@ -721,9 +838,14 @@ export const updateUIFromSettings = async () => {
     settings.dvr.postBufferMinutes = settings.dvr.postBufferMinutes ?? 2;
     settings.dvr.maxConcurrentRecordings = settings.dvr.maxConcurrentRecordings ?? 1;
     settings.dvr.autoDeleteDays = settings.dvr.autoDeleteDays ?? 0;
+    settings.dvr.minFreeDiskMb = settings.dvr.minFreeDiskMb ?? 5120;
+    settings.dvr.maxRecordingHours = settings.dvr.maxRecordingHours ?? 0;
+    settings.dvr.retainNewestGb = settings.dvr.retainNewestGb ?? 0;
+    settings.downloads = settings.downloads || { enabled: true, maxConcurrent: 2 };
+    settings.liveRewind = settings.liveRewind || { enabled: false, minutes: 15, diskCapMb: 4096 };
 
     // Update dropdowns and inputs
-    UIElements.timezoneOffsetSelect.value = settings.timezoneOffset;
+    UIElements.timezoneOffsetSelect.value = settings.timeZone;
     fetchAndDisplayPublicIp();
     fetchAndDisplayAppVersion();
     UIElements.searchScopeSelect.value = settings.searchScope;
@@ -739,6 +861,24 @@ export const updateUIFromSettings = async () => {
     if (UIElements.dvrPostBufferInput) UIElements.dvrPostBufferInput.value = settings.dvr.postBufferMinutes;
     if (UIElements.dvrMaxStreamsInput) UIElements.dvrMaxStreamsInput.value = settings.dvr.maxConcurrentRecordings;
     if (UIElements.dvrStorageDeleteDays) UIElements.dvrStorageDeleteDays.value = settings.dvr.autoDeleteDays;
+    const minFreeDisk = document.getElementById('dvr-min-free-disk-input');
+    if (minFreeDisk) minFreeDisk.value = settings.dvr.minFreeDiskMb;
+    const maxHours = document.getElementById('dvr-max-hours-input');
+    if (maxHours) maxHours.value = settings.dvr.maxRecordingHours;
+    const retainGb = document.getElementById('dvr-retain-gb-input');
+    if (retainGb) retainGb.value = settings.dvr.retainNewestGb;
+    const downloadsEnabled = document.getElementById('downloads-enabled-toggle');
+    if (downloadsEnabled) downloadsEnabled.checked = settings.downloads.enabled;
+    const downloadsMax = document.getElementById('downloads-max-concurrent');
+    if (downloadsMax) downloadsMax.value = settings.downloads.maxConcurrent;
+    const rewindEnabled = document.getElementById('live-rewind-enabled-toggle');
+    if (rewindEnabled) rewindEnabled.checked = settings.liveRewind.enabled;
+    const rewindMinutes = document.getElementById('live-rewind-minutes');
+    if (rewindMinutes) rewindMinutes.value = String(settings.liveRewind.minutes);
+    const rewindCap = document.getElementById('live-rewind-disk-cap');
+    if (rewindCap) rewindCap.value = settings.liveRewind.diskCapMb;
+    const qualitySwitch = document.getElementById('allow-quality-switch-toggle');
+    if (qualitySwitch) qualitySwitch.checked = settings.allowUserQualitySwitch === true;
 
     // Update Log Management inputs
     settings.logs = settings.logs || { maxFiles: 5, maxFileSizeBytes: 5 * 1024 * 1024, autoDeleteDays: 7 };
@@ -795,7 +935,6 @@ export const updateUIFromSettings = async () => {
     });
 
     populateSelect('streamProfileSelect', filteredProfiles, settings.activeStreamProfileId);
-    populateSelect('streamProfileSelect', filteredProfiles, settings.activeStreamProfileId);
 
     // Filter DVR profiles based on detected hardware
     const allDvrProfiles = settings.dvr?.recordingProfiles || [];
@@ -851,6 +990,18 @@ export const updateUIFromSettings = async () => {
 
     populateSelect('castProfileSelect', filteredCastProfiles, settings.activeCastProfileId);
 
+    const fallbackSelect = document.getElementById('player-fallback-profile-select');
+    if (fallbackSelect) {
+        fallbackSelect.innerHTML = '<option value="">None</option>';
+        allProfiles.filter(profile => !profile.id.includes('fmp4')).forEach(profile => {
+            const option = document.createElement('option');
+            option.value = profile.id;
+            option.textContent = profile.name;
+            fallbackSelect.appendChild(option);
+        });
+        fallbackSelect.value = settings.playerFallbackProfileId || '';
+    }
+
     // Update button states based on selection
     const selectedProfile = (settings.streamProfiles || []).find(p => p.id === UIElements.streamProfileSelect.value);
     UIElements.editStreamProfileBtn.disabled = !selectedProfile;
@@ -873,6 +1024,8 @@ export const updateUIFromSettings = async () => {
     if (appState.currentUser?.isAdmin) {
         refreshUserList();
     }
+    renderEpgMap();
+    renderEpgAi();
 };
 
 
@@ -888,11 +1041,11 @@ export const refreshUserList = async () => {
         if (!res) return;
         const users = await res.json();
         UIElements.userList.innerHTML = users.map(user => `
-            <tr data-user-id="${user.id}">
-                <td class="px-4 py-3 whitespace-nowrap text-sm text-white">${user.username}</td>
+            <tr data-user-id="${escapeHtml(user.id)}">
+                <td class="px-4 py-3 text-sm text-white brk">${escapeHtml(user.username)}</td>
                 <td class="px-4 py-3 whitespace-nowrap text-sm">${user.isAdmin ? '<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-200 text-green-800">Admin</span>' : '<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-200 text-gray-800">User</span>'}</td>
                 <td class="px-4 py-3 whitespace-nowrap text-sm">${user.canUseDvr ? '<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-blue-200 text-blue-800">Yes</span>' : '<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-200 text-gray-800">No</span>'}</td>
-                <td class="px-4 py-3 whitespace-nowrap text-right text-sm font-medium">
+                <td class="px-4 py-3 whitespace-nowrap text-right text-sm font-medium act">
                     <button class="text-blue-400 hover:text-blue-600 edit-user-btn">Edit</button>
                     <button class="text-red-400 hover:text-red-600 ml-4 delete-user-btn" ${appState.currentUser.username === user.username ? 'disabled' : ''}>Delete</button>
                 </td>
@@ -994,72 +1147,6 @@ const openSourceEditor = (sourceType, source = null) => {
         if (btnSpan) {
             btnSpan.textContent = count > 0 ? `${count} Groups Selected` : 'Select Groups';
         }
-    }
-
-    // Attach listener for the new button
-    const filterGroupsBtn = document.getElementById('source-editor-filter-groups-btn');
-    if (filterGroupsBtn) {
-        filterGroupsBtn.addEventListener('click', async () => {
-            const selectedGroupsInput = document.getElementById('source-editor-selected-groups');
-            const currentSelected = JSON.parse(selectedGroupsInput.value || '[]');
-            const sourceName = UIElements.sourceEditorName.value || 'Source';
-
-            // Initial UI state
-            const originalText = filterGroupsBtn.querySelector('span').textContent;
-            filterGroupsBtn.querySelector('span').textContent = 'Loading...';
-            filterGroupsBtn.disabled = true;
-
-            currentGroupEditorContext = 'source-editor';
-            currentGroupSourceId = null; // Not needed for source editor as we read from form
-
-            try {
-                const payload = {
-                    type: currentSourceTypeForEditor, // Use 'type' not 'sourceType'
-                };
-
-                if (currentSourceTypeForEditor === 'url') {
-                    payload.url = UIElements.sourceEditorUrl.value;
-                } else if (currentSourceTypeForEditor === 'xc') {
-                    payload.xc = JSON.stringify({
-                        server: UIElements.sourceEditorXcUrl.value,
-                        username: UIElements.sourceEditorXcUsername.value,
-                        password: UIElements.sourceEditorXcPassword.value,
-                    });
-                }
-                // File sources: fetch-groups only works if file is already on server (has ID or path knewn)
-                if (source && source.id) {
-                    payload.sourceId = source.id;
-                    if (currentSourceTypeForEditor === 'file' && source.path) {
-                        payload.url = source.path; // Server expects path in 'url' field for file type
-                    }
-                }
-
-                const res = await apiFetch('/api/sources/fetch-groups', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
-                });
-
-                if (res && res.ok) {
-                    const data = await res.json();
-                    let allGroups = [];
-                    if (Array.isArray(data)) allGroups = data;
-                    else if (data.groups) allGroups = data.groups;
-
-                    UIElements.groupFilterModal.querySelector('h3').textContent = `Select Groups for ${sourceName}`;
-                    populateGroupFilterModal(allGroups, currentSelected);
-                    openModal(UIElements.groupFilterModal);
-                } else {
-                    showNotification("Failed to fetch groups. Ensure URL/Source is valid.", true);
-                }
-            } catch (e) {
-                console.error("Group fetch error:", e);
-                showNotification("Error fetching groups: " + e.message, true);
-            } finally {
-                filterGroupsBtn.querySelector('span').textContent = originalText;
-                filterGroupsBtn.disabled = false;
-            }
-        });
     }
 
     // Hide refresh interval for file-based sources
@@ -1254,28 +1341,41 @@ function handleClearLogs() {
  * Sets up all event listeners for the settings page.
  */
 export function setupSettingsEventListeners() {
+    setupEpgMap();
+    setupEpgAi();
 
     // --- Source Management ---
-    if (UIElements.processSourcesBtn) {
-        UIElements.processSourcesBtn.addEventListener('click', async () => {
-            if (isProcessingRunning && UIElements.processingStatusModal.classList.contains('hidden')) {
-                // Process is running in the background, just reopen the modal
-                openModal(UIElements.processingStatusModal);
-                return;
-            }
+    // Processes every active source, or only `sourceId` (merged with the cached rest).
+    const runProcessing = async (sourceId) => {
+        if (isProcessingRunning && UIElements.processingStatusModal.classList.contains('hidden')) {
+            // Process is running in the background, just reopen the modal
+            openModal(UIElements.processingStatusModal);
+            return;
+        }
 
-            // 1. Open the processing modal (this sets isProcessingRunning = true)
-            showProcessingModal();
+        // 1. Open the processing modal (this sets isProcessingRunning = true)
+        showProcessingModal();
 
-            // 2. Trigger the backend process.
-            const res = await apiFetch('/api/process-sources', { method: 'POST' });
-
-            // 3. Handle initial request failure
-            if (!res || !res.ok) {
-                const data = res ? await res.json() : { error: 'Could not connect to server.' };
-                updateProcessingStatus(`Failed to start process: ${data.error}`, 'error');
-            }
+        // 2. Trigger the backend process.
+        const res = await apiFetch('/api/process-sources', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sourceId })
         });
+
+        // 3. Handle initial request failure
+        if (!res || !res.ok) {
+            // apiFetch returns null for any failure, so say which one: no response at all vs. an HTTP error.
+            const e = lastApiError;
+            const reason = !e ? 'Could not connect to server.'
+                : e.status ? `Server responded ${e.status}${e.message ? `: ${e.message}` : ''}`
+                : `Could not connect to server (${e.message}).`;
+            updateProcessingStatus(`Failed to start process: ${reason}`, 'error');
+        }
+    };
+
+    if (UIElements.processSourcesBtn) {
+        UIElements.processSourcesBtn.addEventListener('click', () => runProcessing());
     }
 
     UIElements.addM3uBtn.addEventListener('click', () => openSourceEditor('m3u'));
@@ -1359,6 +1459,8 @@ export function setupSettingsEventListeners() {
             updateUIFromSettings();
             closeModal(UIElements.sourceEditorModal);
             showNotification(`Source ${id ? 'updated' : 'added'} successfully.`);
+            // A new source has no data until it is processed.
+            if (!id && UIElements.sourceEditorIsActive.checked) runProcessing(data.id);
         } else {
             const data = res ? await res.json() : { error: 'An unknown error occurred.' };
             showNotification(`Error: ${data.error}`, true);
@@ -1393,7 +1495,7 @@ export function setupSettingsEventListeners() {
     // --- Source Table Clicks (Edit, Delete, Activate) ---
     const handleSourceTableClick = async (e, sourceType) => {
         const target = e.target;
-        const row = target.closest('tr');
+        const row = target.closest('[data-source-id]');
         if (!row) return;
         const sourceId = row.dataset.sourceId;
         const source = guideState.settings[`${sourceType}Sources`].find(s => s.id === sourceId);
@@ -1401,6 +1503,8 @@ export function setupSettingsEventListeners() {
 
         if (target.closest('.edit-source-btn')) {
             openSourceEditor(sourceType, source);
+        } else if (target.closest('.refresh-source-btn')) {
+            runProcessing(sourceId);
         } else if (target.closest('.delete-source-btn')) {
             showConfirm('Delete Source?', 'This will delete the source configuration. The downloaded file (if any) will also be removed.', async () => {
                 const res = await apiFetch(`/api/sources/${sourceType}/${sourceId}`, { method: 'DELETE' });
@@ -1433,7 +1537,10 @@ export function setupSettingsEventListeners() {
     UIElements.epgSourcesTbody.addEventListener('click', (e) => handleSourceTableClick(e, 'epg'));
 
     // --- General Settings Inputs ---
-    UIElements.timezoneOffsetSelect.addEventListener('change', (e) => saveSettingAndNotify(saveGlobalSetting, { timezoneOffset: parseInt(e.target.value, 10) }));
+    UIElements.timezoneOffsetSelect.addEventListener('change', (e) => {
+        const timeZone = e.target.value;
+        saveSettingAndNotify(saveGlobalSetting, { timeZone, timezoneOffset: zoneOffsetHours(new Date(), timeZone) });
+    });
     UIElements.searchScopeSelect.addEventListener('change', (e) => saveSettingAndNotify(saveGlobalSetting, { searchScope: e.target.value }));
     UIElements.playerLogLevelSelect.addEventListener('change', (e) => saveSettingAndNotify(saveGlobalSetting, { playerLogLevel: e.target.value }));
     UIElements.dvrLogLevelSelect.addEventListener('change', (e) => saveSettingAndNotify(saveGlobalSetting, { dvrLogLevel: e.target.value }));
@@ -1473,6 +1580,67 @@ export function setupSettingsEventListeners() {
     }
     if (UIElements.dvrStorageDeleteDays) {
         UIElements.dvrStorageDeleteDays.addEventListener('change', (e) => handleDvrSettingChange('autoDeleteDays', parseInt(e.target.value, 10)));
+    }
+    const minFreeDiskInput = document.getElementById('dvr-min-free-disk-input');
+    if (minFreeDiskInput) minFreeDiskInput.addEventListener('change', (e) => handleDvrSettingChange('minFreeDiskMb', parseInt(e.target.value, 10)));
+    const maxHoursInput = document.getElementById('dvr-max-hours-input');
+    if (maxHoursInput) maxHoursInput.addEventListener('change', (e) => handleDvrSettingChange('maxRecordingHours', parseInt(e.target.value, 10)));
+    const retainGbInput = document.getElementById('dvr-retain-gb-input');
+    if (retainGbInput) retainGbInput.addEventListener('change', (e) => handleDvrSettingChange('retainNewestGb', parseInt(e.target.value, 10)));
+    const fallbackProfileSelect = document.getElementById('player-fallback-profile-select');
+    if (fallbackProfileSelect) {
+        fallbackProfileSelect.addEventListener('change', (e) => {
+            const value = e.target.value || null;
+            guideState.settings.playerFallbackProfileId = value;
+            saveSettingAndNotify(saveGlobalSetting, { playerFallbackProfileId: value });
+        });
+    }
+    const qualitySwitchToggle = document.getElementById('allow-quality-switch-toggle');
+    if (qualitySwitchToggle) {
+        qualitySwitchToggle.addEventListener('change', (e) => {
+            guideState.settings.allowUserQualitySwitch = e.target.checked;
+            saveSettingAndNotify(saveGlobalSetting, { allowUserQualitySwitch: e.target.checked });
+        });
+    }
+    const downloadsEnabledToggle = document.getElementById('downloads-enabled-toggle');
+    if (downloadsEnabledToggle) {
+        downloadsEnabledToggle.addEventListener('change', (e) => {
+            const downloads = { ...guideState.settings.downloads, enabled: e.target.checked };
+            guideState.settings.downloads = downloads;
+            saveSettingAndNotify(saveGlobalSetting, { downloads });
+        });
+    }
+    const downloadsMaxInput = document.getElementById('downloads-max-concurrent');
+    if (downloadsMaxInput) {
+        downloadsMaxInput.addEventListener('change', (e) => {
+            const downloads = { ...guideState.settings.downloads, maxConcurrent: parseInt(e.target.value, 10) };
+            guideState.settings.downloads = downloads;
+            saveSettingAndNotify(saveGlobalSetting, { downloads });
+        });
+    }
+    const rewindEnabledToggle = document.getElementById('live-rewind-enabled-toggle');
+    if (rewindEnabledToggle) {
+        rewindEnabledToggle.addEventListener('change', (e) => {
+            const liveRewind = { ...guideState.settings.liveRewind, enabled: e.target.checked };
+            guideState.settings.liveRewind = liveRewind;
+            saveSettingAndNotify(saveGlobalSetting, { liveRewind });
+        });
+    }
+    const rewindMinutes = document.getElementById('live-rewind-minutes');
+    if (rewindMinutes) {
+        rewindMinutes.addEventListener('change', (e) => {
+            const liveRewind = { ...guideState.settings.liveRewind, minutes: parseInt(e.target.value, 10) };
+            guideState.settings.liveRewind = liveRewind;
+            saveSettingAndNotify(saveGlobalSetting, { liveRewind });
+        });
+    }
+    const rewindCap = document.getElementById('live-rewind-disk-cap');
+    if (rewindCap) {
+        rewindCap.addEventListener('change', (e) => {
+            const liveRewind = { ...guideState.settings.liveRewind, diskCapMb: parseInt(e.target.value, 10) };
+            guideState.settings.liveRewind = liveRewind;
+            saveSettingAndNotify(saveGlobalSetting, { liveRewind });
+        });
     }
     UIElements.dvrRecordingProfileSelect.addEventListener('change', (e) => handleDvrSettingChange('activeRecordingProfileId', e.target.value));
 
@@ -1760,8 +1928,11 @@ export function setupSettingsEventListeners() {
     });
 
     // --- Danger Zone ---
+    const resetWord = document.getElementById('clear-data-confirm');
+    resetWord.addEventListener('input', () => { UIElements.clearDataBtn.disabled = resetWord.value.trim() !== 'RESET'; });
     UIElements.clearDataBtn.addEventListener('click', () => {
-        showConfirm('Clear All Data?', 'This will permanently delete ALL settings and files from the server and your browser cache. The page will reload.', async () => {
+        if (resetWord.value.trim() !== 'RESET') return;
+        showConfirm('Clear all data?', 'Last check: sources, settings, all recordings and push keys are deleted from this server. This cannot be undone.', async () => {
             const res = await apiFetch('/api/data', { method: 'DELETE' }); // Use apiFetch
             if (res?.ok) { // Check for ok status
                 if (appState.db) {
@@ -2008,7 +2179,10 @@ export function setupSettingsEventListeners() {
             // Check if the "Select Groups" button was clicked
             if (e.target.closest('#source-editor-filter-groups-btn')) {
                 console.log('[SETTINGS] "Select Groups" button clicked (via delegation).');
-                const btn = e.target;
+                const btn = e.target.closest('#source-editor-filter-groups-btn');
+                // The save handler writes to the source editor, not a stale user-editor button.
+                currentGroupEditorContext = 'source-editor';
+                currentGroupSourceId = null;
                 // Store the original HTML content (using innerHTML as setButtonLoadingState uses it)
                 const originalContent = btn.innerHTML;
 

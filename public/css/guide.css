@@ -1,0 +1,1031 @@
+/*
+ * Live TV guide: filter bar, preview pane, timeline grid, phone list, search palette.
+ *
+ * Sizes are em so the guide scales with the shell (14px desktop, 15px phone, 24px TV).
+ * The row height lives in --row-h; guide.js measures it, so change it here only.
+ * Browser floor Chromium 76: no inset, :is(), :focus-visible or aspect-ratio.
+ */
+
+/* ---------- Filter bar ---------- */
+.guide-bar {
+    position: relative;
+    z-index: 50; /* above the sticky corner (45), so the Groups menu overlays the timeline */
+    display: flex;
+    align-items: center;
+    gap: .6em;
+    flex: none;
+    padding: .1em 1.5em .8em;
+}
+
+.guide-bar .chip {
+    flex: none;
+    height: 2.4em;
+    padding: 0 1em;
+    font-size: 1em;
+}
+
+.guide-bar .dd {
+    max-width: 16em;
+    min-height: 0;
+    padding-right: 2.2em;
+    border-radius: 999px;
+    background-color: var(--s2);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238D96B0' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m5 9 7 7 7-7'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right .8em center;
+    background-size: .9em;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+.guide-bar .dd span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.guide-bar .chip svg {
+    width: 1.1em;
+    height: 1.1em;
+}
+
+.chips {
+    display: flex;
+    gap: .5em;
+    flex: none;
+}
+
+/* Groups menu: tick rows under the Groups button (the .menu panel from shell.css, anchored left). */
+.gm {
+    left: 0;
+    right: auto;
+    width: 24em;
+}
+
+.gm-head {
+    display: flex;
+    gap: .4em;
+    padding: .2em .2em .5em;
+}
+
+.gm-head input {
+    flex: 1;
+    min-width: 0;
+}
+
+.gm-list {
+    max-height: 55vh;
+    padding: .3em; /* room for the focus ring, which the scroll area would clip */
+    overflow-y: auto;
+}
+
+.gm .count {
+    padding: .4em .8em;
+    font-size: .875em;
+    color: var(--tx3);
+}
+
+.gm .nm {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.gm .n {
+    font: .75em var(--f-mono);
+    color: var(--tx3);
+}
+
+.gm .ck {
+    position: relative;
+    flex: none;
+    width: 1.2em;
+    height: 1.2em;
+    border: 2px solid var(--tx3);
+    border-radius: .3em;
+}
+
+.gm [aria-checked="true"] .ck {
+    border-color: var(--cy);
+    background: var(--cy);
+}
+
+.gm [aria-checked="true"] .ck::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 45%;
+    width: .3em;
+    height: .6em;
+    border: solid var(--on);
+    border-width: 0 .14em .14em 0;
+    transform: translate(-50%, -55%) rotate(45deg);
+}
+
+.guide-tools {
+    display: flex;
+    align-items: center;
+    gap: .6em;
+    margin-left: auto;
+}
+
+.guide-tools .seg {
+    display: none;
+}
+
+.guide-tools .seg svg {
+    width: 1.25em;
+    height: 1.25em;
+}
+
+.guide-status {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1em;
+    flex: none;
+    padding: .3em 1.5em;
+    color: var(--tx2);
+}
+
+.guide-status.hidden {
+    display: none;
+}
+
+/* ---------- Preview pane ---------- */
+.gp {
+    display: flex;
+    gap: 1.5em;
+    flex: none;
+    margin: 0 1.5em .9em;
+}
+
+.gp.hidden {
+    display: none;
+}
+
+.gp-art {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: 17em;
+    border: 1px solid var(--line);
+    border-radius: 1em;
+    overflow: hidden;
+    background: linear-gradient(135deg, var(--tint-cy), var(--s3) 70%);
+}
+
+.gp-art img {
+    width: 38%;
+    max-height: 62%;
+    object-fit: contain;
+}
+
+.gp-art .pill {
+    position: absolute;
+    top: .8em;
+    left: .8em;
+}
+
+.gp-main {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: .5em;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.gp-meta {
+    display: flex;
+    align-items: center;
+    gap: .7em;
+    color: var(--tx2);
+    font-weight: 650;
+}
+
+.gp-meta .mono {
+    color: var(--tx3);
+    font-size: .9em;
+    font-weight: 600;
+}
+
+.gp-title {
+    margin: 0;
+    font: 700 1.9em/1.1 var(--f-disp);
+    letter-spacing: -.015em;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.gp-line {
+    display: flex;
+    align-items: center;
+    gap: .8em;
+    color: var(--tx2);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+
+.gp-bar {
+    position: relative;
+    flex: 0 1 12em;
+    height: .35em;
+    border-radius: 1em;
+    background: var(--s4);
+    overflow: hidden;
+}
+
+.gp-bar i {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    background: var(--pk);
+}
+
+#gp-left {
+    color: var(--pk);
+    font-weight: 700;
+}
+
+.gp-desc {
+    display: -webkit-box;
+    max-width: 46em;
+    margin: 0;
+    color: var(--tx2);
+    line-height: 1.45;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.gp-actions {
+    display: flex;
+    gap: .6em;
+    margin-top: .2em;
+}
+
+.gp-actions svg {
+    width: 1.2em;
+    height: 1.2em;
+}
+
+.gp-next {
+    flex: none;
+    width: 19em;
+    padding: 1em 1.2em;
+    border: 1px solid var(--line);
+    border-radius: 1em;
+    background: var(--s1);
+}
+
+.gp-next .row {
+    display: flex;
+    justify-content: space-between;
+    gap: 1em;
+    padding: .45em 0;
+    font-weight: 600;
+}
+
+.gp-next .row span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.gp-next .row time {
+    flex: none;
+    color: var(--tx3);
+    font: 600 .86em var(--f-mono);
+}
+
+/* ---------- Timeline grid ---------- */
+#guide-container {
+    background: var(--bg);
+    border-top: 1px solid var(--line);
+}
+
+#guide-grid {
+    --head-h: 2.8em;
+    --row-h: 4.6em;
+    position: relative;
+    display: grid;
+    grid-template-columns: var(--channel-col-width, 240px) 1fr;
+    grid-auto-rows: min-content;
+    min-width: fit-content;
+    height: fit-content;
+}
+
+/* Reads the row height in pixels whatever the unit or the screen. */
+#guide-probe {
+    position: absolute;
+    width: 0;
+    height: var(--row-h);
+    visibility: hidden;
+    pointer-events: none;
+}
+
+.sticky-corner {
+    position: sticky;
+    top: 0;
+    left: 0;
+    z-index: 45;
+    display: flex;
+    align-items: center;
+    box-sizing: border-box;
+    width: var(--channel-col-width, 240px);
+    height: var(--head-h);
+    padding: 0 .8em;
+    border-right: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+    background: var(--bg);
+}
+
+.sticky-corner .chip {
+    height: 1.9em;
+    padding: 0 .8em;
+    font-size: .9em;
+}
+
+.channel-resize-handle {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 35;
+    width: 8px;
+    cursor: ew-resize;
+}
+
+.channel-resize-handle::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 2px;
+    height: 60%;
+    border-radius: 1px;
+    background: var(--tx3);
+    opacity: .5;
+    transform: translate(-50%, -50%);
+}
+
+.channel-resize-handle:hover::after {
+    opacity: 1;
+}
+
+.time-bar-cell {
+    position: sticky;
+    top: 0;
+    z-index: 25;
+    grid-column: 2;
+    box-sizing: border-box;
+    height: var(--head-h);
+    border-bottom: 1px solid var(--line);
+    background: var(--bg);
+}
+
+.time-bar-cell .tk {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    box-sizing: border-box;
+    padding: .95em 0 0 .7em;
+    border-left: 1px solid var(--line);
+    color: var(--tx3);
+    font: 600 .86em var(--f-mono);
+    font-variant-numeric: tabular-nums;
+}
+
+.channel-info {
+    position: sticky;
+    left: 0;
+    z-index: 30;
+    display: flex;
+    align-items: center;
+    gap: .7em;
+    box-sizing: border-box;
+    width: var(--channel-col-width, 240px);
+    height: var(--row-h);
+    padding: 0 .8em;
+    border-right: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+    background: var(--s1);
+    overflow: hidden;
+    cursor: pointer;
+    scroll-margin-top: var(--head-h);
+}
+
+.channel-info:hover {
+    background: var(--s2);
+}
+
+.ch-logo {
+    flex: none;
+    width: 2.6em;
+    height: 2.6em;
+    padding: .2em;
+    box-sizing: border-box;
+    border-radius: .7em;
+    background: var(--s4);
+    object-fit: contain;
+}
+
+.ch-text {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.ch-no {
+    margin-bottom: .15em;
+    color: var(--tx3);
+    font: 600 .78em var(--f-mono);
+}
+
+.channel-name {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+    font-size: .96em;
+    font-weight: 650;
+    line-height: 1.14;
+}
+
+.channel-info .favorite-star {
+    flex: none;
+    width: 1.4em;
+    height: 1.4em;
+    margin-left: auto;
+    color: var(--tx3);
+}
+
+.channel-info .favorite-star:hover {
+    color: var(--am);
+}
+
+.favorite-star.favorited {
+    color: var(--am);
+    fill: currentColor;
+    transform: none;
+}
+
+.timeline-row {
+    position: relative;
+    height: var(--row-h);
+    border-bottom: 1px solid var(--line);
+}
+
+.programme-item {
+    position: absolute;
+    top: .22em;
+    bottom: .22em;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: .12em;
+    box-sizing: border-box;
+    padding: .45em .75em;
+    border: 1px solid var(--line);
+    border-radius: .65em;
+    background: var(--s2);
+    overflow: hidden;
+    cursor: pointer;
+    scroll-margin-left: var(--channel-col-width, 240px);
+    scroll-margin-top: var(--head-h);
+}
+
+.programme-item:hover {
+    border-color: var(--tx3);
+    background: var(--s3);
+}
+
+.programme-item .prog-title {
+    display: -webkit-box;
+    -webkit-line-clamp: 1;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    font-weight: 650;
+    line-height: 1.14;
+}
+
+.programme-item .prog-time {
+    overflow: hidden;
+    color: var(--tx3);
+    font-size: .82em;
+    font-variant-numeric: tabular-nums;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Past: dimmed. Now: filled up to the current time. Selected: cyan edge. */
+.programme-item.past {
+    background: var(--s1);
+}
+
+.programme-item.past .prog-title,
+.programme-item.past .prog-time {
+    color: var(--tx3);
+}
+
+.programme-item.live {
+    border-color: rgb(var(--c-pk) / .5);
+    background: linear-gradient(90deg, var(--tint-pk) var(--p, 0%), var(--s3) var(--p, 0%));
+}
+
+.programme-item.sel {
+    border-color: var(--cy);
+    box-shadow: inset 0 0 0 1px var(--cy);
+}
+
+.programme-item.search-match {
+    border-color: var(--am);
+    box-shadow: inset 0 0 0 1px var(--am);
+}
+
+.programme-item.highlighted-search {
+    box-shadow: 0 0 0 .2em var(--am);
+    z-index: 15;
+}
+
+.programme-item.narrow {
+    padding: .4em .4em;
+}
+
+.programme-item.narrow .prog-title {
+    -webkit-line-clamp: 2;
+}
+
+.programme-item.narrow .prog-time {
+    display: none;
+}
+
+/* Recording and reminder markers. */
+.programme-item .fl {
+    position: absolute;
+    top: .4em;
+    right: .45em;
+    display: flex;
+    align-items: center;
+    gap: .3em;
+    color: var(--am);
+}
+
+.programme-item .fl svg {
+    width: 1em;
+    height: 1em;
+}
+
+.programme-item .fl .dot {
+    width: .6em;
+    height: .6em;
+    background: var(--cy);
+}
+
+.programme-item .fl .st-recording {
+    background: var(--rd);
+}
+
+.programme-item .fl .st-completed {
+    background: var(--gr);
+}
+
+.programme-item .fl .st-error {
+    background: var(--am);
+}
+
+.programme-item .fl .st-cancelled {
+    background: var(--tx3);
+}
+
+/* The focus ring rule in base.css sets position: relative; keep these in place. */
+html.kb .programme-item:focus {
+    position: absolute;
+    z-index: 6;
+}
+
+html.kb .channel-info:focus {
+    position: sticky;
+}
+
+/* Now line with a time flag that stays under the top bar while scrolling. */
+#now-line {
+    position: absolute;
+    top: 0;
+    z-index: 28;
+    width: 2px;
+    height: 100%;
+    background: var(--pk);
+    pointer-events: none;
+}
+
+#now-line.hidden {
+    display: none;
+}
+
+#now-line b {
+    position: sticky;
+    top: .55em;
+    display: block;
+    width: max-content;
+    padding: .4em .55em;
+    border-radius: .4em;
+    background: var(--pk);
+    color: var(--on-pk);
+    font: 800 .78em/1 var(--f-mono);
+    transform: translateX(-50%);
+}
+
+/* ---------- Phone list ---------- */
+#guide-grid.view-list {
+    display: block;
+    min-width: 0;
+}
+
+#guide-grid.view-list .sticky-corner,
+#guide-grid.view-list .time-bar-cell,
+#guide-grid.view-list #now-line {
+    display: none;
+}
+
+#guide-grid.view-list {
+    --row-h: 6em;
+}
+
+.gcard {
+    position: relative;
+    width: auto;
+    padding: 0 1em;
+    gap: .9em;
+}
+
+.gcard .ch-logo {
+    width: 3.2em;
+    height: 3.2em;
+}
+
+.gc-main {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.gc-top {
+    display: flex;
+    align-items: baseline;
+    gap: .5em;
+    color: var(--tx3);
+    font-weight: 600;
+}
+
+.gc-top .ch-no {
+    margin: 0;
+}
+
+.gc-top span:last-child {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.gc-now.gc-none {
+    color: var(--tx3);
+    font-size: var(--t-small);
+    font-weight: 400;
+}
+
+.gc-now {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 1.08em;
+    font-weight: 700;
+}
+
+.gc-bar {
+    display: flex;
+    align-items: center;
+    gap: .6em;
+    color: var(--tx3);
+    font-size: .85em;
+    font-weight: 600;
+}
+
+.gc-bar i {
+    flex: 1 1 auto;
+    height: .3em;
+    border-radius: 1em;
+    background: var(--s4);
+    overflow: hidden;
+}
+
+.gc-bar i b {
+    display: block;
+    height: 100%;
+    background: var(--pk);
+}
+
+.gc-next {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--tx3);
+    font-size: .85em;
+}
+
+/* ---------- Details dialog: a bottom sheet on phones ---------- */
+@media (max-width: 767.98px) {
+    #program-details-modal {
+        align-items: flex-end;
+        padding: 0;
+    }
+
+    #program-details-container {
+        width: 100% !important;
+        min-width: 0;
+        max-width: none;
+        border-radius: 1.4em 1.4em 0 0;
+        padding-bottom: calc(1.5rem + env(safe-area-inset-bottom, 0px));
+    }
+}
+
+/* ---------- Search palette ---------- */
+.palette-wrap {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 160;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    padding: 9vh 1em 1em;
+    font-size: .9375rem;
+}
+
+.palette-wrap.hidden {
+    display: none;
+}
+
+.palette-scrim {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    background: var(--scrim);
+}
+
+.palette {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    width: 40em;
+    max-width: 100%;
+    max-height: 78vh;
+    border: 1px solid var(--line2);
+    border-radius: 1.1em;
+    background: var(--s2);
+    box-shadow: var(--shadow-2);
+    overflow: hidden;
+}
+
+.palette-head {
+    display: flex;
+    align-items: center;
+    gap: .7em;
+    padding: .7em .8em .7em 1.1em;
+    border-bottom: 1px solid var(--line);
+    color: var(--tx3);
+}
+
+.palette-head input {
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 0;
+    padding: .4em 0;
+    border: 0;
+    background: transparent;
+    font-size: 1.1em;
+}
+
+.palette-head input::-webkit-search-cancel-button {
+    -webkit-appearance: none;
+    display: none;
+}
+
+.palette-head input:focus {
+    outline: none;
+    box-shadow: none;
+}
+
+.palette-results {
+    flex: 1 1 auto;
+    padding: .4em;
+    overflow-y: auto;
+}
+
+.palette-results .eyebrow {
+    padding: .7em .8em .3em;
+}
+
+.pr {
+    display: flex;
+    align-items: center;
+    gap: .8em;
+    width: 100%;
+    min-height: 3em;
+    padding: .35em .8em;
+    border: 0;
+    border-radius: .7em;
+    background: transparent;
+    color: var(--tx);
+    font: 600 1em var(--f-ui);
+    text-align: left;
+    cursor: pointer;
+}
+
+.pr:hover {
+    background: var(--s3);
+}
+
+.pr img {
+    flex: none;
+    width: 2em;
+    height: 2em;
+    border-radius: .5em;
+    background: var(--s4);
+    object-fit: contain;
+}
+
+.pr .t {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.pr small {
+    flex: none;
+    color: var(--tx3);
+    font-size: .85em;
+}
+
+.palette-empty {
+    padding: 1.4em 1em;
+    color: var(--tx3);
+    text-align: center;
+}
+
+/* ---------- Channel number typed on the remote ---------- */
+.num-entry {
+    position: fixed;
+    top: 4.5em;
+    right: 2.5vw;
+    z-index: 170;
+    padding: .25em .6em;
+    border: 1px solid var(--line2);
+    border-radius: .5em;
+    background: var(--s2);
+    box-shadow: var(--shadow-2);
+    color: var(--tx);
+    font: 700 2.4em var(--f-mono);
+    letter-spacing: .08em;
+}
+
+.num-entry.hidden {
+    display: none;
+}
+
+/* ---------- Large screens (TV) ---------- */
+html.tv #guide-grid {
+    --row-h: 4.4em;
+    --channel-col-width: 13em !important;
+}
+
+html.tv .guide-bar,
+html.tv .gp,
+html.tv .guide-status {
+    font-size: 1em;
+}
+
+/* ---------- Tablet and phone ---------- */
+@media (max-width: 1099.98px) {
+    .gp-next {
+        display: none;
+    }
+}
+
+@media (max-width: 899.98px) {
+    .gp-art {
+        display: none;
+    }
+}
+
+@media (max-height: 640px) {
+    .gp {
+        display: none;
+    }
+}
+
+@media (max-width: 767.98px) {
+    .guide-bar {
+        flex-wrap: wrap;
+        gap: .5em;
+        padding: .1em .9em .7em;
+    }
+
+    .guide-bar .dd {
+        max-width: 9.5em;
+    }
+
+    /* On a phone the Groups menu spans the bar instead of hanging off the button. */
+    .guide-bar .menu-wrap {
+        position: static;
+    }
+
+    .gm {
+        left: .9em;
+        right: .9em;
+        width: auto;
+        max-width: none;
+    }
+
+    .guide-tools .seg {
+        display: inline-flex;
+    }
+
+    .gp {
+        display: none;
+    }
+
+    .guide-status {
+        padding: .3em .9em;
+    }
+
+    /* Grid mode on a phone: the channel column shows the logo only. */
+    #guide-grid:not(.view-list) {
+        --channel-col-width: 4.6em !important;
+        --row-h: 4.6em;
+    }
+
+    #guide-grid:not(.view-list) .channel-info {
+        justify-content: center;
+        padding: 0;
+    }
+
+    #guide-grid:not(.view-list) .ch-text,
+    #guide-grid:not(.view-list) .favorite-star,
+    .channel-resize-handle {
+        display: none;
+    }
+
+    .sticky-corner {
+        justify-content: center;
+        padding: 0;
+    }
+
+    .sticky-corner .chip {
+        padding: 0 .6em;
+    }
+}
+
+/* Anything fixed to the screen edge clears the notch in landscape. */
+@media (max-width: 767.98px) and (orientation: landscape) {
+    .guide-bar {
+        padding-left: calc(.9em + env(safe-area-inset-left, 0px));
+        padding-right: calc(.9em + env(safe-area-inset-right, 0px));
+    }
+}
+
+/* Multi-View: the canvas fills the page, not just the first 50vh. */
+#multiview-container {
+    display: flex;
+    flex-direction: column;
+}
+
+#multiview-grid {
+    flex: 1 1 auto;
+    min-height: 100%;
+}
+
+#multiview-grid:empty::before {
+    min-height: 100%;
+    height: 100%;
+}
+
+.grid-stack-item-content {
+    border-radius: var(--r-md);
+    box-shadow: none;
+    border: 1px solid var(--line);
+}

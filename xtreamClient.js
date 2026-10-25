@@ -33,6 +33,7 @@ class XtreamClient {
      * @returns {Promise<object|Array>} The JSON response from the API
      */
     async _makeRequest(action, params = {}) {
+        const started = Date.now();
         try {
             const url = `${this.baseUrl}/player_api.php`;
             const allParams = {
@@ -42,16 +43,21 @@ class XtreamClient {
                 ...params
             };
             
-            console.log(`[XC Client] Requesting action: ${action}`);
+            // Credentials and param values are masked; only the keys are shown.
+            console.log(`[XC Client] GET ${url}?${Object.keys(allParams).map(k => `${k}=***`).join('&')} action=${action} timeout=${this.client.defaults.timeout}ms`);
             const response = await this.client.get(url, { params: allParams });
-            
+            console.log(`[XC Client] ${action} -> ${response.status} in ${Date.now() - started}ms content-type=${response.headers['content-type'] || 'n/a'} server=${response.headers.server || 'n/a'}`);
+
             if (!response.data) {
                 throw new Error('Empty response from provider');
             }
             return response.data;
         } catch (error) {
             const msg = `[XC Client] Error in action '${action}': ${error.message}`;
-            console.error(msg);
+            const cause = error.cause || error;
+            const body = typeof error.response?.data === 'string' ? error.response.data.slice(0, 300).replace(/\s+/g, ' ') : '';
+            console.error(`${msg} | after ${Date.now() - started}ms code=${error.code || 'n/a'} syscall=${cause.syscall || 'n/a'} `
+                + `address=${cause.address || 'n/a'}:${cause.port ?? 'n/a'} status=${error.response?.status ?? 'n/a'} body="${body}"`);
             throw new Error(msg);
         }
     }

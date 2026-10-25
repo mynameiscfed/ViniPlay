@@ -1,5 +1,6 @@
 # Docker Compose file for ViniPlay
 # Version 3.8 is a modern, stable version of the Compose file format.
+# Create the environment file first: cp .env.example .env
 version: "3.8"
 
 services:
@@ -7,7 +8,8 @@ services:
   viniplay:
     # Build from the Dockerfile in the current directory.
     #build: .
-    image: ardovini/viniplay:latest
+    # Image published by this repo's CI. Use ardovini/viniplay:latest for upstream.
+    image: ghcr.io/mynameiscfed/viniplay:latest
 
     
     # Set a consistent name for the container for easy management.

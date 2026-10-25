@@ -55,8 +55,8 @@ self.addEventListener('push', event => {
         const notificationTitle = programTitle;
         const notificationOptions = {
             body: `Starts at ${localStartTime} on ${channelName}`,
-            icon: channelLogo || 'https://i.imgur.com/rwa8SjI.png',
-            badge: 'https://i.imgur.com/rwa8SjI.png', // Badge for Android
+            icon: channelLogo || '/icons/icon-192.png',
+            badge: '/icons/icon-192.png', // Badge for Android
             vibrate: [100, 50, 100],
             data: {
                 url: url || '/'
@@ -79,7 +79,7 @@ self.addEventListener('push', event => {
         const title = payload.title || 'ViniPlay Notification';
         const options = {
             body: payload.body || 'You have a new notification.',
-            icon: payload.icon || 'https://i.imgur.com/rwa8SjI.png',
+            icon: payload.icon || '/icons/icon-192.png',
             data: {
                 url: payload.data ? payload.data.url : '/'
             },
@@ -110,7 +110,11 @@ self.addEventListener('notificationclick', event => {
                 // If a client is found that matches our origin, focus it without hard-reloading the page
                 if (client.url.startsWith(self.location.origin)) {
                     notificationChannel.postMessage({ type: 'refresh-notifications' });
-                    return client.focus();
+                    // Follow the reminder's deep link, then focus. Focusing alone left the
+                    // user on whatever page the app already had open.
+                    return client.navigate(urlToOpen)
+                        .then((navigated) => (navigated || client).focus())
+                        .catch(() => client.focus());
                 }
             }
             // If no client is found or no suitable client to navigate, open a new tab/window.

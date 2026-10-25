@@ -1,0 +1,89 @@
+/*
+ * TV mode: the 10-foot interface. Applied when html.tv is set (automatic on smart TVs
+ * and game consoles, or chosen in the account menu).
+ *
+ * Everything scales from the root font size: 24px on a 1920x1080 screen, 16px at 1280x720.
+ * Content stays inside a 5% safe area because many TVs crop the edges.
+ */
+
+html.tv {
+    font-size: clamp(16px, 1.25vw, 48px);
+}
+
+html.tv body {
+    padding: 2.5vh 2.5vw 0;
+    box-sizing: border-box;
+}
+
+html.tv #app-container {
+    font-size: 1rem;
+}
+
+html.tv #app-body {
+    padding-bottom: 2.6em;
+}
+
+/* No scrollbars or hover affordances on a remote. */
+html.tv * {
+    scrollbar-width: none;
+}
+
+html.tv ::-webkit-scrollbar {
+    display: none;
+}
+
+/* A stronger ring and a small lift make the focused item obvious from the couch. */
+html.tv.kb :focus {
+    box-shadow: 0 0 0 .17em #fff, 0 0 0 .55em rgba(46, 211, 230, .34), 0 .5em 1.4em rgba(0, 0, 0, .5);
+}
+
+html.tv.kb .fx:focus {
+    transform: scale(1.035);
+    z-index: 6;
+}
+
+html.tv .btn,
+html.tv .chip,
+html.tv input,
+html.tv select {
+    min-height: 2.5rem;
+}
+
+/* Key hints along the bottom edge. */
+.hints {
+    display: none;
+}
+
+html.tv .hints {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 60;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 2em;
+    height: 3.1em;
+    padding: 0 3em;
+    font-size: .72rem;
+    color: var(--tx3);
+    background: linear-gradient(0deg, rgb(var(--c-bg) / .96), transparent);
+    pointer-events: none;
+}
+
+html.tv .hints span {
+    display: inline-flex;
+    align-items: center;
+    gap: .6em;
+    font-weight: 600;
+}
+
+html.tv .hints kbd {
+    height: 2.1em;
+    min-width: 2.1em;
+}
+
+html.tv body.modal-open .hints {
+    display: none;
+}
