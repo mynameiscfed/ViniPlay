@@ -92,15 +92,56 @@
     gap: .5em;
 }
 
-/* Header and card fade out when nothing has moved for a few seconds (see osd.js). */
+/* Header, card and the rewind and movie bars fade out together when nothing has moved (see osd.js). */
 #video-modal.osd-idle #video-modal-header,
-#video-modal.osd-idle #player-osd {
+#video-modal.osd-idle #player-osd,
+#video-modal.osd-idle #timeshift-controls-overlay,
+#video-modal.osd-idle #vod-controls-overlay {
     opacity: 0;
     pointer-events: none;
 }
 
 #video-modal.osd-idle {
     cursor: none;
+}
+
+/* Record: the icon and a word, so idle, scheduled and recording read at a glance. */
+#record-current-btn {
+    width: auto;
+    padding: 0 1em 0 .85em !important;
+    border-radius: 999px;
+    grid-auto-flow: column;
+    gap: .5em;
+    font-weight: 700;
+}
+
+#record-current-btn svg {
+    color: var(--rd);
+}
+
+#record-current-btn[data-rec="scheduled"] {
+    background: rgba(255, 194, 71, .22);
+    box-shadow: inset 0 0 0 1px var(--am);
+}
+
+#record-current-btn[data-rec="scheduled"] svg {
+    color: var(--am);
+}
+
+#record-current-btn[data-rec="recording"] {
+    background: rgba(255, 90, 82, .26);
+    box-shadow: inset 0 0 0 1px var(--rd);
+}
+
+/* Menu rows that repeat a header button on phones (see player.js). */
+@media (min-width: 768px) {
+    .pm-phone {
+        display: none !important;
+    }
+}
+
+#video-modal:not(.is-live) .pm-live {
+    display: none;
 }
 
 /* ---------- Now/next card ---------- */
@@ -311,6 +352,11 @@ html.tv #player-osd {
     left: 3.5vw;
 }
 
+/* A TV has no picture-in-picture. */
+html.tv #pip-btn {
+    display: none;
+}
+
 /* ---------- Phone ---------- */
 @media (max-width: 767.98px) {
     #player-osd {
@@ -325,5 +371,27 @@ html.tv #player-osd {
 
     #video-modal #video-title {
         font-size: 1.05em !important;
+    }
+
+    /* Eight header buttons pushed Close off a 360px screen; these three move into the menu. */
+    #refresh-stream-btn,
+    #pip-btn,
+    #player-live-edge-btn {
+        display: none;
+    }
+
+    /* The word stays for screen readers; the colour carries the state. */
+    #record-current-btn {
+        width: 2.7em;
+        padding: 0 !important;
+    }
+
+    #record-current-btn [data-rec-state] {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
     }
 }

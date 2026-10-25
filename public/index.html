@@ -42,7 +42,7 @@
     <link rel="stylesheet" href="/css/guide.css?v=5">
     <link rel="stylesheet" href="/css/home.css?v=6">
     <link rel="stylesheet" href="/css/legacy.css?v=7">
-    <link rel="stylesheet" href="/css/player.css?v=1">
+    <link rel="stylesheet" href="/css/player.css?v=2">
     <link rel="stylesheet" href="/css/tv.css?v=1">
 
     <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.8.2/dist/mpegts.js" integrity="sha384-sQp+4cJv0jChNCYvgy6W0RSfQZB/w6d3ZTDoIBlY4Uorfw4PLS56T2yM2z47bSkl" crossorigin="anonymous"></script>
@@ -1469,10 +1469,10 @@
                         <span data-icon="refresh"></span>
                     </button>
                     <!-- Record current programme -->
-                    <button id="record-current-btn" type="button" class="pbtn hidden text-gray-400"
+                    <button id="record-current-btn" type="button" class="pbtn hidden"
                         title="Record current programme">
                         <span data-icon="rec"></span>
-                        <span data-rec-state class="sr-only"></span>
+                        <span data-rec-state>Record</span>
                     </button>
                     <!-- Jump back to the live edge -->
                     <button id="player-live-edge-btn" type="button" class="pbtn hidden"
@@ -1500,6 +1500,41 @@
                         <!-- Dropdown Menu -->
                         <div id="player-more-options-menu"
                             class="hidden absolute right-0 top-full mt-2 w-72 sm:w-80 max-w-[calc(100vw-32px)] max-h-[min(380px,80vh)] overflow-y-auto custom-scrollbar bg-gray-900/95 backdrop-blur-xl border border-gray-700/80 rounded-xl shadow-2xl p-1.5 z-50 transition-all duration-150 flex flex-col gap-0.5">
+
+                            <!-- Phones only: header buttons that moved here (see player.css) -->
+                            <button id="menu-live-btn"
+                                class="pm-phone pm-live w-full flex items-center gap-3 px-3 py-2.5 text-left text-gray-300 hover:text-white hover:bg-gray-800/80 transition-colors rounded-lg group cursor-pointer"
+                                title="Jump to live">
+                                <span class="p-1.5 rounded-md bg-gray-800/80 group-hover:bg-gray-700 text-gray-400 group-hover:text-white transition-colors flex-shrink-0">
+                                    <span data-icon="bolt"></span>
+                                </span>
+                                <div class="flex flex-col flex-1 min-w-0">
+                                    <span class="text-sm font-medium leading-snug">Jump to Live</span>
+                                    <span class="text-xs text-gray-400 leading-tight">Skip ahead to what is on now</span>
+                                </div>
+                            </button>
+                            <button id="menu-refresh-btn"
+                                class="pm-phone pm-live w-full flex items-center gap-3 px-3 py-2.5 text-left text-gray-300 hover:text-white hover:bg-gray-800/80 transition-colors rounded-lg group cursor-pointer"
+                                title="Refresh Stream">
+                                <span class="p-1.5 rounded-md bg-gray-800/80 group-hover:bg-gray-700 text-gray-400 group-hover:text-white transition-colors flex-shrink-0">
+                                    <span data-icon="refresh"></span>
+                                </span>
+                                <div class="flex flex-col flex-1 min-w-0">
+                                    <span class="text-sm font-medium leading-snug">Reload Stream</span>
+                                    <span class="text-xs text-gray-400 leading-tight">Try again if playback stalls</span>
+                                </div>
+                            </button>
+                            <button id="menu-pip-btn"
+                                class="pm-phone w-full flex items-center gap-3 px-3 py-2.5 text-left text-gray-300 hover:text-white hover:bg-gray-800/80 transition-colors rounded-lg group cursor-pointer"
+                                title="Picture-in-Picture">
+                                <span class="p-1.5 rounded-md bg-gray-800/80 group-hover:bg-gray-700 text-gray-400 group-hover:text-white transition-colors flex-shrink-0">
+                                    <span data-icon="pip"></span>
+                                </span>
+                                <div class="flex flex-col flex-1 min-w-0">
+                                    <span class="text-sm font-medium leading-snug">Picture-in-Picture</span>
+                                    <span class="text-xs text-gray-400 leading-tight">Keep watching in a small window</span>
+                                </div>
+                            </button>
 
                             <!-- Audio-Only Toggle -->
                             <button id="audio-only-btn"
