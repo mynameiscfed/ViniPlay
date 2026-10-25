@@ -1,0 +1,331 @@
+/*
+ * Signal Ink design tokens.
+ *
+ * Dark is the default. Light applies when the user picks it
+ * (<html data-theme="light">) or, with no choice made, when the OS prefers it.
+ * Colours are stored as space-separated RGB triplets (--c-*, --g-*, ...) so
+ * Tailwind can add an alpha channel, and as ready-to-use colours (--bg, --tx, ...)
+ * for the hand-written component CSS.
+ *
+ * Accent roles
+ *   cyan  = interactive, focus, selected, primary action
+ *   pink  = live and "now"
+ *   amber = reminders, ratings, warnings
+ *   green = success, ready, completed
+ *   red   = record and destructive actions
+ */
+
+:root,
+.scope-dark {
+  color-scheme: dark;
+
+  --c-deep: 6 8 13;
+  --c-bg: 10 12 19;
+  --c-s1: 16 19 28;
+  --c-s2: 22 26 38;
+  --c-s3: 29 34 49;
+  --c-s4: 39 45 64;
+  --c-line: 38 44 61;
+  --c-line2: 57 64 88;
+  --c-tx: 242 244 250;
+  --c-tx2: 179 187 207;
+  --c-tx3: 141 150 176;
+
+  --c-cy: 46 211 230;
+  --c-pk: 255 79 155;
+  --c-am: 255 194 71;
+  --c-gr: 61 220 151;
+  --c-rd: 255 90 82;
+  /* Text colour on a solid accent fill. */
+  --c-on: 6 18 26;
+  /* Text colour on a solid pink (live) fill. */
+  --on-pk: #1A0610;
+
+  --tint-cy: rgba(46, 211, 230, .14);
+  --tint-pk: rgba(255, 79, 155, .17);
+  --tint-am: rgba(255, 194, 71, .14);
+  --tint-gr: rgba(61, 220, 151, .14);
+  --tint-rd: rgba(255, 90, 82, .14);
+
+  --scrim: rgba(4, 6, 12, .72);
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, .4), 0 4px 14px rgba(0, 0, 0, .28);
+  --shadow-2: 0 10px 40px rgba(0, 0, 0, .55), 0 2px 8px rgba(0, 0, 0, .4);
+  --glow: 0 0 0 .17em #fff, 0 0 0 .5em rgba(46, 211, 230, .34);
+
+  /* Tailwind scales (see tailwind.config.js). */
+  --g-950: 6 8 13;
+  --g-900: 10 12 19;
+  --g-800: 22 26 38;
+  --g-700: 35 41 58;
+  --g-600: 57 64 88;
+  --g-500: 141 150 176;
+  --g-400: 160 169 194;
+  --g-300: 186 193 212;
+  --g-200: 215 220 233;
+  --g-100: 233 236 244;
+  --g-50: 246 247 251;
+  --g-white: 242 244 250;
+
+  --b-200: 182 241 248;
+  --b-300: 127 230 241;
+  --b-400: 79 220 236;
+  --b-500: 46 211 230;
+  --b-600: 46 211 230;
+  --b-700: 34 182 200;
+  --b-800: 19 120 136;
+  --b-900: 11 63 74;
+
+  --r-200: 255 201 197;
+  --r-300: 255 159 153;
+  --r-400: 255 122 115;
+  --r-500: 255 90 82;
+  --r-600: 255 90 82;
+  --r-700: 224 66 58;
+  --r-800: 122 30 28;
+  --r-900: 74 20 22;
+  --r-950: 46 12 14;
+
+  --gr-200: 184 245 220;
+  --gr-400: 95 230 172;
+  --gr-500: 61 220 151;
+  --gr-600: 61 220 151;
+  --gr-700: 43 184 123;
+  --gr-800: 23 113 77;
+  --gr-900: 14 74 51;
+
+  --y-300: 255 217 140;
+  --y-400: 255 194 71;
+  --y-500: 255 194 71;
+  --y-600: 230 170 40;
+  --y-700: 180 130 20;
+  --y-800: 110 80 12;
+  --y-950: 50 36 6;
+
+  --p-200: 255 199 224;
+  --p-400: 255 120 180;
+  --p-600: 255 79 155;
+  --p-700: 225 55 130;
+  --p-800: 120 28 70;
+}
+
+/* Light theme values, written once and attached to the two ways of asking for it. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    color-scheme: light;
+
+    --c-deep: 255 255 255;
+    --c-bg: 243 245 250;
+    --c-s1: 255 255 255;
+    --c-s2: 255 255 255;
+    --c-s3: 237 240 247;
+    --c-s4: 225 230 241;
+    --c-line: 221 226 238;
+    --c-line2: 196 204 221;
+    --c-tx: 14 18 32;
+    --c-tx2: 59 67 90;
+    --c-tx3: 90 100 128;
+
+    --c-cy: 8 105 124;
+    --c-pk: 176 20 88;
+    --c-am: 122 80 0;
+    --c-gr: 11 112 72;
+    --c-rd: 180 42 36;
+    --c-on: 255 255 255;
+    --on-pk: #fff;
+
+    --tint-cy: rgba(8, 105, 124, .1);
+    --tint-pk: rgba(176, 20, 88, .1);
+    --tint-am: rgba(122, 80, 0, .12);
+    --tint-gr: rgba(11, 112, 72, .1);
+    --tint-rd: rgba(180, 42, 36, .1);
+
+    --scrim: rgba(14, 18, 32, .5);
+    --shadow-1: 0 1px 2px rgba(20, 28, 54, .08), 0 4px 14px rgba(20, 28, 54, .08);
+    --shadow-2: 0 10px 40px rgba(20, 28, 54, .22), 0 2px 8px rgba(20, 28, 54, .12);
+    --glow: 0 0 0 .17em rgb(var(--c-bg)), 0 0 0 .34em rgb(var(--c-cy));
+
+    --g-950: 255 255 255;
+    --g-900: 243 245 250;
+    --g-800: 255 255 255;
+    --g-700: 225 230 241;
+    --g-600: 205 212 227;
+    --g-500: 90 100 128;
+    --g-400: 74 84 112;
+    --g-300: 52 60 84;
+    --g-200: 31 37 56;
+    --g-100: 20 25 40;
+    --g-50: 14 18 32;
+    --g-white: 14 18 32;
+
+    --b-200: 6 70 86;
+    --b-300: 6 88 106;
+    --b-400: 8 105 124;
+    --b-500: 8 105 124;
+    --b-600: 8 105 124;
+    --b-700: 6 88 106;
+    --b-800: 186 226 235;
+    --b-900: 205 236 242;
+
+    --r-200: 110 24 22;
+    --r-300: 150 32 28;
+    --r-400: 180 42 36;
+    --r-500: 180 42 36;
+    --r-600: 180 42 36;
+    --r-700: 150 32 28;
+    --r-800: 246 205 202;
+    --r-900: 251 226 224;
+    --r-950: 253 236 234;
+
+    --gr-200: 8 90 58;
+    --gr-400: 11 112 72;
+    --gr-500: 11 112 72;
+    --gr-600: 11 112 72;
+    --gr-700: 8 90 58;
+    --gr-800: 190 236 214;
+    --gr-900: 214 244 228;
+
+    --y-300: 100 66 0;
+    --y-400: 122 80 0;
+    --y-500: 122 80 0;
+    --y-600: 122 80 0;
+    --y-700: 100 66 0;
+    --y-800: 250 226 170;
+    --y-950: 253 241 208;
+
+    --p-200: 110 10 56;
+    --p-400: 176 20 88;
+    --p-600: 176 20 88;
+    --p-700: 146 14 72;
+    --p-800: 250 215 230;
+  }
+}
+
+:root[data-theme="light"],
+.scope-light {
+  color-scheme: light;
+
+  --c-deep: 255 255 255;
+  --c-bg: 243 245 250;
+  --c-s1: 255 255 255;
+  --c-s2: 255 255 255;
+  --c-s3: 237 240 247;
+  --c-s4: 225 230 241;
+  --c-line: 221 226 238;
+  --c-line2: 196 204 221;
+  --c-tx: 14 18 32;
+  --c-tx2: 59 67 90;
+  --c-tx3: 90 100 128;
+
+  --c-cy: 8 105 124;
+  --c-pk: 176 20 88;
+  --c-am: 122 80 0;
+  --c-gr: 11 112 72;
+  --c-rd: 180 42 36;
+  --c-on: 255 255 255;
+  --on-pk: #fff;
+
+  --tint-cy: rgba(8, 105, 124, .1);
+  --tint-pk: rgba(176, 20, 88, .1);
+  --tint-am: rgba(122, 80, 0, .12);
+  --tint-gr: rgba(11, 112, 72, .1);
+  --tint-rd: rgba(180, 42, 36, .1);
+
+  --scrim: rgba(14, 18, 32, .5);
+  --shadow-1: 0 1px 2px rgba(20, 28, 54, .08), 0 4px 14px rgba(20, 28, 54, .08);
+  --shadow-2: 0 10px 40px rgba(20, 28, 54, .22), 0 2px 8px rgba(20, 28, 54, .12);
+  --glow: 0 0 0 .17em rgb(var(--c-bg)), 0 0 0 .34em rgb(var(--c-cy));
+
+  --g-950: 255 255 255;
+  --g-900: 243 245 250;
+  --g-800: 255 255 255;
+  --g-700: 225 230 241;
+  --g-600: 205 212 227;
+  --g-500: 90 100 128;
+  --g-400: 74 84 112;
+  --g-300: 52 60 84;
+  --g-200: 31 37 56;
+  --g-100: 20 25 40;
+  --g-50: 14 18 32;
+  --g-white: 14 18 32;
+
+  --b-200: 6 70 86;
+  --b-300: 6 88 106;
+  --b-400: 8 105 124;
+  --b-500: 8 105 124;
+  --b-600: 8 105 124;
+  --b-700: 6 88 106;
+  --b-800: 186 226 235;
+  --b-900: 205 236 242;
+
+  --r-200: 110 24 22;
+  --r-300: 150 32 28;
+  --r-400: 180 42 36;
+  --r-500: 180 42 36;
+  --r-600: 180 42 36;
+  --r-700: 150 32 28;
+  --r-800: 246 205 202;
+  --r-900: 251 226 224;
+  --r-950: 253 236 234;
+
+  --gr-200: 8 90 58;
+  --gr-400: 11 112 72;
+  --gr-500: 11 112 72;
+  --gr-600: 11 112 72;
+  --gr-700: 8 90 58;
+  --gr-800: 190 236 214;
+  --gr-900: 214 244 228;
+
+  --y-300: 100 66 0;
+  --y-400: 122 80 0;
+  --y-500: 122 80 0;
+  --y-600: 122 80 0;
+  --y-700: 100 66 0;
+  --y-800: 250 226 170;
+  --y-950: 253 241 208;
+
+  --p-200: 110 10 56;
+  --p-400: 176 20 88;
+  --p-600: 176 20 88;
+  --p-700: 146 14 72;
+  --p-800: 250 215 230;
+}
+
+/* Ready-to-use colours, resolved on whichever element defines the triplets. */
+:root,
+.scope-dark,
+.scope-light {
+  --deep: rgb(var(--c-deep));
+  --bg: rgb(var(--c-bg));
+  --s1: rgb(var(--c-s1));
+  --s2: rgb(var(--c-s2));
+  --s3: rgb(var(--c-s3));
+  --s4: rgb(var(--c-s4));
+  --line: rgb(var(--c-line));
+  --line2: rgb(var(--c-line2));
+  --tx: rgb(var(--c-tx));
+  --tx2: rgb(var(--c-tx2));
+  --tx3: rgb(var(--c-tx3));
+  --cy: rgb(var(--c-cy));
+  --pk: rgb(var(--c-pk));
+  --am: rgb(var(--c-am));
+  --gr: rgb(var(--c-gr));
+  --rd: rgb(var(--c-rd));
+  --on: rgb(var(--c-on));
+}
+
+:root {
+  --f-ui: 'Figtree', system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --f-disp: 'Bricolage Grotesque', 'Figtree', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --f-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  --r-sm: 8px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 20px;
+
+  /* Layout metrics the shell and pages share. */
+  --rail-w: 5.9em;
+  --tabbar-h: 4.25rem;
+  --safe-x: 0px;
+  --safe-y: 0px;
+}

@@ -684,6 +684,17 @@ const renderSourceTable = (sourceType) => {
  * Updates all settings UI elements based on the current state.
  * MODIFIED: Removed redundant admin checks as this page is now admin-only.
  */
+/** Chips at the top of Settings that jump to each visible section. */
+export const renderSettingsNav = () => {
+    const nav = document.getElementById('settings-nav');
+    const heads = [...document.querySelectorAll('#page-settings h2')].filter(h => h.offsetParent);
+    nav.innerHTML = heads.map((h, i) => `<button type="button" class="chip" data-i="${i}">${escapeHtml(h.textContent.trim())}</button>`).join('');
+    nav.onclick = (e) => {
+        const chip = e.target.closest('[data-i]');
+        if (chip) heads[chip.dataset.i].scrollIntoView({ block: 'start', behavior: 'smooth' });
+    };
+};
+
 export const updateUIFromSettings = async () => {
     const settings = guideState.settings;
 

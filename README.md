@@ -190,14 +190,19 @@ The project is organized into a Node.js backend and a modular vanilla JavaScript
 │   │       ├── auth.js              # Authentication flow
 │   │       ├── cast.js              # Google Cast logic
 │   │       ├── dvr.js               # DVR logic
+│   │       ├── focus.js             # Keyboard and remote-control navigation
 │   │       ├── guide.js             # TV Guide logic & rendering
+│   │       ├── home.js              # Home page
 │   │       ├── multiview.js         # Multi-View grid and players
 │   │       ├── notification.js      # Push notification management
+│   │       ├── osd.js               # Player now/next card and channel list
+│   │       ├── palette.js           # Search (press /)
 │   │       ├── player.js            # Video player (mpegts.js)
 │   │       ├── settings.js          # Settings page logic
 │   │       ├── state.js             # Shared application state
 │   │       ├── ui.js                # Global UI functions (modals, etc.)
 │   │       └── utils.js             # Utility functions (parsers)
+│   ├── css/                         # Design tokens, component styles and the built Tailwind file
 │   ├── sw.js                        # Service Worker for push notifications
 │   └── index.html                   # Main HTML file
 │
@@ -208,6 +213,12 @@ The project is organized into a Node.js backend and a modular vanilla JavaScript
 └── .env                             # Environment variables (e.g., SESSION_SECRET)
 
 ```
+
+### Styling
+
+The look is called Signal Ink: colors, fonts and sizes live in `public/css/tokens.css` (dark by default, with a light theme), the component styles are the other files in `public/css/`, and `public/css/tailwind.css` is a prebuilt Tailwind file. After you add or change Tailwind classes in `public/index.html` or `public/js/`, run `npm run build:css` and commit the result.
+
+On a TV the interface switches to a larger layout with a visible focus ring and remote-friendly navigation (arrows, OK, Back, number keys, CH +/-). It turns on by itself for TV browsers, or you can pick Auto, On or Off in the account menu. Press `?` anywhere to see the shortcuts.
 
 ---
 ## 🏗️ Roadmap

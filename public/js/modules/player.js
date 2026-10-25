@@ -512,7 +512,7 @@ export function toggleAudioOnly(forceState = null) {
             titleEl.textContent = currentChannelInfo?.name || UIElements.videoTitle?.textContent || 'Audio Playback';
         }
         if (logoEl) {
-            const logoSrc = currentChannelInfo?.logo || '/viniplay.png';
+            const logoSrc = currentChannelInfo?.logo || '/icons/icon-192.png';
             logoEl.src = logoSrc;
             logoEl.classList.remove('hidden');
         }
@@ -697,6 +697,7 @@ export const stopAndCleanupPlayer = async () => { // MODIFIED: Made function asy
     }
     retryCount = 0;
     currentChannelInfo = null;
+    document.dispatchEvent(new CustomEvent('playerstop'));
 
 
     // Explicitly tell the server to stop the stream process.
@@ -893,6 +894,7 @@ export const playChannel = (url, name, channelId) => {
 
     // Store current channel info for potential retries and overlays
     currentChannelInfo = { url, name, channelId, logo };
+    document.dispatchEvent(new CustomEvent('playchannel', { detail: channelId })); // osd.js shows the now/next card
     sendTelemetry('PLAYER_PLAY_CHANNEL', `playChannel initiated for "${name}" (${channelId})`, {
         url,
         profileId: guideState.settings.activeStreamProfileId
@@ -1059,7 +1061,7 @@ export const playRecordingOrDirectVideo = async (url, title, logo = '', isVod = 
         UIElements.videoTitle.textContent = title;
     }
     currentChannelInfo = { url, name: title, channelId: null, logo };
-    updateMediaSession(title, logo || '/viniplay.png');
+    updateMediaSession(title, logo || '/icons/icon-192.png');
 
     // 3. Hide live-only buttons (like refresh-stream-btn)
     const refreshBtn = document.getElementById('refresh-stream-btn');
@@ -1437,7 +1439,7 @@ export const playVOD = async (url, title, logo = '', startTime = 0, knownDuratio
         }
         UIElements.videoTitle.textContent = title;
         currentChannelInfo = { url, name: title, channelId: null, logo };
-        updateMediaSession(title, logo || '/viniplay.png');
+        updateMediaSession(title, logo || '/icons/icon-192.png');
         const refreshBtn = document.getElementById('refresh-stream-btn');
         if (refreshBtn) refreshBtn.classList.add('hidden');
 

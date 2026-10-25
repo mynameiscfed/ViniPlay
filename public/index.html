@@ -5,1389 +5,62 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>VINI PLAY</title>
-    <link rel="icon" type="image/png" href="/viniplay.png">
+    <link rel="icon" type="image/svg+xml" href="/logo.svg">
+    <link rel="alternate icon" type="image/png" href="/icons/icon-192.png">
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
     <link rel="manifest" href="/manifest.json">
-    <meta name="theme-color" content="#111827">
+    <meta name="theme-color" content="#0A0C13" media="(prefers-color-scheme: dark)">
+    <meta name="theme-color" content="#F3F5FA" media="(prefers-color-scheme: light)">
+    <meta name="color-scheme" content="dark light">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- Apply the saved theme and TV mode before first paint so there is no flash. -->
+    <script>
+        (function () {
+            try {
+                var d = document.documentElement;
+                var theme = localStorage.getItem('viniplay.theme');
+                if (theme === 'light' || theme === 'dark') d.setAttribute('data-theme', theme);
+                var tvPref = localStorage.getItem('viniplay.tv');
+                var tvUa = /SMART-?TV|Tizen|Web0S|webOS|BRAVIA|HbbTV|Android TV|AFT[A-Z]|CrKey/i.test(navigator.userAgent);
+                if (tvPref === 'on' || (tvPref !== 'off' && (tvUa || /[?&]tv=1\b/.test(location.search)))) {
+                    d.classList.add('tv', 'kb');
+                }
+            } catch (e) { }
+        })();
+    </script>
+
+    <link rel="preload" href="/fonts/figtree-latin.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="/fonts/bricolage-grotesque-latin.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="stylesheet" href="/css/fonts.css?v=1">
+    <link rel="stylesheet" href="/css/tokens.css?v=2">
+    <link rel="stylesheet" href="/css/tailwind.css?v=1">
+    <link rel="stylesheet" href="/css/base.css?v=2">
+    <link rel="stylesheet" href="/css/shell.css?v=3">
+    <link rel="stylesheet" href="/css/guide.css?v=1">
+    <link rel="stylesheet" href="/css/home.css?v=6">
+    <link rel="stylesheet" href="/css/legacy.css?v=6">
+    <link rel="stylesheet" href="/css/player.css?v=1">
+    <link rel="stylesheet" href="/css/tv.css?v=1">
+
     <script src="https://cdn.jsdelivr.net/npm/mpegts.js/dist/mpegts.js"></script>
     <!-- Hls.js for Live DVR Timeshift / Chase Play -->
     <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/fuse.js/dist/fuse.min.js"></script>
-    <!-- NEW: Google Cast Framework -->
+    <!-- Google Cast Framework -->
     <script src="https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1"></script>
-    <!-- NEW: Gridstack.js for Multi-View -->
+    <!-- Gridstack.js for Multi-View -->
     <link href="https://cdn.jsdelivr.net/npm/gridstack@10.1.2/dist/gridstack.min.css" rel="stylesheet" />
     <script src="https://cdn.jsdelivr.net/npm/gridstack@10.1.2/dist/gridstack-all.js"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <style>
-        html, body {
-            overscroll-behavior-y: contain;
-        }
-
-        body {
-            font-family: 'Inter', sans-serif;
-            background-color: #111827;
-            color: #d1d5db;
-        }
-
-        .custom-scrollbar::-webkit-scrollbar {
-            height: 8px;
-            width: 8px;
-        }
-
-        .custom-scrollbar::-webkit-scrollbar-track {
-            background: #1f2937;
-        }
-
-        .custom-scrollbar::-webkit-scrollbar-thumb {
-            background: #4b5563;
-            border-radius: 4px;
-        }
-
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-            background: #6b7280;
-        }
-
-        .tab-button.active {
-            background-color: #3b82f6;
-            color: white;
-        }
-
-        .bottom-nav-btn.active {
-            color: #3b82f6;
-        }
-
-        /* Kept for backward compatibility, will be removed by HTML */
-        .programme-item {
-            border-left: 3px solid #3b82f6;
-            transition: all 0.2s;
-        }
-
-        .programme-item:hover {
-            background-color: #374151;
-            cursor: pointer;
-        }
-
-        html,
-        body {
-            height: 100%;
-            overflow: hidden;
-        }
-
-        /* Ensure body doesn't scroll, let inner divs handle it */
-        .favorite-star {
-            transition: all 0.2s;
-        }
-
-        .favorite-star.favorited {
-            color: #facc15;
-            transform: scale(1.2);
-        }
-
-        .programme-progress {
-            position: absolute;
-            top: 0;
-            left: 0;
-            bottom: 0;
-            background-color: rgba(59, 130, 246, 0.3);
-            border-radius: 2px 0 0 2px;
-            pointer-events: none;
-            transition: width 0.3s linear;
-        }
-
-        .programme-item.past {
-            background-color: #374151;
-            border-left-color: #6b7280;
-            opacity: 0.6;
-        }
-
-        .programme-item.live {
-            border-left: 4px solid #fb923c;
-            background-color: #374151;
-        }
-
-        .programme-item.live::after {
-            content: 'LIVE';
-            position: absolute;
-            top: 4px;
-            right: 4px;
-            background-color: #ef4444;
-            color: white;
-            padding: 1px 4px;
-            font-size: 0.65rem;
-            font-weight: 700;
-            border-radius: 4px;
-            z-index: 20;
-        }
-
-        .programme-item .prog-title {
-            font-size: 0.9rem;
-            font-weight: 600;
-        }
-
-        .programme-item .prog-time {
-            font-size: 0.75rem;
-        }
-
-        #group-filter,
-        #source-filter,
-        #search-input {
-            transition: all 0.2s ease;
-        }
-
-        #group-filter:hover,
-        #source-filter:hover,
-        #search-input:hover {
-            background-color: #4b5563;
-        }
-
-        body.modal-open {
-            overflow: hidden;
-        }
-
-        button:disabled {
-            cursor: not-allowed;
-            opacity: 0.6;
-        }
-
-        .loader {
-            border: 4px solid #f3f3f3;
-            border-top: 4px solid #3b82f6;
-            border-radius: 50%;
-            width: 40px;
-            height: 40px;
-            animation: spin 1s linear infinite;
-        }
-
-        @keyframes spin {
-            0% {
-                transform: rotate(0deg);
-            }
-
-            100% {
-                transform: rotate(360deg);
-            }
-        }
-
-        .resize-handle {
-            position: absolute;
-            bottom: 0;
-            right: 0;
-            width: 28px;
-            height: 28px;
-            cursor: se-resize;
-            z-index: 50;
-            touch-action: none;
-        }
-
-        .resize-handle::after {
-            content: '';
-            position: absolute;
-            display: block;
-            width: 14px;
-            height: 14px;
-            bottom: 3px;
-            right: 3px;
-            background-image: linear-gradient(45deg, #9ca3af 25%, transparent 25%, transparent 75%, #9ca3af 75%), linear-gradient(45deg, #9ca3af 25%, transparent 25%, transparent 75%, #9ca3af 75%);
-            background-size: 6px 6px;
-            background-position: 0 0, 3px 3px;
-            opacity: 0.8;
-            transition: opacity 0.2s, transform 0.2s;
-        }
-
-        .resize-handle:hover::after {
-            opacity: 1;
-            transform: scale(1.15);
-        }
-
-        #video-modal-container {
-            min-width: 400px;
-            min-height: 300px;
-            position: relative;
-            overflow: visible;
-        }
-
-        #program-details-container {
-            min-width: 320px;
-            max-height: 90vh;
-            position: relative;
-        }
-
-        #details-desc {
-            overflow-y: auto;
-        }
-
-        .programme-item.highlighted-search {
-            outline: 3px solid #facc15;
-            box-shadow: 0 0 15px rgba(250, 204, 21, 0.5), inset 0 0 0 2px #facc15;
-            z-index: 15;
-            transition: all 0.3s ease-out;
-            transform: scale(1.02);
-        }
-
-        .programme-item.search-match {
-            box-shadow: inset 0 0 0 2px #facc15;
-            background-color: #3f3a1d;
-        }
-
-        .channel-name {
-            display: -webkit-box;
-            -webkit-box-orient: vertical;
-            -webkit-line-clamp: 3;
-            line-clamp: 3;
-            overflow: hidden;
-            overflow-wrap: anywhere;
-            word-break: break-word;
-            white-space: normal;
-            font-size: 0.8125rem;
-            line-height: 1.1rem;
-        }
-
-        .search-results-header {
-            padding: 0.5rem 0.75rem;
-            background-color: #374151;
-            /* gray-700 */
-            color: #d1d5db;
-            /* gray-300 */
-            font-size: 0.75rem;
-            /* text-xs */
-            font-weight: 700;
-            /* font-bold */
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            border-bottom: 1px solid #4b5563;
-            /* gray-600 */
-        }
-
-        .sources-table th,
-        .admin-table th {
-            @apply px-4 py-2 text-left text-xs font-medium text-gray-400 uppercase tracking-wider;
-        }
-
-        .dvr-table th {
-            @apply px-6 py-3.5 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider bg-gray-800/80;
-        }
-
-        .sources-table td,
-        .admin-table td {
-            @apply px-4 py-3 whitespace-nowrap text-sm text-gray-300;
-        }
-
-        .dvr-table td {
-            @apply px-6 py-4 whitespace-nowrap text-sm text-gray-300;
-        }
-
-        .sources-table tbody tr,
-        .dvr-table tbody tr,
-        .admin-table tbody tr {
-            @apply border-b border-gray-700/50;
-        }
-
-        .sources-table tbody tr:last-child,
-        .dvr-table tbody tr:last-child,
-        .admin-table tbody tr:last-child {
-            @apply border-none;
-        }
-
-        .sources-table .action-btn,
-        .dvr-table .action-btn,
-        .admin-table .action-btn {
-            @apply text-gray-400 hover:text-white transition-colors;
-        }
-
-        /* Custom Switch */
-        .switch {
-            position: relative;
-            display: inline-block;
-            width: 38px;
-            height: 22px;
-        }
-
-        .switch input {
-            opacity: 0;
-            width: 0;
-            height: 0;
-        }
-
-        .slider {
-            position: absolute;
-            cursor: pointer;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background-color: #4b5563;
-            transition: .4s;
-            border-radius: 22px;
-        }
-
-        .slider:before {
-            position: absolute;
-            content: "";
-            height: 16px;
-            width: 16px;
-            left: 3px;
-            bottom: 3px;
-            background-color: white;
-            transition: .4s;
-            border-radius: 50%;
-        }
-
-        input:checked+.slider {
-            background-color: #2563eb;
-        }
-
-        input:focus+.slider {
-            box-shadow: 0 0 1px #2563eb;
-        }
-
-        input:checked+.slider:before {
-            transform: translateX(16px);
-        }
-
-        .source-badge {
-            font-size: 0.6rem;
-            font-weight: 700;
-            padding: 2px 6px;
-            border-radius: 10px;
-            margin-left: 8px;
-            flex-shrink: 0;
-            text-transform: uppercase;
-        }
-
-        .source-badge {
-            font-size: 0.6rem;
-            font-weight: 700;
-            padding: 2px 6px;
-            border-radius: 10px;
-            flex-shrink: 0;
-            text-transform: uppercase;
-        }
-
-        .channel-info .source-badge {
-            margin-left: 0;
-            min-width: 0;
-            max-width: 100%;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
-
-        .chno-badge {
-            font-size: 0.65rem;
-            font-weight: 600;
-            padding: 2px 6px;
-            border-radius: 4px;
-            background-color: #3b82f6;
-            color: white;
-            flex-shrink: 0;
-        }
-
-        /* --- Guide Grid Styles for sticky headers --- */
-        #guide-container {
-            flex-grow: 1;
-            /* Make it fill available space */
-            background-color: #111827;
-            /* Match body background */
-            overflow: auto;
-            /* Handles both vertical and horizontal scrolling */
-            position: relative;
-            /* For the now-line's absolute positioning relative to scrolled content */
-        }
-
-        #guide-grid {
-            display: grid;
-            grid-template-columns: var(--channel-col-width, 180px) 1fr;
-            /* Sticky channel info, then scrollable timeline */
-            grid-auto-rows: min-content;
-            /* Rows size to content, important for first row sticky */
-            position: relative;
-            /* For now-line absolute positioning */
-            min-width: fit-content;
-            /* Ensure grid stretches to contain wide timeline */
-            height: fit-content;
-            /* Allow content to dictate height */
-        }
-
-        .sticky-corner {
-            position: sticky;
-            top: 0;
-            left: 0;
-            z-index: 45;
-            /* FIX: Increased z-index to be above all other headers */
-            background-color: #1a2233;
-            /* Match channel-info background */
-            height: 64px;
-            /* Explicit height, matches time-bar-cell */
-            width: var(--channel-col-width, 180px);
-            border-bottom: 1px solid #374151;
-            border-right: 1px solid #374151;
-            box-sizing: border-box;
-            display: flex;
-            flex-direction: column;
-            align-items: flex-start;
-            justify-content: center;
-            padding: 8px;
-        }
-
-        .channel-resize-handle {
-            position: absolute;
-            top: 0;
-            right: 0;
-            bottom: 0;
-            width: 8px;
-            cursor: ew-resize;
-            z-index: 35;
-        }
-
-        .channel-resize-handle::after {
-            content: '';
-            position: absolute;
-            display: block;
-            width: 2px;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            height: 60%;
-            background-color: #9ca3af;
-            opacity: 0.6;
-            border-radius: 1px;
-        }
-
-        .channel-resize-handle:hover::after {
-            opacity: 1;
-            background-color: #ffffff;
-        }
-
-        .time-bar-cell {
-            position: sticky;
-            top: 0;
-            left: 0;
-            /* Reset position */
-            z-index: 25;
-            background-color: #111827;
-            height: 64px;
-            display: flex;
-            align-items: center;
-            border-bottom: 1px solid #374151;
-            box-sizing: border-box;
-            overflow: hidden;
-            grid-column: 2;
-            /* Explicitly place in second column */
-        }
-
-        .channel-info {
-            position: sticky;
-            left: 0;
-            z-index: 30;
-            background-color: #1a2233;
-            border-right: 1px solid #374151;
-            box-sizing: border-box;
-            height: 96px;
-            width: var(--channel-col-width, 180px);
-        }
-
-        .timeline-row {
-            position: relative;
-            height: 96px;
-        }
-
-        #now-line {
-            position: absolute;
-            top: 0;
-            background-color: #ef4444;
-            width: 2px;
-            z-index: 28;
-            pointer-events: none;
-            transition: left 0.5s ease;
-            height: 100%;
-        }
-
-        @media (max-width: 767px) {
-            /* Keep channel names visible on mobile: the column stays narrow (see main.js),
-               so shrink the text and let it wrap onto more lines instead of hiding it. */
-            .channel-name {
-                font-size: 0.72rem;
-                line-height: 0.95rem;
-                -webkit-line-clamp: 4;
-                line-clamp: 4;
-            }
-
-            .channel-info .source-badge,
-            .channel-info .chno-badge {
-                font-size: 0.55rem;
-                padding: 1px 4px;
-            }
-
-            .channel-resize-handle {
-                display: none;
-            }
-        }
-
-        #main-header,
-        #unified-guide-header {
-            transition: transform 0.3s ease-out, opacity 0.3s ease-out, max-height 0.3s ease-out, padding 0.3s ease-out, margin 0.3s ease-out, border-width 0.3s ease-out;
-            /* Add padding, margin, border-width to transition */
-            transform: translateY(0);
-            opacity: 1;
-            max-height: 200px;
-            /* Set a generous max-height for non-collapsed state */
-            overflow: hidden;
-            flex-shrink: 0;
-            box-shadow: none;
-            padding-top: initial;
-            /* Ensure padding is managed */
-            padding-bottom: initial;
-            /* Ensure padding is managed */
-            z-index: 35;
-        }
-
-        #main-header {
-            padding: 1rem;
-            z-index: 40;
-        }
-
-        #unified-guide-header {
-            padding: 0.5rem 1rem;
-        }
-
-        #app-container.header-collapsed #main-header,
-        #app-container.header-collapsed #unified-guide-header {
-            transform: translateY(-100%);
-            opacity: 0;
-            max-height: 0 !important;
-            /* Force max-height to 0 */
-            padding: 0 !important;
-            /* Force padding to 0 */
-            margin: 0 !important;
-            /* Force margin to 0 */
-            border-width: 0 !important;
-            /* Force border to 0 */
-            pointer-events: none;
-        }
-
-        #page-guide {
-            transition: padding-top 0.3s ease-out;
-        }
-
-        .programme-item.has-notification {
-            border-bottom: 3px solid #facc15;
-        }
-
-        .programme-item.has-recording.status-scheduled {
-            border-bottom: 3px solid #3b82f6;
-        }
-
-        .programme-item.has-recording.status-recording {
-            border-bottom: 3px solid #ef4444;
-        }
-
-        .programme-item.has-recording.status-completed {
-            border-bottom: 3px solid #22c55e;
-        }
-
-        .programme-item.has-recording.status-error {
-            border-bottom: 3px solid #f97316;
-        }
-
-        .programme-item.has-recording.status-cancelled {
-            border-bottom: 3px solid #6b7280;
-        }
-
-        #page-multiview {
-            background-color: #111827;
-        }
-
-        .grid-stack {
-            background-color: #1f2937;
-            background-image:
-                linear-gradient(rgba(107, 114, 128, 0.1) 1px, transparent 1px),
-                linear-gradient(90deg, rgba(107, 114, 128, 0.1) 1px, transparent 1px);
-        }
-
-        .grid-stack-item-content {
-            display: flex;
-            flex-direction: column;
-            background-color: #1f2937;
-            color: #d1d5db;
-            border-radius: 0.5rem;
-            overflow: hidden;
-            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
-            transition: box-shadow 0.2s;
-        }
-
-        .grid-stack-item-content.active-player {
-            box-shadow: 0 0 0 3px #3b82f6, 0 0 15px rgba(59, 130, 246, 0.5);
-        }
-
-        .player-header {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 0.25rem 0.5rem;
-            background-color: #374151;
-            cursor: move;
-            flex-shrink: 0;
-        }
-
-        .player-header-title {
-            font-size: 0.875rem;
-            font-weight: 500;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-        }
-
-        .player-controls {
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-        }
-
-        .player-controls button {
-            background: none;
-            border: none;
-            color: #9ca3af;
-            padding: 0.25rem;
-            border-radius: 9999px;
-            transition: all 0.2s;
-        }
-
-        .player-controls button:hover {
-            color: white;
-            background-color: #4b5563;
-        }
-
-        .player-controls .volume-slider {
-            width: 60px;
-            height: 4px;
-            accent-color: #3b82f6;
-        }
-
-        .player-body {
-            flex-grow: 1;
-            flex-shrink: 0;
-            flex-basis: auto;
-            height: auto;
-            position: relative;
-            background-color: black;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-        }
-
-        .player-placeholder {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            text-align: center;
-            color: #6b7280;
-            cursor: pointer;
-            width: 100%;
-            height: auto;
-            flex-grow: 1;
-            flex-shrink: 0;
-            flex-basis: auto;
-            min-height: 0;
-            overflow: hidden;
-            transition: background-color 0.2s;
-        }
-
-        .player-placeholder:hover {
-            background-color: #374151;
-        }
-
-        .player-placeholder svg {
-            width: 2rem;
-            height: 2rem;
-            margin-bottom: 0.5rem;
-        }
-
-        .channel-selector-list {
-            max-height: 400px;
-        }
-
-        #guide-date-picker::-webkit-calendar-picker-indicator {
-            display: none;
-            -webkit-appearance: none;
-        }
-
-        #cast-btn svg path {
-            transition: all 0.2s ease-in-out;
-        }
-
-        #cast-btn.cast-connected {
-            color: #3b82f6;
-        }
-
-        #cast-btn.cast-connected:hover {
-            color: #60a5fa;
-        }
-
-        .status-badge {
-            font-size: 0.7rem;
-            font-weight: 600;
-            padding: 3px 8px;
-            border-radius: 9999px;
-            text-transform: capitalize;
-            border: none;
-            cursor: default;
-        }
-
-        .status-badge.view-error-btn {
-            cursor: pointer;
-            text-decoration: underline;
-        }
-
-        .status-badge.recording {
-            background-color: #ef4444;
-            color: white;
-        }
-
-        .status-badge.reconnecting {
-            background-color: #d97706;
-            color: white;
-            animation: pulse-badge 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite;
-        }
-
-        @keyframes pulse-badge {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.6; }
-        }
-
-        .status-badge.scheduled {
-            background-color: #3b82f6;
-            color: white;
-        }
-
-        .status-badge.completed {
-            background-color: #22c55e;
-            color: white;
-        }
-
-        .status-badge.error {
-            background-color: #f97316;
-            color: white;
-        }
-
-        .status-badge.cancelled {
-            background-color: #6b7280;
-            color: white;
-        }
-
-        #notification-modal-wrapper {
-            position: fixed;
-            top: 1.25rem;
-            right: 1.25rem;
-            z-index: 100;
-            pointer-events: none;
-        }
-
-        #notification-modal-wrapper.hidden {
-            display: none;
-        }
-
-        #notification-box {
-            color: white;
-            padding: 0.5rem 1rem;
-            border-radius: 0.5rem;
-            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
-            pointer-events: all;
-            opacity: 0;
-            transform: translateY(-20px);
-            transition: opacity 0.3s ease-out, transform 0.3s ease-out, background-color 0.2s ease-in-out;
-            min-width: 250px;
-            text-align: center;
-            background-color: #ef4444;
-        }
-
-        #notification-modal-wrapper:not(.hidden) #notification-box {
-            opacity: 1;
-            transform: translateY(0);
-        }
-
-        #notification-box.success-bg {
-            background-color: #22c55e;
-        }
-
-        #notification-box.error-bg {
-            background-color: #ef4444;
-        }
-
-        /* Styles for the direct player page */
-        #direct-player-container {
-            width: 100%;
-            max-width: 960px;
-            aspect-ratio: 16 / 9;
-            background-color: #000;
-            border-radius: 0.5rem;
-            overflow: hidden;
-            box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
-        }
-
-        #direct-player-console {
-            background-color: #1f2937;
-            border: 1px solid #374151;
-            border-radius: 0.5rem;
-            padding: 0.75rem;
-            font-family: monospace;
-            font-size: 0.875rem;
-            color: #d1d5db;
-            height: 120px;
-            overflow-y: auto;
-        }
-
-        /* NEW: Stream info overlay styles */
-        #stream-info-overlay {
-            position: absolute;
-            top: 1rem;
-            left: 1rem;
-            background-color: rgba(0, 0, 0, 0.7);
-            color: white;
-            padding: 0.5rem 0.75rem;
-            border-radius: 0.5rem;
-            font-size: 0.75rem;
-            font-family: monospace;
-            pointer-events: none;
-            z-index: 10;
-        }
-
-        #stream-info-overlay p {
-            margin: 0;
-            line-height: 1.4;
-        }
-
-        /* MODIFIED: Added styles for icon placeholders */
-        [data-icon] {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-        }
-
-        [data-icon]>svg {
-            width: 1.25rem;
-            /* Corresponds to w-5 */
-            height: 1.25rem;
-            /* Corresponds to h-5 */
-        }
-
-        /* Mobile menu icon size */
-        #mobile-menu-toggle [data-icon]>svg {
-            width: 1.5rem;
-            /* w-6 */
-            height: 1.5rem;
-            /* h-6 */
-        }
-
-        /* Player widget icon size */
-        .player-controls [data-icon]>svg {
-            width: 1rem;
-            /* w-4 */
-            height: 1rem;
-            /* h-4 */
-        }
-
-        /* Mobile nav icon size */
-        #mobile-nav-menu [data-icon]>svg {
-            width: 1.5rem;
-            /* w-6 */
-            height: 1.5rem;
-            /* h-6 */
-        }
-
-        /* NEW: Broadcast Banner Styles */
-        #broadcast-banner-container {
-            position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
-            z-index: 200;
-            pointer-events: none;
-        }
-
-        .broadcast-banner {
-            background-color: #fb923c;
-            color: #431407;
-            padding: 0.75rem;
-            text-align: center;
-            font-weight: 500;
-            opacity: 0;
-            transform: translateY(-100%);
-            transition: opacity 0.5s, transform 0.5s;
-            pointer-events: all;
-        }
-
-        .broadcast-banner.visible {
-            opacity: 1;
-            transform: translateY(0);
-        }
-
-        .clickable-username {
-            cursor: pointer;
-            text-decoration: underline;
-            text-decoration-color: #6b7280;
-            transition: color 0.2s;
-        }
-
-        .clickable-username:hover {
-            color: #60a5fa;
-        }
-
-        .pagination-btn {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            padding: 0.375rem 0.75rem;
-            min-width: 2.25rem;
-            height: 2.25rem;
-            font-size: 0.875rem;
-            line-height: 1.25rem;
-            font-weight: 500;
-            color: #9ca3af;
-            background-color: #1f2937;
-            border: 1px solid #374151;
-            border-radius: 0.5rem;
-            cursor: pointer;
-            transition: all 0.15s ease-in-out;
-            user-select: none;
-        }
-
-        .pagination-btn:hover:not(:disabled):not(.active) {
-            background-color: #374151;
-            color: #ffffff;
-            border-color: #4b5563;
-        }
-
-        .pagination-btn.active {
-            color: #ffffff;
-            font-weight: 700;
-            background-color: #2563eb;
-            border-color: #3b82f6;
-            box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.4);
-            cursor: default;
-        }
-
-        .pagination-btn:disabled {
-            opacity: 0.4;
-            cursor: not-allowed;
-        }
-
-        .pagination-ellipsis {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            min-width: 2rem;
-            height: 2.25rem;
-            font-size: 0.875rem;
-            color: #6b7280;
-            user-select: none;
-        }
-
-        .transcode-indicator {
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            display: inline-block;
-        }
-
-        /* --- NEW: VOD Page Styles --- */
-        .vod-item {
-            background-color: #1f2937;
-            /* bg-gray-800 */
-            border-radius: 0.5rem;
-            /* rounded-lg */
-            overflow: hidden;
-            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
-            /* shadow-lg */
-            transition: all 0.2s;
-            cursor: pointer;
-            transform: scale(1);
-            position: relative;
-            /* For the badge */
-        }
-
-        .vod-item:hover {
-            box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
-            /* shadow-xl */
-            transform: scale(1.05);
-            z-index: 10;
-        }
-
-        .vod-item-poster {
-            width: 100%;
-            background-color: #374151;
-            /* bg-gray-700 */
-            aspect-ratio: 2 / 3;
-            /* For vertical movie posters */
-        }
-
-        .vod-item-poster img {
-            width: 100%;
-            height: 100%;
-            object-fit: cover;
-        }
-
-        .vod-item-info {
-            padding: 0.5rem 0.75rem;
-            /* p-2 p-3 */
-        }
-
-        .vod-item-title {
-            font-size: 0.875rem;
-            /* text-sm */
-            font-weight: 600;
-            /* font-semibold */
-            color: white;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-        }
-
-        .vod-item-type {
-            font-size: 0.75rem;
-            /* text-xs */
-            color: #9ca3af;
-            /* text-gray-400 */
-            text-transform: capitalize;
-        }
-
-        .vod-type-badge {
-            position: absolute;
-            top: 0.5rem;
-            /* top-2 */
-            left: 0.5rem;
-            /* left-2 */
-            background-color: rgba(0, 0, 0, 0.7);
-            color: white;
-            font-size: 0.75rem;
-            /* text-xs */
-            font-weight: 700;
-            /* font-bold */
-            padding: 0.25rem 0.5rem;
-            /* py-1 px-2 */
-            border-radius: 0.25rem;
-            /* rounded */
-        }
-
-        /* --- NEW: Group Filter Modal Styles --- */
-        .group-filter-tab-btn.active {
-            background-color: #3b82f6;
-            color: white;
-        }
-
-        .group-filter-tab-btn {
-            font-size: 0.875rem;
-            /* text-sm */
-            font-weight: 500;
-            /* font-medium */
-            padding: 0.5rem 1rem;
-            /* py-2 px-4 */
-            color: #d1d5db;
-            /* text-gray-300 */
-            border-radius: 0.375rem;
-            /* rounded-md */
-            transition: all 0.2s;
-        }
-
-        .group-filter-tab-btn:not(.active):hover {
-            background-color: #374151;
-            /* hover:bg-gray-700 */
-        }
-
-        .group-filter-item {
-            background-color: #374151;
-            /* bg-gray-700 */
-            padding: 0.75rem;
-            /* p-3 */
-            border-radius: 0.375rem;
-            /* rounded-md */
-            border: 1px solid #4b5563;
-            /* border-gray-600 */
-            cursor: pointer;
-            transition: all 0.2s;
-            align-self: start;
-            /* Aligns item to the top of its grid cell */
-            min-height: 4.5rem;
-            /* Ensures a minimum height for all items */
-            display: flex;
-            /* Added display flex for vertical centering if needed, though align-self:start might be enough */
-            align-items: center;
-            /* Vertically center content within the min-height */
-            justify-content: center;
-            /* Horizontally center content */
-            text-align: center;
-            /* Center text for wrapping */
-        }
-
-        .group-filter-item.selected {
-            background-color: #2563eb;
-            /* bg-blue-600 */
-            border-color: #3b82f6;
-            /* border-blue-500 */
-            color: white;
-        }
-
-        .group-filter-item:not(.selected):hover {
-            background-color: #4b5563;
-            /* hover:bg-gray-600 */
-        }
-
-        /* --- NEW: VOD Details Modal Styles --- */
-        #vod-episode-list .episode-item {
-            display: flex;
-            /* Replaces @apply flex */
-            align-items: center;
-            /* Replaces @apply items-center */
-            padding: 0.75rem;
-            /* Replaces @apply p-3 */
-            border-bottom-width: 1px;
-            /* Replaces @apply border-b */
-            border-color: rgba(55, 65, 81, 0.5);
-            /* Replaces @apply border-gray-700/50 */
-            cursor: pointer;
-            /* Replaces @apply cursor-pointer */
-        }
-
-        #vod-episode-list .episode-item:last-child {
-            border-bottom-width: 0px;
-            /* Replaces @apply border-b-0 */
-        }
-
-        #vod-episode-list .episode-item:hover {
-            background-color: rgba(55, 65, 81, 0.5);
-            /* Replaces @apply hover:bg-gray-700/50 */
-        }
-
-        .episode-item-epnum {
-            color: #93c5fd;
-            font-size: 0.75rem;
-            font-weight: 600;
-            width: 1.75rem;
-            height: 1.75rem;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            flex-shrink: 0;
-            margin-right: 0.75rem;
-            border-radius: 9999px;
-            background-color: rgba(30, 58, 138, 0.35);
-            border: 1px solid rgba(59, 130, 246, 0.3);
-        }
-
-        .episode-item-title {
-            color: #f3f4f6;
-            font-size: 0.875rem;
-            font-weight: 500;
-            flex: 1 1 0%;
-            min-width: 0;
-            margin-right: 0.75rem;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
-
-        .episode-item-duration {
-            color: #9ca3af;
-            font-size: 0.75rem;
-            width: 4.5rem;
-            text-align: right;
-            flex-shrink: 0;
-            white-space: nowrap;
-            margin-right: 0.75rem;
-        }
-
-        .episode-item-date {
-            color: #9ca3af;
-            font-size: 0.75rem;
-            width: 5.5rem;
-            text-align: right;
-            flex-shrink: 0;
-            white-space: nowrap;
-            margin-right: 0.75rem;
-        }
-
-        @media (max-width: 640px) {
-            .episode-item-date {
-                display: none;
-            }
-            .episode-item-duration {
-                width: auto;
-                min-width: 3.25rem;
-                margin-right: 0.375rem;
-                font-size: 0.6875rem;
-            }
-            .episode-item-title {
-                font-size: 0.8125rem;
-                margin-right: 0.375rem;
-            }
-            .episode-item-epnum {
-                width: 1.5rem;
-                height: 1.5rem;
-                font-size: 0.6875rem;
-                margin-right: 0.5rem;
-            }
-        }
-
-        .episode-item-play-btn {
-            color: #60a5fa;
-            width: 1.75rem;
-            height: 1.75rem;
-            border-radius: 9999px;
-            background-color: rgba(37, 99, 235, 0.15);
-            border: 1px solid rgba(59, 130, 246, 0.25);
-            flex-shrink: 0;
-            margin-left: auto;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            transition: all 0.15s ease-in-out;
-        }
-
-        .episode-item-play-btn:hover {
-            color: #ffffff;
-            background-color: #2563eb;
-            border-color: #3b82f6;
-            transform: scale(1.05);
-        }
-
-        .episode-item-play-btn svg {
-            width: 0.875rem;
-            height: 0.875rem;
-            fill: currentColor;
-        }
-
-
-        /* --- NEW: Immersive Mode Styles --- */
-        #app-container.multiview-immersive #main-header,
-        #app-container.multiview-immersive #multiview-header {
-            display: none;
-        }
-
-        #app-container.multiview-immersive .player-header {
-            display: none;
-        }
-
-        /* This is for the reappearing header logic */
-        #app-container.multiview-immersive #multiview-header.overlay-visible {
-            display: flex;
-            /* Re-show the header */
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            background-color: rgba(31, 41, 55, 0.95);
-            /* bg-gray-800 with transparency */
-            backdrop-filter: blur(5px);
-            -webkit-backdrop-filter: blur(5px);
-            z-index: 50;
-            /* Ensure it's on top of the grid */
-        }
-
-        /* --- Video Modal Custom & Fullscreen Styles --- */
-        #video-modal-container:fullscreen,
-        #video-modal-container:-webkit-full-screen {
-            width: 100vw !important;
-            height: 100vh !important;
-            max-height: 100vh !important;
-            max-width: 100vw !important;
-            border-radius: 0 !important;
-            margin: 0 !important;
-            padding: 0 !important;
-        }
-
-        #video-modal-container:fullscreen #video-resize-handle,
-        #video-modal-container:-webkit-full-screen #video-resize-handle {
-            display: none !important;
-        }
-
-        /* Locked state styling */
-        #video-modal.player-locked #video-modal-header {
-            opacity: 0;
-            pointer-events: none;
-            transition: opacity 0.2s ease;
-        }
-
-        #video-modal.player-locked #video-resize-handle {
-            display: none !important;
-        }
-
-        /* Audio wave animation */
-        @keyframes audioWavePulse {
-            0%, 100% { height: 6px; }
-            50% { height: 24px; }
-        }
-
-        .audio-wave-bar {
-            transform-origin: bottom;
-            animation: audioWavePulse 1.2s ease-in-out infinite;
-        }
-
-        /* PiP active state styling: invisible on screen, active in DOM */
-        #video-modal.pip-active {
-            opacity: 0 !important;
-            pointer-events: none !important;
-        }
-
-        /* Video modal header button optimizations for touch & desktop */
-        #video-modal-header button {
-            touch-action: manipulation;
-            -webkit-tap-highlight-color: transparent;
-            cursor: pointer;
-        }
-
-        #video-modal-header button svg,
-        #video-modal-header button span {
-            pointer-events: none;
-        }
-
-        /* Hide scrollbars for the header buttons container if overflowing on narrow mobile screens */
-        #video-modal-header > div:last-child {
-            scrollbar-width: none;
-            -ms-overflow-style: none;
-        }
-        #video-modal-header > div:last-child::-webkit-scrollbar {
-            display: none;
-        }
-
-        @media (max-width: 767px) {
-            .resize-handle {
-                width: 36px !important;
-                height: 36px !important;
-            }
-            .resize-handle::after {
-                width: 16px !important;
-                height: 16px !important;
-                bottom: 4px !important;
-                right: 4px !important;
-            }
-            #video-modal-container {
-                min-width: 0 !important;
-                min-height: 0 !important;
-                overflow: visible !important;
-            }
-            #video-modal-header {
-                padding: 0.5rem !important;
-            }
-            #video-modal-header h3#video-title {
-                font-size: 0.875rem !important;
-            }
-            #video-modal-header button {
-                padding: 0.35rem !important;
-            }
-        }
-    </style>
 </head>
 
 <body class="h-screen">
     <!-- Auth Container -->
     <div id="auth-container" class="fixed inset-0 bg-gray-900 z-[100] flex items-center justify-center p-4">
         <div class="w-full max-w-sm mx-auto">
-            <img src="/viniplay.png" alt="VINI PLAY Logo" class="h-16 w-16 mx-auto mb-4">
+            <img src="/logo.svg" alt="VINI PLAY Logo" class="h-16 w-16 mx-auto mb-4">
             <form id="login-form" class="hidden bg-gray-800 p-8 rounded-xl shadow-lg space-y-6">
                 <h2 class="text-2xl font-bold text-center text-white">Welcome Back</h2>
                 <div id="login-error"
@@ -1440,80 +113,118 @@
     </div>
 
     <!-- Main App Container -->
-    <div id="app-container" class="hidden flex flex-col h-screen">
-        <!-- NEW: Broadcast Message Banner Container -->
+    <div id="app-container" class="hidden h-screen">
         <div id="broadcast-banner-container"></div>
 
-        <header id="main-header"
-            class="bg-gray-800 text-white p-4 shadow-md flex-shrink-0 flex items-center justify-between">
-            <div class="flex items-center gap-3">
-                <button id="mobile-menu-toggle"
-                    class="lg:hidden text-gray-300 hover:text-white p-2 rounded-md transition-colors">
-                    <span data-icon="menu"></span>
+        <!-- Navigation rail (tablet and desktop) -->
+        <nav id="app-rail" class="rail" aria-label="Main">
+            <a class="rail-brand" href="/" aria-label="ViniPlay home"><img src="/logo.svg" alt=""></a>
+            <button id="tab-home" type="button" class="ni"><span class="pl"><span data-icon="home"></span></span><span class="lb">Home</span></button>
+            <button id="tab-guide" type="button" class="ni"><span class="pl"><span data-icon="tv"></span></span><span class="lb">Live TV</span></button>
+            <button id="tab-multiview" type="button" class="ni"><span class="pl"><span data-icon="grid"></span></span><span class="lb">Multi-View</span></button>
+            <button id="tab-vod" type="button" class="ni"><span class="pl"><span data-icon="film"></span></span><span class="lb">Movies</span></button>
+            <button id="tab-dvr" type="button" class="ni"><span class="pl"><span data-icon="rec"></span></span><span class="lb">Recordings</span></button>
+            <span class="sp"></span>
+            <button id="tab-activity" type="button" class="ni hidden"><span class="pl"><span data-icon="pulse"></span></span><span class="lb">Activity</span></button>
+            <button id="tab-settings" type="button" class="ni hidden"><span class="pl"><span data-icon="gear"></span></span><span class="lb">Settings</span></button>
+        </nav>
+
+        <div id="app-body">
+            <header id="main-header" class="top">
+                <h1 id="page-title">Home</h1>
+                <span id="header-sub" class="clock"></span>
+                <span class="grow"></span>
+                <button id="header-search-btn" type="button" class="search" aria-label="Search">
+                    <span data-icon="search"></span>
+                    <span class="search-label">Search channels and shows</span>
+                    <kbd>/</kbd>
                 </button>
-                <img src="/viniplay.png" alt="VINI PLAY Logo" class="h-8 w-8">
-                <h1 class="text-xl sm:text-2xl font-bold">VINI PLAY</h1>
-            </div>
-            <div class="flex items-center gap-4">
-                <span id="user-display" class="text-sm text-gray-400 hidden sm:block"></span>
-                <div class="hidden lg:flex gap-2">
-                    <button id="tab-guide"
-                        class="tab-button text-sm sm:text-base font-medium py-2 px-4 text-gray-300 hover:bg-gray-700 active rounded-md transition-colors">TV
-                        Guide</button>
-                    <button id="tab-multiview"
-                        class="tab-button text-sm sm:text-base font-medium py-2 px-4 text-gray-300 hover:bg-gray-700 rounded-md transition-colors">Multi-View</button>
-                    <button id="tab-player"
-                        class="tab-button text-sm sm:text-base font-medium py-2 px-4 text-gray-300 hover:bg-gray-700 rounded-md transition-colors">Player</button>
-                    <button id="tab-dvr"
-                        class="tab-button text-sm sm:text-base font-medium py-2 px-4 text-gray-300 hover:bg-gray-700 rounded-md transition-colors">DVR</button>
-                    <button id="tab-vod"
-                        class="tab-button text-sm sm:text-base font-medium py-2 px-4 text-gray-300 hover:bg-gray-700 rounded-md transition-colors">VODs</button>
-                    <button id="tab-activity"
-                        class="tab-button hidden text-sm sm:text-base font-medium py-2 px-4 text-gray-300 hover:bg-gray-700 rounded-md transition-colors">Activity</button>
-                    <button id="tab-notifications"
-                        class="tab-button text-sm sm:text-base font-medium py-2 px-4 text-gray-300 hover:bg-gray-700 rounded-md transition-colors">Notifications</button>
-                    <button id="tab-settings"
-                        class="tab-button text-sm sm:text-base font-medium py-2 px-4 text-gray-300 hover:bg-gray-700 rounded-md transition-colors">Settings</button>
+                <button id="tab-notifications" type="button" class="ib" aria-label="Reminders" title="Reminders">
+                    <span data-icon="bell"></span>
+                    <span id="reminder-badge" class="nb hidden">0</span>
+                </button>
+                <div class="menu-wrap">
+                    <button id="avatar-btn" type="button" class="av" aria-haspopup="true" aria-expanded="false" aria-label="Account menu">?</button>
+                    <div id="avatar-menu" class="menu hidden" role="menu">
+                        <div class="menu-head">
+                            <span class="av" aria-hidden="true" id="avatar-menu-initial">?</span>
+                            <div class="min-w-0">
+                                <div id="user-display" class="who"></div>
+                                <div id="user-role" class="role"></div>
+                            </div>
+                        </div>
+                        <button id="tab-player" type="button" class="mi" role="menuitem"><span data-icon="play"></span>Open a stream URL</button>
+                        <button id="shortcuts-btn" type="button" class="mi" role="menuitem"><span data-icon="keyboard"></span>Keyboard shortcuts<kbd>?</kbd></button>
+                        <div class="menu-row">
+                            <span class="lb">Theme</span>
+                            <div class="seg" id="theme-seg" role="group" aria-label="Theme">
+                                <button type="button" data-theme-pref="dark">Dark</button>
+                                <button type="button" data-theme-pref="light">Light</button>
+                                <button type="button" data-theme-pref="system">Auto</button>
+                            </div>
+                        </div>
+                        <div class="menu-row">
+                            <span class="lb">TV mode</span>
+                            <div class="seg" id="tv-seg" role="group" aria-label="TV mode">
+                                <button type="button" data-tv-pref="auto">Auto</button>
+                                <button type="button" data-tv-pref="on">On</button>
+                                <button type="button" data-tv-pref="off">Off</button>
+                            </div>
+                        </div>
+                        <div class="menu-sep"></div>
+                        <button id="logout-btn" type="button" class="mi danger" role="menuitem"><span data-icon="logout"></span>Sign out</button>
+                    </div>
                 </div>
-                <button id="logout-btn"
-                    class="text-sm bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-3 rounded-md transition-colors">Logout</button>
-            </div>
-        </header>
+            </header>
 
         <main class="flex-grow flex flex-col overflow-hidden">
+            <!-- Home Page -->
+            <div id="page-home" class="hidden flex-grow flex-col overflow-y-auto custom-scrollbar">
+                <div id="home-content" class="page-pad"></div>
+            </div>
+
             <!-- TV Guide Page -->
             <div id="page-guide" class="flex flex-grow flex-col overflow-hidden">
-                <div id="unified-guide-header"
-                    class="relative flex-shrink-0 bg-gray-800 p-2 sm:p-4 border-b border-gray-700 flex flex-col sm:flex-row items-stretch sm:items-center sm:justify-between gap-3 z-40">
-                    <div class="flex items-center gap-2 sm:gap-3 date-nav-controls">
-                        <span id="guide-date-display" class="text-base sm:text-lg font-semibold text-white"></span>
-                        <label for="guide-date-picker"
-                            class="bg-gray-700 hover:bg-gray-600 border border-gray-600 rounded-md p-2 cursor-pointer transition-colors"
-                            title="Jump to date">
-                            <span data-icon="calendar"></span>
-                        </label>
-                        <input type="date" id="guide-date-picker" class="hidden">
+                <div id="unified-guide-header" class="guide-bar">
+                    <select id="source-filter" aria-label="Playlist" class="chip"></select>
+                    <div id="group-chips" class="chips" role="group" aria-label="Quick filters">
+                        <button type="button" class="chip" data-group="all">All</button>
+                        <button type="button" class="chip" data-group="favorites"><span data-icon="star"></span>Favorites</button>
+                        <button type="button" class="chip" data-group="recents">Recents</button>
                     </div>
-
-                    <div
-                        class="relative w-full sm:w-auto flex flex-wrap sm:flex-nowrap sm:items-center sm:justify-end gap-2 filter-search-controls">
-                        <select id="source-filter" aria-label="Playlist"
-                            class="flex-1 min-w-0 sm:flex-none sm:w-48 bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm text-white focus:ring-blue-500 focus:border-blue-500"></select>
-                        <select id="group-filter" aria-label="Group"
-                            class="flex-1 min-w-0 sm:flex-none sm:w-64 bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm text-white focus:ring-blue-500 focus:border-blue-500 disabled:opacity-60"></select>
-                        <input type="search" id="search-input" placeholder="Search channels &amp; shows..."
-                            autocomplete="off"
-                            class="basis-full sm:basis-auto bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm text-white focus:ring-blue-500 focus:border-blue-500 sm:w-56">
+                    <select id="group-filter" aria-label="Group" class="chip"></select>
+                    <div class="guide-tools">
+                        <div class="seg" role="group" aria-label="View">
+                            <button id="guide-view-list" type="button" aria-label="List view"><span data-icon="list"></span></button>
+                            <button id="guide-view-grid" type="button" aria-label="Grid view"><span data-icon="grid"></span></button>
+                        </div>
+                        <button id="guide-date-btn" type="button" class="chip" title="Jump to date"><span data-icon="calendar"></span><span id="guide-date-display"></span></button>
+                        <input type="date" id="guide-date-picker" class="sr-only" tabindex="-1" aria-label="Date">
                     </div>
                 </div>
-                <div id="guide-search-status"
-                    class="hidden flex-shrink-0 bg-gray-800/80 border-b border-gray-700 px-3 sm:px-4 py-1.5 flex items-center justify-between gap-3 text-xs sm:text-sm text-gray-300">
+
+                <section id="guide-preview" class="gp hidden" aria-live="polite">
+                    <div id="gp-art" class="gp-art"></div>
+                    <div class="gp-main">
+                        <div class="gp-meta"><span id="gp-chno" class="mono"></span><span id="gp-channel"></span><span id="gp-tags" class="mono"></span></div>
+                        <h2 id="gp-title" class="gp-title"></h2>
+                        <div class="gp-line"><span id="gp-time"></span><span class="gp-bar"><i id="gp-bar-fill"></i></span><span id="gp-left"></span></div>
+                        <p id="gp-desc" class="gp-desc"></p>
+                        <div class="gp-actions">
+                            <button id="gp-watch" type="button" class="btn btn-primary"><span data-icon="play"></span>Watch live</button>
+                            <button id="gp-more" type="button" class="btn">Details</button>
+                            <button id="gp-fav" type="button" class="btn btn-icon" aria-label="Favorite"><span data-icon="star" class="favorite-star"></span></button>
+                        </div>
+                    </div>
+                    <div class="gp-next"><div class="eyebrow">Next on this channel</div><div id="gp-next-list"></div></div>
+                </section>
+
+                <div id="guide-search-status" class="hidden guide-status">
                     <span id="guide-search-status-text" class="min-w-0 truncate"></span>
-                    <button type="button" id="guide-search-clear-btn"
-                        class="flex-shrink-0 text-blue-400 hover:text-blue-300 font-semibold">Clear search</button>
+                    <button type="button" id="guide-search-clear-btn" class="btn btn-sm btn-ghost">Clear search</button>
                 </div>
 
-                <div id="guide-container" class="flex-grow bg-gray-900 overflow-auto relative custom-scrollbar">
+                <div id="guide-container" class="flex-grow overflow-auto relative custom-scrollbar" data-scroll-owner>
                     <div id="guide-placeholder" class="absolute inset-0 flex items-center justify-center z-40">
                         <div id="initial-loading-indicator" class="text-center text-gray-400">
                             <div class="loader mx-auto"></div>
@@ -1531,77 +242,41 @@
                         </div>
                     </div>
                     <div id="guide-grid" class="h-full w-full">
-                        <div class="sticky-corner flex items-center justify-center p-2 sm:p-4">
-                            <div class="flex items-center gap-2">
-                                <button id="now-btn"
-                                    class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-3 rounded-md text-sm transition-colors">Now</button>
-                            </div>
+                        <div class="sticky-corner">
+                            <button id="now-btn" type="button" class="chip on">Now</button>
                             <div id="channel-column-resize-handle" class="channel-resize-handle"></div>
                         </div>
                         <div class="time-bar-cell"></div>
-                        <div id="now-line" class="absolute top-0 bg-red-500 w-0.5 z-30 pointer-events-none hidden">
-                        </div>
+                        <div id="now-line" class="hidden"><b></b></div>
                     </div>
                 </div>
             </div>
 
             <!-- Multi-View Page -->
             <div id="page-multiview" class="hidden flex-grow flex-col overflow-hidden">
-                <div id="multiview-header"
-                    class="flex-shrink-0 bg-gray-800 p-2 border-b border-gray-700 flex items-center justify-between flex-wrap gap-2 z-20">
-                    <div class="flex items-center gap-2">
-                        <button id="multiview-add-player"
-                            class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-3 rounded-md text-sm transition-colors flex items-center gap-2">
-                            <span data-icon="addPlayer"></span>
-                            Add Player
-                        </button>
-                        <button id="multiview-remove-player"
-                            class="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-3 rounded-md text-sm transition-colors flex items-center gap-2">
-                            <span data-icon="removePlayer"></span>
-                            Remove Player
-                        </button>
+                <div id="multiview-header" class="mv-bar">
+                    <button id="multiview-add-player" type="button" class="btn btn-primary btn-sm"><span data-icon="addPlayer"></span>Add player</button>
+                    <button id="multiview-remove-player" type="button" class="btn btn-ghost btn-sm"><span data-icon="removePlayer"></span>Remove</button>
+                    <div class="seg" role="group" aria-label="Layout">
+                        <button id="layout-btn-auto" type="button">Auto</button>
+                        <button id="layout-btn-2x2" type="button">2×2</button>
+                        <button id="layout-btn-1x3" type="button">1 + 3</button>
                     </div>
-                    <div class="flex items-center gap-2">
-                        <span class="text-sm font-medium text-gray-400">Preset Layouts:</span>
-                        <button id="layout-btn-auto"
-                            class="bg-gray-700 hover:bg-gray-600 text-white font-bold py-2 px-3 rounded-md text-sm transition-colors">Auto</button>
-                        <button id="layout-btn-2x2"
-                            class="bg-gray-700 hover:bg-gray-600 text-white font-bold py-2 px-3 rounded-md text-sm transition-colors">2x2
-                            Grid</button>
-                        <button id="layout-btn-1x3"
-                            class="bg-gray-700 hover:bg-gray-600 text-white font-bold py-2 px-3 rounded-md text-sm transition-colors">1
-                            Large + 3</button>
-                    </div>
-                    <div class="flex items-center gap-2">
-                        <label for="saved-layouts-select" class="text-sm font-medium text-gray-400">Saved
-                            Layouts:</label>
-                        <select id="saved-layouts-select"
-                            class="bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm text-white focus:ring-blue-500 focus:border-blue-500">
-                            <option value="">-- Select --</option>
-                        </select>
-                        <button id="multiview-load-layout-btn"
-                            class="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-3 rounded-md text-sm transition-colors">Load</button>
-                        <button id="multiview-save-layout-btn"
-                            class="bg-purple-600 hover:bg-purple-700 text-white font-bold py-2 px-3 rounded-md text-sm transition-colors">Save
-                            Current</button>
-                        <button id="multiview-delete-layout-btn"
-                            class="bg-red-600 hover:bg-red-700 text-white font-bold p-2 rounded-md text-sm transition-colors"
-                            title="Delete Selected Layout">
-                            <span data-icon="trash"></span>
-                        </button>
-                    </div>
-
-                    <!-- NEW: Immersive Mode Toggle -->
-                    <div class="flex items-center gap-2 border-l border-gray-700 pl-4 ml-2">
-                        <label for="immersive-mode-toggle"
-                            class="text-sm font-medium text-gray-400 cursor-pointer">Immersive Mode</label>
-                        <label class="switch">
+                    <span class="grow"></span>
+                    <select id="saved-layouts-select" aria-label="Saved layouts" class="chip">
+                        <option value="">Saved layouts</option>
+                    </select>
+                    <button id="multiview-load-layout-btn" type="button" class="btn btn-ghost btn-sm">Load</button>
+                    <button id="multiview-save-layout-btn" type="button" class="btn btn-ghost btn-sm">Save current</button>
+                    <button id="multiview-delete-layout-btn" type="button" class="btn btn-ghost btn-sm btn-icon" title="Delete selected layout"><span data-icon="trash"></span></button>
+                    <label class="mv-imm" for="immersive-mode-toggle">Immersive
+                        <span class="switch">
                             <input type="checkbox" id="immersive-mode-toggle">
                             <span class="slider"></span>
-                        </label>
-                    </div>
+                        </span>
+                    </label>
                 </div>
-                <div id="multiview-container" class="flex-grow bg-gray-900 overflow-auto relative custom-scrollbar p-2">
+                <div id="multiview-container" class="flex-grow overflow-auto relative custom-scrollbar p-2">
                     <div id="multiview-grid" class="grid-stack"></div>
                 </div>
             </div>
@@ -2079,40 +754,26 @@
             </div>
 
             <!-- Notifications Page -->
-            <div id="page-notifications"
-                class="hidden flex-grow flex-col items-center p-4 overflow-y-auto custom-scrollbar">
-                <div class="w-full max-w-4xl mx-auto space-y-6 pb-16">
-                    <div id="notification-settings-container" class="mb-6"></div>
-
-                    <h2 class="text-xl font-bold text-white mb-4 border-b border-gray-700 pb-2">Upcoming Notifications
-                    </h2>
-                    <div id="no-notifications-message" class="hidden text-center text-gray-500 p-4">
-                        <span data-icon="notifications" class="mx-auto h-12 w-12 text-gray-600"></span>
-                        <h3 class="mt-2 text-sm font-medium">No Notifications Set</h3>
-                        <p class="mt-1 text-sm">Browse the TV Guide and set notifications for your favorite upcoming
-                            programs.</p>
-                    </div>
-                    <div id="notifications-list" class="space-y-4"></div>
-
-                    <div class="flex justify-between items-center mt-8 mb-4 border-b border-gray-700 pb-2">
-                        <h2 class="text-xl font-bold text-white">Past & Expired Notifications</h2>
-                        <button id="clear-past-notifications-btn"
-                            class="hidden bg-gray-600 hover:bg-gray-500 text-white text-sm font-bold py-1 px-3 rounded-md">Clear
-                            All</button>
-                    </div>
-                    <div id="no-past-notifications-message" class="hidden text-center text-gray-500 p-4">
-                        <span data-icon="cancel" class="mx-auto h-12 w-12 text-gray-600"></span>
-                        <h3 class="mt-2 text-sm font-medium">No Past Notifications</h3>
-                        <p class="mt-1 text-sm">Notifications that have already triggered or expired will appear here.
-                        </p>
-                    </div>
-                    <div id="past-notifications-list" class="space-y-4 opacity-80"></div>
+            <div id="page-notifications" class="hidden flex-grow flex-col overflow-y-auto custom-scrollbar">
+                <div class="page-col">
+                    <section class="shelf">
+                        <h3>Upcoming reminders</h3>
+                        <div id="no-notifications-message" class="hidden card hm-empty"><p>No reminders set. Open the TV guide, pick a programme and choose Remind me.</p></div>
+                        <div id="notifications-list" class="lrows"></div>
+                    </section>
+                    <section class="shelf">
+                        <h3>Past and expired<button id="clear-past-notifications-btn" type="button" class="hidden btn btn-ghost btn-sm">Clear all</button></h3>
+                        <div id="no-past-notifications-message" class="hidden card hm-empty"><p>Reminders that have fired or expired will appear here.</p></div>
+                        <div id="past-notifications-list" class="lrows"></div>
+                    </section>
+                    <div id="notification-settings-container"></div>
                 </div>
             </div>
 
             <!-- Settings Page -->
             <div id="page-settings" class="hidden flex-grow flex-col items-center p-4 overflow-y-auto custom-scrollbar">
                 <div class="w-full max-w-6xl mx-auto space-y-8 pb-16">
+                    <nav id="settings-nav" aria-label="Sections"></nav>
                     <!-- *** FIX: Admin Section Visibility *** -->
                     <!-- Removed the 'hidden' class from this div. Its visibility is now controlled -->
                     <!-- by the logic that shows/hides the entire '#page-settings' container. -->
@@ -2565,89 +1226,83 @@
                 </div>
             </div>
         </main>
-
-    </div>
-
-    <!-- Mobile Navigation Menu -->
-    <div id="mobile-nav-menu"
-        class="hidden fixed inset-y-0 left-0 w-64 bg-gray-900 border-r border-gray-700 z-50 flex-col py-6 px-4 transform -translate-x-full transition-transform duration-300 ease-in-out">
-        <div class="flex justify-between items-center mb-6">
-            <h2 class="text-xl font-bold text-white">Navigation</h2>
-            <button id="mobile-menu-close"
-                class="text-gray-400 hover:text-white text-3xl leading-none font-bold">&times;</button>
-        </div>
-        <nav class="flex flex-col gap-4">
-            <button id="mobile-nav-guide"
-                class="text-left tab-button text-lg font-medium py-2 px-3 text-gray-300 hover:bg-gray-800 rounded-md transition-colors active">
-                <span class="flex items-center gap-2"><span data-icon="guide"></span> TV Guide</span>
-            </button>
-            <button id="mobile-nav-multiview"
-                class="text-left tab-button text-lg font-medium py-2 px-3 text-gray-300 hover:bg-gray-800 rounded-md transition-colors">
-                <span class="flex items-center gap-2"><span data-icon="multiview"></span> Multi-View</span>
-            </button>
-            <button id="mobile-nav-player"
-                class="text-left tab-button text-lg font-medium py-2 px-3 text-gray-300 hover:bg-gray-800 rounded-md transition-colors">
-                <span class="flex items-center gap-2"><span data-icon="play"></span> Player</span>
-            </button>
-            <button id="mobile-nav-dvr"
-                class="text-left tab-button text-lg font-medium py-2 px-3 text-gray-300 hover:bg-gray-800 rounded-md transition-colors">
-                <span class="flex items-center gap-2"><span data-icon="dvr"></span> DVR</span>
-            </button>
-            <button id="mobile-nav-vod"
-                class="text-left tab-button text-lg font-medium py-2 px-3 text-gray-300 hover:bg-gray-800 rounded-md transition-colors">
-                <span class="flex items-center gap-2"><span data-icon="multiview"></span> VODs</span>
-            </button>
-            <!-- NEW: Admin Activity Tab (Mobile) -->
-            <button id="mobile-nav-activity"
-                class="hidden text-left tab-button text-lg font-medium py-2 px-3 text-gray-300 hover:bg-gray-800 rounded-md transition-colors">
-                <span class="flex items-center gap-2"><span data-icon="info"></span> Activity</span>
-            </button>
-            <button id="mobile-nav-notifications"
-                class="text-left tab-button text-lg font-medium py-2 px-3 text-gray-300 hover:bg-gray-800 rounded-md transition-colors">
-                <span class="flex items-center gap-2"><span data-icon="notifications"></span> Notifications</span>
-            </button>
-            <button id="mobile-nav-settings"
-                class="text-left tab-button text-lg font-medium py-2 px-3 text-gray-300 hover:bg-gray-800 rounded-md transition-colors">
-                <span class="flex items-center gap-2"><span data-icon="settings"></span> Settings</span>
-            </button>
-        </nav>
-        <div class="mt-auto">
-            <button id="mobile-nav-logout-btn"
-                class="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-3 rounded-md transition-colors">Logout</button>
         </div>
     </div>
 
-    <div id="mobile-menu-overlay" class="hidden fixed inset-0 bg-black/50 z-40"></div>
+    <!-- Search palette: opened from the top bar or with "/" -->
+    <div id="search-palette" class="palette-wrap hidden" role="dialog" aria-label="Search">
+        <div id="search-palette-scrim" class="palette-scrim"></div>
+        <div class="palette">
+            <div class="palette-head">
+                <span data-icon="search"></span>
+                <input id="search-input" type="search" placeholder="Search channels and shows" autocomplete="off">
+                <button id="search-palette-close" type="button" class="ib" aria-label="Close search"><span data-icon="close"></span></button>
+            </div>
+            <div id="palette-results" class="palette-results"></div>
+        </div>
+    </div>
+
+    <!-- Channel number typed on the remote -->
+    <div id="num-entry" class="num-entry hidden" aria-live="polite"></div>
+
+    <!-- Key hints (TV mode only) -->
+    <div id="tv-hints" class="hints" aria-hidden="true">
+        <span><kbd>&#9664; &#9650; &#9654; &#9660;</kbd>Move</span>
+        <span><kbd>OK</kbd>Select</span>
+        <span><kbd>Back</kbd>Up a level</span>
+        <span><kbd>0-9</kbd>Go to channel</span>
+        <span><kbd>?</kbd>Shortcuts</span>
+    </div>
+
+    <!-- Bottom tab bar (phones) -->
+    <nav id="app-tabbar" class="tabbar hidden" aria-label="Main">
+        <button id="mobile-nav-home" type="button" class="ni"><span class="pl"><span data-icon="home"></span></span><span class="lb">Home</span></button>
+        <button id="mobile-nav-guide" type="button" class="ni"><span class="pl"><span data-icon="tv"></span></span><span class="lb">Live TV</span></button>
+        <button id="mobile-nav-vod" type="button" class="ni"><span class="pl"><span data-icon="film"></span></span><span class="lb">Movies</span></button>
+        <button id="mobile-nav-dvr" type="button" class="ni"><span class="pl"><span data-icon="rec"></span></span><span class="lb">Recordings</span></button>
+        <button id="mobile-menu-toggle" type="button" class="ni"><span class="pl"><span data-icon="menu"></span></span><span class="lb">More</span></button>
+    </nav>
+
+    <!-- "More" sheet (phones) -->
+    <div id="mobile-menu-overlay" class="hidden"></div>
+    <div id="mobile-nav-menu" class="sheet hidden" role="dialog" aria-label="More">
+        <div class="sheet-grip"></div>
+        <button id="mobile-nav-multiview" type="button" class="mi"><span data-icon="grid"></span>Multi-View</button>
+        <button id="mobile-nav-player" type="button" class="mi"><span data-icon="play"></span>Open a stream URL</button>
+        <button id="mobile-nav-activity" type="button" class="mi hidden"><span data-icon="pulse"></span>Activity</button>
+        <button id="mobile-nav-settings" type="button" class="mi hidden"><span data-icon="gear"></span>Settings</button>
+        <button id="mobile-menu-close" type="button" class="btn btn-ghost sheet-close">Close</button>
+    </div>
 
     <!-- Modals -->
-    <div id="video-modal" class="hidden fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
-        <div id="video-modal-container" class="bg-gray-900 rounded-lg shadow-xl max-h-[90vh] flex flex-col w-full md:w-[896px] md:h-[504px]">
-            <div id="video-modal-header" class="relative flex justify-between items-center p-2 sm:p-3 border-b border-gray-700 flex-shrink-0 gap-2 rounded-t-lg">
-                <h3 id="video-title" class="text-xs sm:text-base md:text-lg font-semibold text-white truncate min-w-0 flex-1"></h3>
+    <div id="video-modal" class="hidden fixed inset-0 flex items-center justify-center z-50 scope-dark">
+        <div id="video-modal-container" class="flex flex-col">
+            <div id="video-modal-header" class="flex justify-between items-center gap-2">
+                <h3 id="video-title" class="truncate min-w-0 flex-1"></h3>
                 <div class="flex items-center gap-1 sm:gap-2 flex-shrink-0">
+                    <!-- Channels panel (live TV only) -->
+                    <button id="player-channels-btn" type="button" class="pbtn hidden" title="Channels">
+                        <span data-icon="channelList"></span>
+                    </button>
                     <!-- 1. Refresh Stream -->
-                    <button id="refresh-stream-btn"
-                        class="text-gray-400 hover:text-white p-1.5 sm:p-2 rounded-md hover:bg-gray-700 flex-shrink-0 transition-colors"
+                    <button id="refresh-stream-btn" type="button" class="pbtn"
                         title="Refresh Stream">
                         <span data-icon="refresh"></span>
                     </button>
                     <!-- 2. Picture-in-Picture -->
-                    <button id="pip-btn"
-                        class="text-gray-400 hover:text-white p-1.5 sm:p-2 rounded-md hover:bg-gray-700 flex-shrink-0 transition-colors"
+                    <button id="pip-btn" type="button" class="pbtn"
                         title="Picture-in-Picture">
                         <span data-icon="pip"></span>
                     </button>
                     <!-- 3. Container Fullscreen Button -->
-                    <button id="player-fullscreen-btn"
-                        class="text-gray-400 hover:text-white p-1.5 sm:p-2 rounded-md hover:bg-gray-700 flex-shrink-0 transition-colors"
+                    <button id="player-fullscreen-btn" type="button" class="pbtn"
                         title="Toggle Fullscreen">
                         <span data-icon="fullscreen"></span>
                     </button>
 
                     <!-- 4. More Options Dropdown Trigger -->
                     <div class="relative flex-shrink-0">
-                        <button id="player-more-options-btn"
-                            class="text-gray-400 hover:text-white p-1.5 sm:p-2 rounded-md hover:bg-gray-700 flex-shrink-0 transition-colors"
+                        <button id="player-more-options-btn" type="button" class="pbtn"
                             title="More Options">
                             <span data-icon="more"></span>
                         </button>
@@ -2754,9 +1409,7 @@
                     </div>
 
                     <!-- 5. Close Modal -->
-                    <button id="close-modal"
-                        class="text-gray-400 hover:text-white text-xl sm:text-2xl leading-none font-bold p-1 sm:p-1.5 rounded-md hover:bg-gray-700 flex-shrink-0 transition-colors ml-1 cursor-pointer"
-                        title="Close">&times;</button>
+                    <button id="close-modal" type="button" class="pbtn" title="Close"><span data-icon="close"></span></button>
                 </div>
             </div>
 
@@ -2777,6 +1430,23 @@
                 <video id="videoElement" controls autoplay playsinline webkit-playsinline class="w-full h-full"></video>
                 <!-- Dedicated Audio Element for uninterrupted mobile lock-screen playback -->
                 <audio id="audioElement" playsinline class="hidden"></audio>
+
+                <!-- Now/next card for live channels -->
+                <div id="player-osd" class="hidden">
+                    <img id="osd-logo" src="" alt="">
+                    <div class="osd-main">
+                        <div class="osd-top"><span id="osd-chno" class="mono"></span><span id="osd-channel"></span><span class="pill pill-live">Live</span></div>
+                        <div id="osd-now"></div>
+                        <div class="osd-bar"><i><b id="osd-bar-fill"></b></i><span id="osd-left"></span></div>
+                        <div id="osd-next"></div>
+                    </div>
+                </div>
+
+                <!-- Channels panel -->
+                <div id="player-channels" class="hidden" role="dialog" aria-label="Channels">
+                    <div class="pc-head"><span>Channels</span><button id="player-channels-close" type="button" class="pbtn" aria-label="Close channels"><span data-icon="close"></span></button></div>
+                    <div id="player-channels-list" class="pc-list" data-scroll-owner></div>
+                </div>
 
                 <!-- NEW: Audio-Only Overlay -->
                 <div id="audio-only-overlay"
@@ -2983,6 +1653,53 @@
                     Me</button>
             </div>
             <div id="details-resize-handle" class="resize-handle"></div>
+        </div>
+    </div>
+
+    <div id="shortcuts-modal" class="hidden fixed inset-0 bg-black/80 flex items-center justify-center z-[80] p-4">
+        <div class="bg-gray-800 rounded-xl shadow-xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+            <div class="p-5 border-b border-gray-700 flex items-center justify-between">
+                <h3 class="text-xl font-bold text-white">Keyboard and remote shortcuts</h3>
+                <button type="button" id="shortcuts-close-btn" class="btn btn-ghost btn-sm">Close</button>
+            </div>
+            <div class="p-5 overflow-y-auto custom-scrollbar grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-5 text-sm">
+                <div>
+                    <p class="eyebrow mb-2">Move around</p>
+                    <dl class="shortcut-list">
+                        <div><dt><kbd>&larr;</kbd><kbd>&uarr;</kbd><kbd>&rarr;</kbd><kbd>&darr;</kbd></dt><dd>Move focus</dd></div>
+                        <div><dt><kbd>Enter</kbd></dt><dd>Select (OK)</dd></div>
+                        <div><dt><kbd>Esc</kbd></dt><dd>Back, up one level</dd></div>
+                        <div><dt><kbd>/</kbd></dt><dd>Search</dd></div>
+                        <div><dt><kbd>?</kbd></dt><dd>This list</dd></div>
+                    </dl>
+                </div>
+                <div>
+                    <p class="eyebrow mb-2">Go to</p>
+                    <dl class="shortcut-list">
+                        <div><dt><kbd>G</kbd><kbd>H</kbd></dt><dd>Home</dd></div>
+                        <div><dt><kbd>G</kbd><kbd>L</kbd></dt><dd>Live TV</dd></div>
+                        <div><dt><kbd>G</kbd><kbd>R</kbd></dt><dd>Reminders</dd></div>
+                        <div><dt><kbd>G</kbd><kbd>S</kbd></dt><dd>Settings (admins)</dd></div>
+                    </dl>
+                </div>
+                <div>
+                    <p class="eyebrow mb-2">Live TV guide</p>
+                    <dl class="shortcut-list">
+                        <div><dt><kbd>Enter</kbd></dt><dd>Watch the channel</dd></div>
+                        <div><dt>Hold <kbd>Enter</kbd></dt><dd>Program details</dd></div>
+                        <div><dt><kbd>Page Up</kbd><kbd>Page Down</kbd></dt><dd>Move the guide by one hour (CH +/- on a remote)</dd></div>
+                        <div><dt><kbd>0-9</kbd></dt><dd>Go to a channel number</dd></div>
+                    </dl>
+                </div>
+                <div>
+                    <p class="eyebrow mb-2">Player</p>
+                    <dl class="shortcut-list">
+                        <div><dt><kbd>Page Up</kbd><kbd>Page Down</kbd></dt><dd>Previous or next channel (CH +/- on a remote)</dd></div>
+                        <div><dt><kbd>0-9</kbd></dt><dd>Switch to a channel number</dd></div>
+                        <div><dt><kbd>Esc</kbd></dt><dd>Close the channel list, then the player</dd></div>
+                    </dl>
+                </div>
+            </div>
         </div>
     </div>
 

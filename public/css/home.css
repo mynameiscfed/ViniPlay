@@ -1,0 +1,162 @@
+/* Home: greeting, channel shelves and the "coming up" list. */
+
+.home {
+    max-width: 78em;
+}
+
+.home,
+.page-col {
+    box-sizing: border-box;
+    width: 100%;
+    margin: 0 auto;
+    padding: 1em 1.5em 2em;
+}
+
+.page-col {
+    max-width: 56em;
+}
+
+.home-hello {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1em;
+    margin-bottom: 1.6em;
+}
+
+.home-hello h2 {
+    margin: 0;
+    font: 700 2em/1.1 var(--f-disp);
+    letter-spacing: -.02em;
+}
+
+.home-hello p {
+    margin: .35em 0 0;
+    color: var(--tx2);
+}
+
+.shelf {
+    margin-bottom: 1.8em;
+}
+
+.shelf h3 {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin: 0 0 .7em;
+    font: 700 1.25em var(--f-disp);
+}
+
+.shelf-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(22em, 1fr));
+    gap: .8em;
+}
+
+.shelf-grid .channel-info {
+    position: relative;
+    left: auto;
+    width: auto;
+    height: auto;
+    min-height: 5.6em;
+    padding: .9em 1em;
+    border: 1px solid var(--line);
+    border-radius: 1em;
+    background: var(--s2);
+}
+
+.shelf-grid .channel-info:hover {
+    background: var(--s3);
+}
+
+.lrows {
+    display: flex;
+    flex-direction: column;
+    gap: .5em;
+}
+
+.lrow {
+    display: flex;
+    align-items: center;
+    gap: 1em;
+    padding: .8em 1em;
+    border: 1px solid var(--line);
+    border-radius: .9em;
+    background: var(--s2);
+}
+
+.lrow time {
+    flex: none;
+    width: 8em;
+    color: var(--tx2);
+    font: 600 .95em var(--f-mono);
+}
+
+.lrow .ch-logo {
+    width: 2.8em;
+    height: 2.8em;
+}
+
+.lrow .note {
+    color: var(--cy);
+    font-size: .85em;
+}
+
+.lrow .t {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.lrow b,
+.lrow small {
+    display: block;
+}
+
+.lrow b {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.lrow small {
+    color: var(--tx3);
+}
+
+.hm-empty {
+    padding: 1.4em;
+    color: var(--tx2);
+}
+
+.hm-empty p {
+    margin: 0;
+}
+
+@media (max-width: 767.98px) {
+    .home,
+    .page-col {
+        padding: .5em .9em 1.5em;
+    }
+
+    .shelf-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .home-hello {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .home-hello h2 {
+        font-size: 1.6em;
+    }
+
+    .lrow time {
+        width: 6.5em;
+    }
+}
+
+/* The key legend on a TV sits over the bottom of the page. */
+html.tv .home,
+html.tv .page-col {
+    padding-bottom: 6em;
+}

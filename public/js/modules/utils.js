@@ -3,6 +3,8 @@
  * * Contains generic helper and utility functions, like parsers.
  */
 
+import { guideState } from './state.js';
+
 const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 
 /**
@@ -80,3 +82,12 @@ export function formatTimeWithOffset(date, offsetHours = 0) {
 
     return `${hours}:${minutes}`;
 }
+
+
+/** The programme on now and the one after it for a channel. */
+export const nowNext = (channelId, nowMs = Date.now()) => {
+    const list = guideState.programs[channelId] || [];
+    const i = list.findIndex(p => new Date(p.stop) > nowMs);
+    if (i < 0) return {};
+    return new Date(list[i].start) <= nowMs ? { now: list[i], next: list[i + 1] } : { next: list[i] };
+};

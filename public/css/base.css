@@ -1,0 +1,951 @@
+/*
+ * Signal Ink base layer: type, controls, surfaces, overlays.
+ * Loaded after tailwind.css so it can restyle legacy utility markup.
+ *
+ * Browser floor: Chromium 76 (older Tizen). Avoid inset, :is(), :where(),
+ * :focus-visible and aspect-ratio in this file. The focus ring is driven by
+ * html.kb (set by js/modules/focus.js) instead of :focus-visible.
+ */
+
+/* ---------- Document ---------- */
+html {
+    font-size: 16px;
+    -webkit-text-size-adjust: 100%;
+    -webkit-tap-highlight-color: transparent;
+}
+
+html,
+body {
+    height: 100%;
+    overflow: hidden;
+    overscroll-behavior-y: contain;
+    background: var(--bg);
+    color: var(--tx);
+}
+
+body {
+    font-family: var(--f-ui);
+    font-size: .9375rem;
+    line-height: 1.45;
+    font-feature-settings: "ss01";
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+}
+
+h1,
+h2,
+h3 {
+    font-family: var(--f-disp);
+    letter-spacing: -.012em;
+}
+
+::selection {
+    background: rgb(var(--c-cy) / .35);
+    color: var(--tx);
+}
+
+a {
+    color: var(--cy);
+}
+
+.mono,
+.font-mono,
+kbd {
+    font-family: var(--f-mono);
+    font-variant-numeric: tabular-nums;
+}
+
+kbd,
+.kbd {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 1.7em;
+    height: 1.7em;
+    padding: 0 .45em;
+    border: 1px solid var(--line2);
+    border-bottom-width: 2px;
+    border-radius: 6px;
+    background: var(--s3);
+    color: var(--tx2);
+    font-size: .75rem;
+    font-weight: 600;
+    line-height: 1;
+}
+
+/* Full-screen fallbacks for the inset shorthand (Chromium < 87). */
+.inset-0 {
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 0;
+}
+
+.inset-x-0 {
+    left: 0;
+    right: 0;
+}
+
+.inset-y-0 {
+    top: 0;
+    bottom: 0;
+}
+
+/* The viewport height that excludes mobile browser chrome. */
+.h-screen {
+    height: 100vh;
+    height: 100dvh;
+}
+
+/* ---------- Scrollbars ---------- */
+* {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(var(--c-line2)) transparent;
+}
+
+::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    background: rgb(var(--c-line2));
+    border-radius: 8px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: rgb(var(--c-tx3));
+    background-clip: padding-box;
+    border: 2px solid transparent;
+}
+
+::-webkit-scrollbar-corner {
+    background: transparent;
+}
+
+/* ---------- Focus ring (keyboard and remote) ---------- */
+:focus {
+    outline: none;
+}
+
+html.kb button:focus,
+html.kb a:focus,
+html.kb input:focus,
+html.kb select:focus,
+html.kb textarea:focus,
+html.kb summary:focus,
+html.kb [tabindex]:focus,
+html.kb [role="button"]:focus {
+    outline: 2px solid transparent;
+    box-shadow: var(--glow);
+    position: relative;
+    z-index: 2;
+}
+
+/* Hidden native checkboxes paint their ring on the visible control. */
+html.kb .switch input:focus {
+    box-shadow: none;
+}
+
+html.kb .switch input:focus+.slider {
+    box-shadow: var(--glow);
+}
+
+/* ---------- Controls ---------- */
+button {
+    font-family: inherit;
+    touch-action: manipulation;
+}
+
+button:disabled,
+.btn:disabled,
+.btn[aria-disabled="true"] {
+    cursor: not-allowed;
+    opacity: .5;
+}
+
+.btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: .5em;
+    min-height: 2.5rem;
+    padding: 0 1rem;
+    border: 1px solid rgb(var(--c-line2));
+    border-radius: var(--r-md);
+    background: var(--s3);
+    color: var(--tx);
+    font: 600 .875rem/1.1 var(--f-ui);
+    white-space: nowrap;
+    cursor: pointer;
+    text-decoration: none;
+    transition: background-color .15s, border-color .15s, transform .1s, filter .15s;
+}
+
+.btn:hover {
+    background: var(--s4);
+}
+
+.btn:active {
+    transform: scale(.98);
+}
+
+.btn svg {
+    flex-shrink: 0;
+}
+
+.btn-primary {
+    background: var(--cy);
+    border-color: transparent;
+    color: var(--on);
+}
+
+.btn-primary:hover {
+    background: var(--cy);
+    filter: brightness(1.1);
+}
+
+.btn-rec {
+    background: var(--rd);
+    border-color: transparent;
+    color: var(--on);
+}
+
+.btn-rec:hover {
+    background: var(--rd);
+    filter: brightness(1.1);
+}
+
+.btn-danger {
+    background: var(--tint-rd);
+    border-color: rgb(var(--c-rd) / .45);
+    color: var(--rd);
+}
+
+.btn-danger:hover {
+    background: rgb(var(--c-rd) / .24);
+}
+
+.btn-ghost {
+    background: transparent;
+    border-color: transparent;
+    color: var(--tx2);
+}
+
+.btn-ghost:hover {
+    background: var(--s3);
+    color: var(--tx);
+}
+
+.btn-sm {
+    min-height: 2rem;
+    padding: 0 .75rem;
+    font-size: .8125rem;
+    border-radius: 8px;
+}
+
+.btn-lg {
+    min-height: 3rem;
+    padding: 0 1.4rem;
+    font-size: 1rem;
+}
+
+.btn-icon {
+    min-width: 2.5rem;
+    padding: 0;
+}
+
+.btn-icon.btn-sm {
+    min-width: 2rem;
+}
+
+@media (pointer: coarse) {
+    .btn {
+        min-height: 2.75rem;
+    }
+
+    .btn-sm {
+        min-height: 2.5rem;
+    }
+
+    .btn-icon {
+        min-width: 2.75rem;
+    }
+}
+
+/* Legacy utility buttons ("bg-blue-600 ... text-white") take the accent's ink colour. */
+.bg-blue-500.text-white,
+.bg-blue-600.text-white,
+.bg-blue-700.text-white,
+.bg-red-500.text-white,
+.bg-red-600.text-white,
+.bg-red-700.text-white,
+.bg-green-600.text-white,
+.bg-green-700.text-white,
+.bg-yellow-500.text-white,
+.bg-yellow-600.text-white,
+.bg-yellow-700.text-white,
+.bg-orange-500.text-white,
+.bg-orange-600.text-white,
+.bg-purple-600.text-white,
+.bg-purple-700.text-white,
+.bg-pink-600.text-white,
+.bg-indigo-600.text-white {
+    color: var(--on);
+}
+
+
+button.font-bold {
+    font-weight: 650;
+}
+
+/* Form fields. */
+input[type="text"],
+input[type="search"],
+input[type="url"],
+input[type="password"],
+input[type="number"],
+input[type="email"],
+input[type="date"],
+input[type="datetime-local"],
+select,
+textarea {
+    font-family: inherit;
+    font-size: .875rem;
+    color: var(--tx);
+    background-color: rgb(var(--g-700));
+    border-color: rgb(var(--c-line2));
+    border-radius: var(--r-md);
+    transition: border-color .15s, box-shadow .15s;
+}
+
+input[type="text"],
+input[type="search"],
+input[type="url"],
+input[type="password"],
+input[type="number"],
+input[type="email"],
+input[type="date"],
+input[type="datetime-local"],
+select {
+    min-height: 2.5rem;
+}
+
+input::placeholder,
+textarea::placeholder {
+    color: var(--tx3);
+    opacity: 1;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+    border-color: var(--cy);
+}
+
+input:disabled,
+select:disabled,
+textarea:disabled {
+    opacity: .55;
+    cursor: not-allowed;
+}
+
+input[type="checkbox"],
+input[type="radio"],
+input[type="range"] {
+    accent-color: rgb(var(--c-cy));
+}
+
+input[type="checkbox"],
+input[type="radio"] {
+    width: 1.125rem;
+    height: 1.125rem;
+}
+
+select {
+    cursor: pointer;
+}
+
+select option {
+    background: rgb(var(--g-800));
+    color: var(--tx);
+}
+
+@media (pointer: coarse) {
+
+    input[type="text"],
+    input[type="search"],
+    input[type="url"],
+    input[type="password"],
+    input[type="number"],
+    input[type="email"],
+    input[type="date"],
+    input[type="datetime-local"],
+    select {
+        min-height: 2.75rem;
+        font-size: 1rem;
+    }
+}
+
+/* Toggle switch (existing markup: label.switch > input + span.slider). */
+.switch {
+    position: relative;
+    display: inline-block;
+    width: 2.75rem;
+    height: 1.5rem;
+    flex-shrink: 0;
+}
+
+.switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: rgb(var(--c-line2));
+    transition: background-color .2s;
+    border-radius: 999px;
+}
+
+.slider:before {
+    position: absolute;
+    content: "";
+    height: 1.125rem;
+    width: 1.125rem;
+    left: .1875rem;
+    bottom: .1875rem;
+    background-color: #fff;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .35);
+    transition: transform .2s;
+    border-radius: 50%;
+}
+
+input:checked+.slider {
+    background-color: var(--cy);
+}
+
+input:checked+.slider:before {
+    transform: translateX(1.25rem);
+}
+
+/* Spinner. */
+.loader {
+    border: 3px solid rgb(var(--c-line2));
+    border-top-color: var(--cy);
+    border-radius: 50%;
+    width: 2.25rem;
+    height: 2.25rem;
+    animation: spin .9s linear infinite;
+}
+
+@keyframes spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+/* ---------- Surfaces ---------- */
+.card {
+    background: var(--s2);
+    border: 1px solid var(--line);
+    border-radius: var(--r-lg);
+}
+
+.panel-title {
+    font-family: var(--f-disp);
+    font-weight: 700;
+    font-size: 1.125rem;
+    color: var(--tx);
+}
+
+.eyebrow {
+    font-size: .6875rem;
+    font-weight: 700;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--tx3);
+}
+
+.pill {
+    display: inline-flex;
+    align-items: center;
+    gap: .35em;
+    height: 1.4rem;
+    padding: 0 .55rem;
+    border-radius: 999px;
+    font-size: .6875rem;
+    font-weight: 750;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    background: var(--s4);
+    color: var(--tx2);
+}
+
+.pill-live {
+    background: var(--pk);
+    color: var(--on-pk);
+}
+
+.pill-cy {
+    background: var(--tint-cy);
+    color: var(--cy);
+}
+
+.pill-am {
+    background: var(--tint-am);
+    color: var(--am);
+}
+
+.pill-gr {
+    background: var(--tint-gr);
+    color: var(--gr);
+}
+
+.pill-rd {
+    background: var(--tint-rd);
+    color: var(--rd);
+}
+
+.pill-pk {
+    background: var(--tint-pk);
+    color: var(--pk);
+}
+
+.dot {
+    display: inline-block;
+    width: .5em;
+    height: .5em;
+    border-radius: 50%;
+    background: currentColor;
+}
+
+.dot-live {
+    background: var(--pk);
+    box-shadow: 0 0 0 .22em rgb(var(--c-pk) / .22);
+}
+
+.chip {
+    display: inline-flex;
+    align-items: center;
+    gap: .45em;
+    height: 2.25rem;
+    padding: 0 .95rem;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--s2);
+    color: var(--tx2);
+    font: 600 .8125rem/1 var(--f-ui);
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background-color .15s, color .15s, border-color .15s;
+}
+
+.chip:hover {
+    background: var(--s3);
+    color: var(--tx);
+}
+
+.chip.on,
+.chip[aria-pressed="true"],
+.chip[aria-selected="true"] {
+    background: var(--tint-cy);
+    border-color: rgb(var(--c-cy) / .55);
+    color: var(--cy);
+}
+
+.chip .n {
+    font-family: var(--f-mono);
+    font-size: .6875rem;
+    color: var(--tx3);
+}
+
+@media (pointer: coarse) {
+    .chip {
+        height: 2.5rem;
+    }
+}
+
+/* Segmented control. */
+.seg {
+    display: inline-flex;
+    padding: 3px;
+    gap: 2px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--s2);
+}
+
+.seg>button {
+    min-height: 2rem;
+    padding: 0 .85rem;
+    border: 0;
+    border-radius: 9px;
+    background: transparent;
+    color: var(--tx2);
+    font: 600 .8125rem/1 var(--f-ui);
+    cursor: pointer;
+}
+
+.seg>button:hover {
+    color: var(--tx);
+}
+
+.seg>button.on,
+.seg>button[aria-selected="true"],
+.seg>button.active {
+    background: var(--s4);
+    color: var(--tx);
+}
+
+/* Legacy tab buttons (DVR, VOD filters, group-filter modal). */
+.tab-button {
+    transition: background-color .15s, color .15s;
+}
+
+.tab-button.active {
+    background-color: var(--tint-cy);
+    color: var(--cy);
+}
+
+.tab-button:not(.active):hover {
+    background-color: var(--s3);
+}
+
+/* ---------- Tables ---------- */
+.dvr-table,
+.sources-table,
+.admin-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.dvr-table th,
+.sources-table th,
+.admin-table th {
+    padding: .65rem 1rem;
+    text-align: left;
+    font-size: .6875rem;
+    font-weight: 700;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--tx3);
+    background: transparent;
+    border-bottom: 1px solid var(--line);
+    white-space: nowrap;
+}
+
+.dvr-table td,
+.sources-table td,
+.admin-table td {
+    padding: .8rem 1rem;
+    font-size: .875rem;
+    color: var(--tx2);
+    border-bottom: 1px solid var(--line);
+    white-space: nowrap;
+}
+
+.dvr-table tbody tr:last-child td,
+.sources-table tbody tr:last-child td,
+.admin-table tbody tr:last-child td {
+    border-bottom: 0;
+}
+
+.dvr-table tbody tr:hover,
+.sources-table tbody tr:hover,
+.admin-table tbody tr:hover {
+    background: rgb(var(--c-tx) / .035);
+}
+
+.dvr-table th.text-right,
+.sources-table th.text-right,
+.admin-table th.text-right {
+    text-align: right;
+}
+
+.action-btn {
+    color: var(--tx3);
+    transition: color .15s;
+}
+
+.action-btn:hover {
+    color: var(--tx);
+}
+
+/* ---------- Overlays ---------- */
+.bg-black\/80,
+.bg-black\/95 {
+    background-color: var(--scrim);
+    -webkit-backdrop-filter: blur(6px);
+    backdrop-filter: blur(6px);
+}
+
+/* Dialogs sit above the phone tab bar (130) and the "More" sheet (150). */
+body>div[id$="-modal"] {
+    z-index: 150;
+}
+
+body.modal-open {
+    overflow: hidden;
+}
+
+/* Dialog panels share one shape. */
+.shadow-xl,
+.shadow-2xl {
+    box-shadow: var(--shadow-2);
+}
+
+/* Status badges used by DVR rows and the guide's recording markers. */
+.status-badge {
+    display: inline-flex;
+    align-items: center;
+    height: 1.4rem;
+    padding: 0 .6rem;
+    border: 0;
+    border-radius: 999px;
+    font-size: .6875rem;
+    font-weight: 750;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    cursor: default;
+    background: var(--s4);
+    color: var(--tx2);
+}
+
+.status-badge.view-error-btn {
+    cursor: pointer;
+    text-decoration: underline;
+}
+
+.status-badge.recording {
+    background: var(--rd);
+    color: var(--on);
+}
+
+.status-badge.reconnecting {
+    background: var(--am);
+    color: var(--on);
+    animation: pulse-badge 1.5s cubic-bezier(.4, 0, .6, 1) infinite;
+}
+
+.status-badge.scheduled {
+    background: var(--tint-cy);
+    color: var(--cy);
+}
+
+.status-badge.completed {
+    background: var(--tint-gr);
+    color: var(--gr);
+}
+
+.status-badge.error {
+    background: var(--tint-am);
+    color: var(--am);
+}
+
+.status-badge.cancelled {
+    background: var(--s4);
+    color: var(--tx3);
+}
+
+@keyframes pulse-badge {
+
+    0%,
+    100% {
+        opacity: 1;
+    }
+
+    50% {
+        opacity: .6;
+    }
+}
+
+/* ---------- Toasts ---------- */
+#notification-modal-wrapper {
+    position: fixed;
+    left: 50%;
+    bottom: calc(1.25rem + env(safe-area-inset-bottom, 0px));
+    transform: translateX(-50%);
+    z-index: 300;
+    pointer-events: none;
+    max-width: calc(100vw - 2rem);
+}
+
+#notification-modal-wrapper.hidden {
+    display: none;
+}
+
+#notification-box {
+    display: flex;
+    align-items: center;
+    gap: .75rem;
+    min-width: 16rem;
+    max-width: 32rem;
+    padding: .75rem 1rem .75rem .9rem;
+    border: 1px solid var(--line2);
+    border-left: 4px solid var(--rd);
+    border-radius: var(--r-md);
+    background: rgb(var(--g-800));
+    color: var(--tx);
+    font-size: .875rem;
+    font-weight: 600;
+    box-shadow: var(--shadow-2);
+    pointer-events: all;
+    opacity: 0;
+    transform: translateY(12px);
+    transition: opacity .25s ease-out, transform .25s ease-out;
+}
+
+#notification-modal-wrapper:not(.hidden) #notification-box {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+#notification-box.success-bg {
+    border-left-color: var(--gr);
+}
+
+#notification-box.error-bg {
+    border-left-color: var(--rd);
+}
+
+#notification-message {
+    margin: 0;
+    text-align: left;
+}
+
+.broadcast-banner {
+    background: var(--am);
+    color: var(--on);
+    padding: .75rem 1rem;
+    text-align: center;
+    font-weight: 600;
+    opacity: 0;
+    transform: translateY(-100%);
+    transition: opacity .5s, transform .5s;
+    pointer-events: all;
+}
+
+.broadcast-banner.visible {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+#broadcast-banner-container {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 400;
+    pointer-events: none;
+}
+
+/* ---------- Misc legacy helpers ---------- */
+[data-icon] {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+[data-icon]>svg {
+    width: 1.25rem;
+    height: 1.25rem;
+}
+
+.clickable-username {
+    cursor: pointer;
+    text-decoration: underline;
+    text-decoration-color: var(--tx3);
+    transition: color .15s;
+}
+
+.clickable-username:hover {
+    color: var(--cy);
+}
+
+.pagination-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 2.25rem;
+    height: 2.25rem;
+    padding: 0 .75rem;
+    font-size: .875rem;
+    font-weight: 600;
+    color: var(--tx2);
+    background: var(--s2);
+    border: 1px solid var(--line);
+    border-radius: var(--r-md);
+    cursor: pointer;
+    user-select: none;
+    transition: background-color .15s, color .15s, border-color .15s;
+}
+
+.pagination-btn:hover:not(:disabled):not(.active) {
+    background: var(--s3);
+    color: var(--tx);
+    border-color: var(--line2);
+}
+
+.pagination-btn.active {
+    color: var(--on);
+    background: var(--cy);
+    border-color: transparent;
+    cursor: default;
+}
+
+.pagination-btn:disabled {
+    opacity: .4;
+    cursor: not-allowed;
+}
+
+.pagination-ellipsis {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 2rem;
+    height: 2.25rem;
+    color: var(--tx3);
+    user-select: none;
+}
+
+.favorite-star {
+    transition: color .2s, transform .2s;
+}
+
+.favorite-star.favorited {
+    color: var(--am);
+    transform: scale(1.15);
+}
+
+.transcode-indicator {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    display: inline-block;
+}
+
+@media (prefers-reduced-motion: reduce) {
+
+    *,
+    *::before,
+    *::after {
+        animation-duration: .01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: .01ms !important;
+        scroll-behavior: auto !important;
+    }
+}

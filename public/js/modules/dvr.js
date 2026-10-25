@@ -873,6 +873,7 @@ function renderCompletedRecordings() {
                         <span class="inline-block text-xs font-mono bg-blue-900/40 text-blue-300 px-2 py-0.5 rounded border border-blue-800/30">
                             Duration: ${formatDuration(rec.durationSeconds)}
                         </span>
+                        ${isAdmin ? `<span class="pill ml-1" title="Recorded by">${escapeHtml(rec.username || 'N/A')}</span>` : ''}
                     </div>
                 </div>
 
