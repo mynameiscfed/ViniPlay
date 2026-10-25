@@ -18,6 +18,27 @@ import { ICONS } from './icons.js'; // MODIFIED: Import the new icon library
 // --- Virtualization Constants ---
 const ROW_HEIGHT = 96; // Height in pixels of a single channel row (.channel-info + .timeline-row)
 const OVERSCAN_COUNT = 5; // Number of extra rows to render above and below the visible area for smooth scrolling
+const SEARCH_DEBOUNCE_MS = 250; // Delay between the last keystroke and re-filtering the guide
+
+// Program IDs that matched the current search, highlighted in the timeline.
+let searchMatchedProgramIds = new Set();
+
+const escapeAttr = (value) => String(value ?? '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+
+/**
+ * Returns the UTC instant that corresponds to local midnight of the selected guide date,
+ * shifted by the configured timezone offset so it lines up with EPG times.
+ */
+const getGuideStartUtc = () => {
+    const selectedDate = new Date(guideState.currentDate);
+    const offsetMs = (guideState.settings.timezoneOffset || 0) * 3600000;
+    return new Date(Date.UTC(
+        selectedDate.getFullYear(),
+        selectedDate.getMonth(),
+        selectedDate.getDate(),
+        0, 0, 0, 0
+    ) - offsetMs);
+};
 
 /**
  * NEW: Opens the program details modal. This is now a standalone, exportable function.
@@ -306,12 +327,6 @@ export function finalizeGuideLoad(shouldCenter = false) {
     populateSourceFilter();
     populateGroupFilter();
 
-    appState.fuseChannels = new Fuse(guideState.channels, {
-        keys: ['name', 'displayName', 'source', 'chno'],
-        threshold: 0.4,
-        includeScore: true,
-    });
-
     const epgRange = getEpgDateRange();
     if (epgRange && UIElements.guideDatePicker) {
         UIElements.guideDatePicker.min = formatDateForInput(epgRange.minDate);
@@ -322,39 +337,6 @@ export function finalizeGuideLoad(shouldCenter = false) {
         UIElements.guideDatePicker.disabled = true;
     }
 
-
-    const allPrograms = [];
-    const guideStart = new Date(guideState.currentDate);
-    guideStart.setHours(0, 0, 0, 0);
-    const guideEnd = new Date(guideStart.getTime() + guideState.guideDurationHours * 3600 * 1000);
-
-    for (const channelId in guideState.programs) {
-        const channel = guideState.channels.find(c => c.id === channelId);
-        if (channel) {
-            guideState.programs[channelId].forEach(prog => {
-                const progStart = new Date(prog.start);
-                const progStop = new Date(prog.stop);
-                if (progStop < guideStart || progStart > guideEnd) return;
-
-                allPrograms.push({
-                    ...prog,
-                    channel: {
-                        id: channel.id,
-                        name: channel.displayName || channel.name,
-                        logo: channel.logo,
-                        source: channel.source,
-                    },
-                    programId: `${channel.id}-${progStart.toISOString()}-${progStop.toISOString()}`
-                });
-            });
-        }
-    }
-
-    appState.fusePrograms = new Fuse(allPrograms, {
-        keys: ['title'],
-        threshold: 0.4,
-        includeScore: true,
-    });
 
     return handleSearchAndFilter(shouldCenter);
 }
@@ -374,8 +356,11 @@ const renderGuide = (channelsToRender, resetScroll = false, shouldCenter = false
         const totalRows = channelsToRender.length;
         const showNoData = totalRows === 0;
 
+        // Distinguish "nothing loaded at all" from "filters/search matched nothing".
+        const hasAnyChannels = guideState.channels.length > 0;
         UIElements.guidePlaceholder.classList.toggle('hidden', !showNoData);
-        UIElements.noDataMessage.classList.toggle('hidden', !showNoData);
+        UIElements.noDataMessage.classList.toggle('hidden', !showNoData || hasAnyChannels);
+        UIElements.noResultsMessage?.classList.toggle('hidden', !showNoData || !hasAnyChannels);
         UIElements.initialLoadingIndicator.classList.add('hidden');
         UIElements.guideGrid.classList.toggle('hidden', showNoData);
         if (showNoData) {
@@ -388,15 +373,7 @@ const renderGuide = (channelsToRender, resetScroll = false, shouldCenter = false
         // We use the local date components (year, month, day) to create a UTC timestamp
         // IMPORTANT: EPG times are stored in local timezone but with UTC suffix (e.g., "2025-12-02T00:00:00.000Z" means midnight LOCAL time)
         // So we need to shift the guide start back by the timezone offset to align with the EPG data
-        const selectedDate = new Date(guideState.currentDate);
-        const offset = guideState.settings.timezoneOffset || 0;
-        const offsetMs = offset * 3600000; // Convert hours to milliseconds
-        const guideStartUtc = new Date(Date.UTC(
-            selectedDate.getFullYear(),
-            selectedDate.getMonth(),
-            selectedDate.getDate(),
-            0, 0, 0, 0
-        ) - offsetMs); // Shift back by timezone offset to align with EPG data
+        const guideStartUtc = getGuideStartUtc();
 
 
         const timelineWidth = guideState.guideDurationHours * guideState.hourWidthPixels;
@@ -514,12 +491,12 @@ const renderGuide = (channelsToRender, resetScroll = false, shouldCenter = false
                 );
 
                 const channelInfoHTML = `
-                    <div class="channel-info p-2 flex items-center justify-between cursor-pointer" data-url="${channel.url}" data-name="${channelName}" data-id="${channel.id}" data-channel-index="${i}">
+                    <div class="channel-info p-1.5 md:p-2 flex items-center justify-between cursor-pointer" data-url="${channel.url}" data-name="${channelName}" data-id="${channel.id}" data-channel-index="${i}" title="${escapeAttr(channelName)}">
                         <div class="flex items-center overflow-hidden flex-grow min-w-0">
-                            <img src="${channel.logo}" onerror="this.onerror=null; this.src='https://placehold.co/48x48/1f2937/d1d5db?text=?';" class="w-12 h-12 object-contain mr-3 flex-shrink-0 rounded-md bg-gray-700">
+                            <img src="${channel.logo}" onerror="this.onerror=null; this.src='https://placehold.co/48x48/1f2937/d1d5db?text=?';" class="w-8 h-8 md:w-12 md:h-12 object-contain mr-2 md:mr-3 flex-shrink-0 rounded-md bg-gray-700">
                             <div class="flex-grow min-w-0 channel-details">
-                                <span class="font-semibold text-sm truncate block">${channelName}</span>
-                                <div class="flex items-center gap-2 mt-1">
+                                <span class="channel-name font-semibold">${channelName}</span>
+                                <div class="flex items-center flex-wrap gap-1 md:gap-2 mt-1">
                                     ${chnoBadgeHTML}
                                     ${sourceBadgeHTML}
                                 </div>
@@ -566,10 +543,11 @@ const renderGuide = (channelsToRender, resetScroll = false, shouldCenter = false
 
                     const dvrJob = findDvrJobForProgram({ ...prog, channelId: channel.id });
                     const recordingClass = dvrJob ? `has-recording status-${dvrJob.status}` : '';
+                    const searchMatchClass = searchMatchedProgramIds.has(uniqueProgramId) ? 'search-match' : '';
 
                     const offset = guideState.settings.timezoneOffset || 0;
 
-                    programsHTML += `<div class="programme-item absolute top-1 bottom-1 bg-gray-800 rounded-md p-2 overflow-hidden flex flex-col justify-center z-5 ${isLive ? 'live' : ''} ${progStop < now ? 'past' : ''} ${notificationClass} ${recordingClass}" style="left:${left}px; width:${Math.max(0, width - 2)}px" data-channel-url="${channel.url}" data-channel-id="${channel.id}" data-channel-name="${channelName}" data-prog-title="${prog.title}" data-prog-desc="${prog.desc}" data-prog-start="${progStart.toISOString()}" data-prog-stop="${progStop.toISOString()}" data-prog-id="${uniqueProgramId}"><div class="programme-progress" style="width:${progressWidth}%"></div><p class="prog-title text-white font-semibold truncate relative z-10">${prog.title}</p><p class="prog-time text-gray-400 truncate relative z-10">${formatTimeWithOffset(progStart, offset)} - ${formatTimeWithOffset(progStop, offset)}</p></div>`;
+                    programsHTML += `<div class="programme-item absolute top-1 bottom-1 bg-gray-800 rounded-md p-2 overflow-hidden flex flex-col justify-center z-5 ${isLive ? 'live' : ''} ${progStop < now ? 'past' : ''} ${notificationClass} ${recordingClass} ${searchMatchClass}" style="left:${left}px; width:${Math.max(0, width - 2)}px" data-channel-url="${channel.url}" data-channel-id="${channel.id}" data-channel-name="${channelName}" data-prog-title="${prog.title}" data-prog-desc="${prog.desc}" data-prog-start="${progStart.toISOString()}" data-prog-stop="${progStop.toISOString()}" data-prog-id="${uniqueProgramId}"><div class="programme-progress" style="width:${progressWidth}%"></div><p class="prog-title text-white font-semibold truncate relative z-10">${prog.title}</p><p class="prog-time text-gray-400 truncate relative z-10">${formatTimeWithOffset(progStart, offset)} - ${formatTimeWithOffset(progStop, offset)}</p></div>`;
                 });
                 const timelineRowHTML = `<div class="timeline-row" style="width: ${timelineWidth}px;">${programsHTML}</div>`;
 
@@ -609,17 +587,7 @@ const renderGuide = (channelsToRender, resetScroll = false, shouldCenter = false
                 guideState.currentDate = now;
                 finalizeGuideLoad(true);
             } else {
-                // Create a proper UTC midnight for the current date (same logic as renderGuide)
-                const selectedDate = new Date(guideState.currentDate);
-                const offset = guideState.settings.timezoneOffset || 0;
-                const offsetMs = offset * 3600000;
-                const guideStartUtc = new Date(Date.UTC(
-                    selectedDate.getFullYear(),
-                    selectedDate.getMonth(),
-                    selectedDate.getDate(),
-                    0, 0, 0, 0
-                ) - offsetMs);
-                updateNowLine(guideStartUtc, true);
+                updateNowLine(getGuideStartUtc(), true);
             }
         };
 
@@ -689,80 +657,79 @@ const updateNowLine = (guideStartUtc, shouldScroll = false) => {
  * Used when column is resized to recalculate the NOW line position.
  */
 export const updateNowLinePosition = () => {
-    // Create a proper UTC midnight for the current date (same logic as renderGuide)
-    const selectedDate = new Date(guideState.currentDate);
-    const offset = guideState.settings.timezoneOffset || 0;
-    const offsetMs = offset * 3600000;
-    const guideStartUtc = new Date(Date.UTC(
-        selectedDate.getFullYear(),
-        selectedDate.getMonth(),
-        selectedDate.getDate(),
-        0, 0, 0, 0
-    ) - offsetMs);
-    updateNowLine(guideStartUtc, false);
+    updateNowLine(getGuideStartUtc(), false);
 };
 
 // --- Filtering and Searching ---
- 
+
 /**
- * Populates the "source" filter dropdown.
+ * Populates the playlist ("source") filter. This is the first step of the filter flow:
+ * pick a playlist, then pick one of that playlist's groups.
  */
 const populateSourceFilter = () => {
     const savedFilter = getDeviceSetting('activeSourceFilter', guideState.settings.activeSourceFilter);
+    const counts = new Map();
+    guideState.channels.forEach(ch => {
+        if (ch.source) counts.set(ch.source, (counts.get(ch.source) || 0) + 1);
+    });
+
     UIElements.sourceFilter.innerHTML = '';
-    UIElements.sourceFilter.appendChild(new Option('All Sources', 'all'));
+    UIElements.sourceFilter.appendChild(new Option(`All Playlists (${guideState.channels.length})`, 'all'));
     [...guideState.channelSources].sort((a, b) => a.localeCompare(b)).forEach(source => {
-        UIElements.sourceFilter.appendChild(new Option(source, source));
+        UIElements.sourceFilter.appendChild(new Option(`${source} (${counts.get(source) || 0})`, source));
     });
 
     const optionExists = Array.from(UIElements.sourceFilter.options).some(opt => opt.value === savedFilter);
-    if (savedFilter && optionExists) {
-        UIElements.sourceFilter.value = savedFilter;
-    } else {
-        UIElements.sourceFilter.value = 'all';
-    }
+    UIElements.sourceFilter.value = (savedFilter && optionExists) ? savedFilter : 'all';
 
     // Keep state in sync
     guideState.settings.activeSourceFilter = UIElements.sourceFilter.value;
 
     UIElements.sourceFilter.classList.remove('hidden');
-    UIElements.sourceFilter.style.display = guideState.channelSources.size <= 1 ? 'none' : 'block';
+    UIElements.sourceFilter.style.display = guideState.channelSources.size <= 1 ? 'none' : '';
 };
 
 /**
- * Populates the "group" filter dropdown based on the currently selected source.
+ * Populates the group filter with the groups of the currently selected playlist.
+ * When several playlists exist and none is selected, only the cross-playlist views
+ * (All, Favorites, Recents) are offered, so the group list never mixes playlists.
  */
 const populateGroupFilter = () => {
     const selectedSource = UIElements.sourceFilter ? UIElements.sourceFilter.value : 'all';
     const savedFilter = getDeviceSetting('activeGroupFilter', guideState.settings.activeGroupFilter);
     const currentFilter = UIElements.groupFilter.value || savedFilter;
+    const needsPlaylist = selectedSource === 'all' && guideState.channelSources.size > 1;
 
-    let availableGroups;
-    if (selectedSource === 'all') {
-        availableGroups = guideState.channelGroups;
-    } else {
-        availableGroups = new Set();
-        guideState.channels.forEach(ch => {
-            if (ch.source === selectedSource && ch.group) {
-                availableGroups.add(ch.group);
-            }
+    const sourceChannels = selectedSource === 'all'
+        ? guideState.channels
+        : guideState.channels.filter(ch => ch.source === selectedSource);
+    const groupCounts = new Map();
+    if (!needsPlaylist) {
+        sourceChannels.forEach(ch => {
+            if (ch.group) groupCounts.set(ch.group, (groupCounts.get(ch.group) || 0) + 1);
         });
     }
 
     UIElements.groupFilter.innerHTML = '';
-    UIElements.groupFilter.appendChild(new Option('All Groups', 'all'));
-    UIElements.groupFilter.appendChild(new Option('Recents', 'recents'));
+    UIElements.groupFilter.appendChild(new Option(`All Groups (${sourceChannels.length})`, 'all'));
     UIElements.groupFilter.appendChild(new Option('Favorites', 'favorites'));
-    [...availableGroups].sort((a, b) => a.localeCompare(b)).forEach(group => {
-        UIElements.groupFilter.appendChild(new Option(group, group));
-    });
+    UIElements.groupFilter.appendChild(new Option('Recents', 'recents'));
 
-    const optionExists = Array.from(UIElements.groupFilter.options).some(opt => opt.value === currentFilter);
-    if (currentFilter && optionExists) {
-        UIElements.groupFilter.value = currentFilter;
-    } else {
-        UIElements.groupFilter.value = 'all';
+    if (needsPlaylist) {
+        const hint = new Option('Select a playlist to see its groups', '');
+        hint.disabled = true;
+        UIElements.groupFilter.appendChild(hint);
+    } else if (groupCounts.size > 0) {
+        const optgroup = document.createElement('optgroup');
+        optgroup.label = selectedSource === 'all' ? 'Groups' : `Groups in ${selectedSource}`;
+        [...groupCounts.keys()].sort((a, b) => a.localeCompare(b)).forEach(group => {
+            optgroup.appendChild(new Option(`${group} (${groupCounts.get(group)})`, group));
+        });
+        UIElements.groupFilter.appendChild(optgroup);
     }
+
+    const optionExists = Array.from(UIElements.groupFilter.options).some(opt => opt.value === currentFilter && !opt.disabled);
+    UIElements.groupFilter.value = (currentFilter && optionExists) ? currentFilter : 'all';
 
     // Keep guideState and settings in sync if group was reset
     if (guideState.settings.activeGroupFilter !== UIElements.groupFilter.value) {
@@ -774,7 +741,79 @@ const populateGroupFilter = () => {
 };
 
 /**
- * Filters channels based on dropdowns and rerenders the guide.
+ * Applies the playlist filter, then optionally the group filter, to the full channel list.
+ */
+const getFilteredChannels = (selectedSource, selectedGroup) => {
+    let channels = guideState.channels;
+    if (selectedGroup === 'recents') {
+        const recentIds = guideState.settings.recentChannels || [];
+        channels = recentIds.map(id => guideState.channels.find(ch => ch.id === id)).filter(Boolean);
+    } else if (selectedGroup === 'favorites') {
+        channels = channels.filter(ch => ch.isFavorite);
+    } else if (selectedGroup && selectedGroup !== 'all') {
+        channels = channels.filter(ch => ch.group === selectedGroup);
+    }
+    if (selectedSource !== 'all') {
+        channels = channels.filter(ch => ch.source === selectedSource);
+    }
+    return channels;
+};
+
+/**
+ * Filters the guide down to channels whose name matches the search, or (depending on the
+ * search scope setting) that air a matching programme on the selected day. Every word of
+ * the search must appear, in any order. Matching programmes are recorded for highlighting.
+ * @returns {{channels: Array<object>, programMatches: number}}
+ */
+const searchGuide = (pool, searchTerm, includePrograms) => {
+    const tokens = searchTerm.split(/\s+/).filter(Boolean);
+    const matchesAll = (text) => tokens.every(t => text.includes(t));
+
+    const guideStartUtc = getGuideStartUtc();
+    const guideEnd = new Date(guideStartUtc.getTime() + guideState.guideDurationHours * 3600 * 1000);
+
+    const channels = [];
+    let programMatches = 0;
+    pool.forEach(ch => {
+        const channelText = `${ch.displayName || ''} ${ch.name || ''} ${ch.chno || ''} ${ch.group || ''}`.toLowerCase();
+        let isMatch = matchesAll(channelText);
+
+        if (includePrograms) {
+            (guideState.programs[ch.id] || []).forEach(prog => {
+                if (!prog.title || !matchesAll(prog.title.toLowerCase())) return;
+                const progStart = new Date(prog.start);
+                const progStop = new Date(prog.stop);
+                if (progStop < guideStartUtc || progStart > guideEnd) return;
+                searchMatchedProgramIds.add(`${ch.id}-${progStart.toISOString()}-${progStop.toISOString()}`);
+                programMatches++;
+                isMatch = true;
+            });
+        }
+
+        if (isMatch) channels.push(ch);
+    });
+    return { channels, programMatches };
+};
+
+/**
+ * Shows or hides the bar under the guide header that summarises the active search.
+ */
+const updateSearchStatus = (searchTerm, channelCount, programMatches, searchedAllGroups) => {
+    const statusEl = UIElements.guideSearchStatus;
+    if (!statusEl) return;
+    if (!searchTerm) {
+        statusEl.classList.add('hidden');
+        return;
+    }
+    const channelText = `${channelCount} channel${channelCount === 1 ? '' : 's'}`;
+    const programText = programMatches > 0 ? ` · ${programMatches} matching show${programMatches === 1 ? '' : 's'} highlighted` : '';
+    const scopeText = searchedAllGroups ? ' (all groups)' : '';
+    UIElements.guideSearchStatusText.textContent = `${channelText} matching "${UIElements.searchInput.value.trim()}"${scopeText}${programText}`;
+    statusEl.classList.remove('hidden');
+};
+
+/**
+ * Filters channels based on the playlist/group dropdowns and the search box, then rerenders the guide.
  * @param {boolean} shouldCenter - Indicates if the guide should auto-center to current time.
  * @returns {Promise<boolean>} A promise that resolves when the re-render is complete.
  */
@@ -784,121 +823,38 @@ export function handleSearchAndFilter(shouldCenter = false, preserveScroll = fal
     const selectedSource = UIElements.sourceFilter.value;
     const searchScope = guideState.settings.searchScope || 'channels_only_filtered';
 
-    let channelsForGuide;
+    // 1. The base list is what the user sees when NOT searching: playlist first, then group.
+    const baseFilteredChannels = getFilteredChannels(selectedSource, selectedGroup);
 
-    // --- NEW CORRECTED LOGIC ---
-
-    // 1. First, determine the base list of channels based on the group/source filters.
-    // This is what the user sees when NOT searching.
-    let baseFilteredChannels = guideState.channels;
-    if (selectedGroup !== 'all') {
-        if (selectedGroup === 'favorites') {
-            baseFilteredChannels = baseFilteredChannels.filter(ch => ch.isFavorite);
-        } else if (selectedGroup === 'recents') {
-            const recentIds = guideState.settings.recentChannels || [];
-            baseFilteredChannels = recentIds.map(id => guideState.channels.find(ch => ch.id === id)).filter(Boolean);
-        } else {
-            baseFilteredChannels = baseFilteredChannels.filter(ch => ch.group === selectedGroup);
-        }
-    }
-    if (selectedSource !== 'all') {
-        baseFilteredChannels = baseFilteredChannels.filter(ch => ch.source === selectedSource);
-    }
-
-    // 2. Now, handle the search logic.
+    // 2. A search narrows the guide itself (channels plus their programme rows).
+    searchMatchedProgramIds = new Set();
+    let channelsForGuide = baseFilteredChannels;
     if (searchTerm) {
-        let channelSearchPool;
-        // Determine if we search ALL channels or just the base filtered list.
-        if (searchScope.endsWith('_unfiltered')) {
-            channelSearchPool = guideState.channels; // Use all channels for the search
-        } else {
-            channelSearchPool = baseFilteredChannels; // Use the already filtered list for the search
-        }
-
-        // Perform the channel search on the determined pool.
-        const fuseForChannels = new Fuse(channelSearchPool, { keys: ['name', 'displayName', 'source', 'chno'], threshold: 0.4, includeScore: true });
-        const channelResults = fuseForChannels.search(searchTerm);
-
-        // Perform the program search if the scope allows it.
-        let programResults = [];
-        if (searchScope.includes('programs') && appState.fusePrograms) {
-            programResults = appState.fusePrograms.search(searchTerm); //programResults = appState.fusePrograms.search(searchTerm); // appState.fusePrograms.search(searchTerm).slice(0, 20);
-        }
-
-        // BUG FIX: Include channels from both channel search AND program search
-        // This ensures that searching for program titles (e.g., "Shark Tank") 
-        // will display all channels that have matching programs, not just channels
-        // whose names match the search term.
-        const channelIdsFromChannelSearch = new Set(channelResults.map(r => r.item.id));
-        const channelIdsFromProgramSearch = new Set(programResults.map(r => r.item.channel.id));
-        const allRelevantChannelIds = new Set([...channelIdsFromChannelSearch, ...channelIdsFromProgramSearch]);
-
-        channelsForGuide = channelSearchPool.filter(ch => allRelevantChannelIds.has(ch.id));
-
-        // Render the search results dropdown.
-        renderSearchResults(channelResults, programResults); //renderSearchResults(channelResults.slice(0, 10), programResults);
-
+        // "Unfiltered" scopes ignore the group filter but still stay within the selected playlist.
+        const searchAllGroups = searchScope.endsWith('_unfiltered');
+        const pool = searchAllGroups ? getFilteredChannels(selectedSource, 'all') : baseFilteredChannels;
+        const { channels, programMatches } = searchGuide(pool, searchTerm, searchScope.includes('programs'));
+        channelsForGuide = channels;
+        updateSearchStatus(searchTerm, channels.length, programMatches, searchAllGroups && selectedGroup !== 'all');
     } else {
-        // If there is no search term, the guide simply displays the base filtered channels.
-        channelsForGuide = baseFilteredChannels;
-        // And we hide the search results dropdown.
-        UIElements.searchResultsContainer.innerHTML = '';
-        UIElements.searchResultsContainer.classList.add('hidden');
+        updateSearchStatus('', 0, 0, false);
     }
 
     // 3. Finally, render the guide with the correct list of channels.
-    // When shouldCenter is true, we DON'T want to reset scroll (let it stay where it is)
-    // Then we'll center it to the now line
-    // MODIFIED: Logic for resetScroll.
     // If preserveScroll is true, we NEVER reset.
     // If shouldCenter is true, we also don't reset (because we want to scroll to a specific place, not 0,0).
     // So we only reset if BOTH are false.
     const resetScroll = !shouldCenter && !preserveScroll;
     return renderGuide(channelsForGuide, resetScroll, shouldCenter);
 };
+
 /**
- * Renders the search results dropdown.
- * @param {Array} channelResults - Results from Fuse.js channel search.
- * @param {Array} programResults - Results from Fuse.js program search.
+ * Re-filters the guide for the current search box value, jumping back to the first
+ * matching channel and centering the timeline on the current time.
  */
-const renderSearchResults = (channelResults, programResults) => {
-    let html = '';
-
-    if (channelResults.length > 0) {
-        html += '<div class="search-results-header">Channels</div>';
-        html += channelResults.map(({ item }) => `
-            <div class="search-result-channel flex items-center p-3 border-b border-gray-700/50 hover:bg-gray-700 cursor-pointer" data-channel-id="${item.id}">
-                <img src="${item.logo}" onerror="this.onerror=null; this.src='https://placehold.co/40x40/1f2937/d1d5db?text=?';" class="w-10 h-10 object-contain mr-3 rounded-md bg-gray-700 flex-shrink-0">
-                <div class="overflow-hidden">
-                    <p class="font-semibold text-white text-sm truncate">${item.chno ? `[${item.chno}] ` : ''}${item.displayName || item.name}</p>
-                    <p class="text-gray-400 text-xs truncate">${item.group} &bull; ${item.source}</p>
-                </div>
-            </div>
-        `).join('');
-    }
-
-    if (programResults.length > 0) {
-        html += '<div class="search-results-header">Programs</div>';
-        const timeFormat = { hour: '2-digit', minute: '2-digit' };
-        html += programResults.map(({ item }) => `
-             <div class="search-result-program flex items-center p-3 border-b border-gray-700/50 hover:bg-gray-700 cursor-pointer" data-channel-id="${item.channel.id}" data-prog-start="${item.start}">
-                <img src="${item.channel.logo}" onerror="this.onerror=null; this.src='https://placehold.co/40x40/1f2937/d1d5db?text=?';" class="w-10 h-10 object-contain mr-3 rounded-md bg-gray-700 flex-shrink-0">
-                <div class="overflow-hidden">
-                    <p class="font-semibold text-white text-sm truncate" title="${item.title}">${item.title}</p>
-                    <p class="text-gray-400 text-xs truncate">${item.channel.name} &bull; ${item.channel.source}</p>
-                    <p class="text-blue-400 text-xs">${new Date(item.start).toLocaleTimeString([], timeFormat)} - ${new Date(item.stop).toLocaleTimeString([], timeFormat)}</p>
-                </div>
-            </div>
-        `).join('');
-    }
-
-    if (html) {
-        UIElements.searchResultsContainer.innerHTML = html;
-        UIElements.searchResultsContainer.classList.remove('hidden');
-    } else {
-        UIElements.searchResultsContainer.innerHTML = '<p class="text-center text-gray-500 p-4 text-sm">No results found.</p>';
-        UIElements.searchResultsContainer.classList.remove('hidden');
-    }
+const applySearch = () => {
+    if (UIElements.guideContainer) UIElements.guideContainer.scrollTop = 0;
+    return handleSearchAndFilter(true);
 };
 
 /**
@@ -981,18 +937,40 @@ export function setupGuideEventListeners() {
         // Save the setting for this device
         saveDeviceSetting('activeSourceFilter', selectedSource);
         guideState.settings.activeSourceFilter = selectedSource;
+        // A new playlist means a new set of groups: start from "All Groups" of that playlist
+        // unless the current selection (e.g. Favorites) still applies.
+        if (!['favorites', 'recents'].includes(UIElements.groupFilter.value)) {
+            UIElements.groupFilter.value = 'all';
+        }
         populateGroupFilter();
         handleSearchAndFilter(true); // Auto-center when filter changes
     });
+
+    // Search filters the guide as you type (debounced); Enter applies immediately, Escape clears.
+    let searchDebounceTimer;
+    let lastAppliedSearch = '';
+    const runSearch = () => {
+        clearTimeout(searchDebounceTimer);
+        const term = UIElements.searchInput.value.trim();
+        if (term === lastAppliedSearch) return;
+        lastAppliedSearch = term;
+        applySearch();
+    };
+    UIElements.searchInput.addEventListener('input', () => {
+        clearTimeout(searchDebounceTimer);
+        searchDebounceTimer = setTimeout(runSearch, SEARCH_DEBOUNCE_MS);
+    });
     UIElements.searchInput.addEventListener('keydown', (event) => {
         if (event.key === 'Enter') {
-            handleSearchAndFilter(false);
+            runSearch();
+        } else if (event.key === 'Escape' && UIElements.searchInput.value) {
+            UIElements.searchInput.value = '';
+            runSearch();
         }
     });
-    document.addEventListener('click', e => {
-        if (!UIElements.searchInput.contains(e.target) && !UIElements.searchResultsContainer.contains(e.target) && !e.target.closest('.search-result-channel') && !e.target.closest('.search-result-program')) {
-            UIElements.searchResultsContainer.classList.add('hidden');
-        }
+    UIElements.guideSearchClearBtn?.addEventListener('click', () => {
+        UIElements.searchInput.value = '';
+        runSearch();
     });
 
     UIElements.guideDatePicker.addEventListener('change', (e) => {
@@ -1048,53 +1026,6 @@ export function setupGuideEventListeners() {
 
         if (progItem) {
             openProgramDetails(progItem);
-        }
-    });
-
-    UIElements.searchResultsContainer.addEventListener('click', e => {
-        const programItem = e.target.closest('.search-result-program');
-        const channelItem = e.target.closest('.search-result-channel');
-
-        UIElements.searchResultsContainer.classList.add('hidden');
-        UIElements.searchInput.value = '';
-
-        if (channelItem) {
-            const channelId = channelItem.dataset.channelId;
-            const channelIndex = guideState.visibleChannels.findIndex(c => c.id === channelId);
-            if (channelIndex > -1) {
-                UIElements.guideContainer.scrollTo({ top: channelIndex * ROW_HEIGHT, behavior: 'smooth' });
-
-                setTimeout(() => {
-                    const channelRow = UIElements.guideGrid.querySelector(`.channel-info[data-id="${channelId}"]`);
-                    if (channelRow) {
-                        channelRow.style.transition = 'background-color 0.5s';
-                        channelRow.style.backgroundColor = '#3b82f6';
-                        setTimeout(() => { channelRow.style.backgroundColor = ''; }, 2000);
-                    }
-                }, 500);
-            }
-        } else if (programItem) {
-            const progStart = new Date(programItem.dataset.progStart);
-            const guideStart = new Date(guideState.currentDate);
-            guideStart.setHours(0, 0, 0, 0);
-
-            const dateDiff = Math.floor((progStart - guideStart) / (1000 * 60 * 60 * 24));
-            if (dateDiff !== 0) {
-                guideState.currentDate.setDate(guideState.currentDate.getDate() + dateDiff);
-                finalizeGuideLoad();
-            }
-
-            setTimeout(() => {
-                const programElement = UIElements.guideGrid.querySelector(`.programme-item[data-prog-start="${programItem.dataset.progStart}"][data-channel-id="${programItem.dataset.channelId}"]`);
-                if (programElement) {
-                    const scrollLeft = programElement.offsetLeft - (UIElements.guideContainer.clientWidth / 4);
-                    UIElements.guideContainer.scrollTo({ left: scrollLeft, behavior: 'smooth' });
-
-                    programElement.style.transition = 'outline 0.5s';
-                    programElement.style.outline = '3px solid #facc15';
-                    setTimeout(() => { programElement.style.outline = 'none'; }, 2500);
-                }
-            }, 200);
         }
     });
 

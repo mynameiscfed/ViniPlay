@@ -29,7 +29,7 @@ export const guideState = {
     vodSeries: [],
     settings: {
         // Add a default for channelColumnWidth
-        channelColumnWidth: window.innerWidth < 768 ? 64 : 180, // Default based on screen size
+        channelColumnWidth: window.innerWidth < 768 ? 120 : 240, // Default based on screen size
         notificationLeadTime: 10, // Default notification lead time in minutes
         multiviewLayouts: [], // To store saved layouts for the user
         adminPageSize: 25, // NEW: Default page size for the admin history table
