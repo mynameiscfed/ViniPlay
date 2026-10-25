@@ -1,20 +1,37 @@
-# Exclude files and directories from the Docker build context
+# Exclude everything the running app doesn't need from the build context.
+# Smaller context = faster uploads to the builder and fewer cache invalidations
+# of the final `COPY . .` layer.
 
-# Node.js
+# Node.js (dependencies are installed inside the image)
 node_modules
 npm-debug.log
 
 # Environment variables
 .env
+.env.*
 
 # Docker
 Dockerfile
-docker-compose.yml
+.dockerignore
+docker-compose*.yml
 
-# Persistent data directory (should be mounted as a volume, not copied)
+# Persistent data directories (should be mounted as volumes, not copied)
 viniplay-data
+viniplay-dvr
 
-# CI and tests (not needed at runtime)
+# Docs and README screenshots (~60 MB of GIFs)
+*.md
+images
+
+# CI, tests and git metadata
 .git
+.gitignore
 .github
 test
+docker-image.yml
+
+# Editor / OS clutter
+.vscode
+.idea
+*.swp
+.DS_Store
