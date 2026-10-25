@@ -81,7 +81,7 @@ const INDEX_DDL = [
     'CREATE INDEX IF NOT EXISTS ix_pmr_movie ON provider_movie_relations(movie_id)',
     'CREATE INDEX IF NOT EXISTS ix_psr_series ON provider_series_relations(series_id)',
     'CREATE INDEX IF NOT EXISTS ix_per_episode ON provider_episode_relations(episode_id)',
-    'CREATE INDEX IF NOT EXISTS ix_episodes_series ON episodes(series_id, season_num, episode_num)',
+    // episodes(series_id, season_num, episode_num) is a UNIQUE index created by vodStore.ready()
     // Admin activity history: ORDER BY / range filters on start_time
     'CREATE INDEX IF NOT EXISTS ix_stream_history_start ON stream_history(start_time)',
     // Notifications and the 60 s delivery checker
