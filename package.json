@@ -4,7 +4,9 @@
   "description": "A simple IPTV player with server-side storage and user authentication.",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test test/syntax.test.js",
+    "test:container": "bash test/container-smoke.sh"
   },
   "author": "Andrea Ardovini",
   "license": "CC BY-NC-SA 4.0",
