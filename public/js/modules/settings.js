@@ -638,56 +638,50 @@ export const populateTimezoneSelector = () => {
  * Renders the M3U or EPG source table.
  * @param {('m3u'|'epg')} sourceType - The type of source to render.
  */
+// Each source is a card: health at a glance, its own Refresh, and no table to scroll sideways.
 const renderSourceTable = (sourceType) => {
-    const tbody = UIElements[`${sourceType}SourcesTbody`];
+    const list = UIElements[`${sourceType}SourcesTbody`];
     const sources = guideState.settings[`${sourceType}Sources`] || [];
-    tbody.innerHTML = '';
 
     if (sources.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="8" class="text-center text-gray-500 py-4">No ${sourceType.toUpperCase()} sources added.</td></tr>`;
+        list.innerHTML = `<p class="text-center text-gray-500 py-4 col-span-full">No ${sourceType.toUpperCase()} sources added.</p>`;
         return;
     }
 
-    sources.forEach(source => {
+    list.innerHTML = sources.map(source => {
         const pathDisplay = source.type === 'file' ? (source.path.split('/').pop() || source.path.split('\\').pop()) : source.path;
-        const lastUpdated = new Date(source.lastUpdated).toLocaleString();
-        const refreshText = (source.type === 'url' || source.type === 'xc') && source.refreshHours > 0 ? `Every ${source.refreshHours}h` : 'Disabled';
-        const tr = document.createElement('tr');
-        tr.dataset.sourceId = source.id;
-        tr.innerHTML = `
-            <td>${escapeHtml(source.name)}</td>
-            <td><span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${source.type === 'file' ? 'bg-blue-200 text-blue-800' : 'bg-purple-200 text-purple-800'}">${escapeHtml(source.type)}</span></td>
-            <td class="max-w-xs truncate" title="${escapeHtml(pathDisplay)}">${escapeHtml(pathDisplay)}</td>
-            <td><span class="text-xs font-medium text-gray-400">${escapeHtml(source.statusMessage || 'N/A')}</span></td>
-            <td>${lastUpdated}</td>
-            <td>${refreshText}</td>
-            <td>
-                <label class="switch">
-                    <input type="checkbox" class="activate-switch" ${source.isActive ? 'checked' : ''}>
+        const failed = /failed|not found/i.test(source.statusMessage || '');
+        const health = !source.isActive ? 'Off' : failed ? 'Failed' : source.lastUpdated ? 'OK' : 'Not refreshed yet';
+        const dot = !source.isActive ? 'bg-gray-500' : failed ? 'bg-red-500' : 'bg-green-500';
+        const refreshText = (source.type === 'url' || source.type === 'xc') && source.refreshHours > 0 ? `Refreshes every ${source.refreshHours} h` : 'Manual refresh';
+        const updated = source.lastUpdated ? new Date(source.lastUpdated).toLocaleString() : 'never';
+        return `
+        <div class="source-card bg-gray-900/50 rounded-lg p-4 flex flex-col gap-2 border ${failed && source.isActive ? 'border-red-500/60' : 'border-transparent'}${source.isActive ? '' : ' opacity-70'}" data-source-id="${escapeHtml(source.id)}">
+            <div class="flex items-center gap-2 min-w-0">
+                <span class="w-2.5 h-2.5 rounded-full flex-none ${dot}" title="${health}"></span>
+                <span class="font-bold text-white truncate flex-grow">${escapeHtml(source.name)}</span>
+                <span class="text-xs uppercase text-gray-400">${escapeHtml(source.type)}</span>
+                <label class="switch" title="${source.isActive ? 'Turn off' : 'Turn on'}">
+                    <input type="checkbox" class="activate-switch" aria-label="${escapeHtml(source.name)} active" ${source.isActive ? 'checked' : ''}>
                     <span class="slider"></span>
                 </label>
-            </td>
-            <td class="text-right">
-                <div class="flex items-center justify-end gap-3">
-                    ${source.isActive ? `<button class="action-btn refresh-source-btn" title="Refresh this source">${ICONS.refresh}</button>` : ''}
-                    <button class="action-btn edit-source-btn" title="Edit Source">
-                        ${ICONS.edit}
-                    </button>
-                     <button class="action-btn delete-source-btn" title="Delete Source">
-                        ${ICONS.trash}
-                    </button>
-                </div>
-            </td>
-        `;
-        tbody.appendChild(tr);
-    });
+            </div>
+            <div class="text-xs text-gray-500 truncate" title="${escapeHtml(pathDisplay)}">${escapeHtml(pathDisplay)}</div>
+            <div class="text-sm ${failed ? 'text-red-400' : 'text-gray-400'}">${health} · ${escapeHtml(source.statusMessage || 'No status yet')}</div>
+            <div class="text-xs text-gray-500">Updated ${escapeHtml(updated)} · ${refreshText}</div>
+            <div class="flex items-center gap-2 mt-auto pt-1">
+                ${source.isActive ? `<button type="button" class="refresh-source-btn chip">${ICONS.refresh} Refresh</button>` : ''}
+                <button type="button" class="edit-source-btn chip">${ICONS.edit} Edit</button>
+                <button type="button" class="delete-source-btn chip ml-auto" aria-label="Delete ${escapeHtml(source.name)}" title="Delete source">${ICONS.trash}</button>
+            </div>
+        </div>`;
+    }).join('');
 };
 
 /**
  * Updates all settings UI elements based on the current state.
  * MODIFIED: Removed redundant admin checks as this page is now admin-only.
  */
-/** Chips at the top of Settings that jump to each visible section. */
 // Settings is split into pages. Each card joins the page that lists its heading; anything unlisted goes to System.
 const SETTINGS_PAGES = [
     ['overview', 'Overview', []],
@@ -1484,7 +1478,7 @@ export function setupSettingsEventListeners() {
     // --- Source Table Clicks (Edit, Delete, Activate) ---
     const handleSourceTableClick = async (e, sourceType) => {
         const target = e.target;
-        const row = target.closest('tr');
+        const row = target.closest('[data-source-id]');
         if (!row) return;
         const sourceId = row.dataset.sourceId;
         const source = guideState.settings[`${sourceType}Sources`].find(s => s.id === sourceId);

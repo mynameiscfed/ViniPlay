@@ -826,23 +826,7 @@
                                     Add M3U
                                 </button>
                             </div>
-                            <div class="overflow-x-auto bg-gray-900/50 rounded-lg">
-                                <table class="min-w-full sources-table">
-                                    <thead>
-                                        <tr>
-                                            <th>Name</th>
-                                            <th>Type</th>
-                                            <th>URL / File Path</th>
-                                            <th>Status</th>
-                                            <th>Last Updated</th>
-                                            <th>Refresh</th>
-                                            <th>Active</th>
-                                            <th class="text-right">Actions</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody id="m3u-sources-tbody"></tbody>
-                                </table>
-                            </div>
+                            <div id="m3u-sources-tbody" class="grid gap-3" style="grid-template-columns:repeat(auto-fill,minmax(min(100%,20rem),1fr))"></div>
                         </div>
                         <div>
                             <div class="flex justify-between items-center mb-3">
@@ -853,23 +837,7 @@
                                     Add EPG
                                 </button>
                             </div>
-                            <div class="overflow-x-auto bg-gray-900/50 rounded-lg">
-                                <table class="min-w-full sources-table">
-                                    <thead>
-                                        <tr>
-                                            <th>Name</th>
-                                            <th>Type</th>
-                                            <th>URL / File Path</th>
-                                            <th>Status</th>
-                                            <th>Last Updated</th>
-                                            <th>Refresh</th>
-                                            <th>Active</th>
-                                            <th class="text-right">Actions</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody id="epg-sources-tbody"></tbody>
-                                </table>
-                            </div>
+                            <div id="epg-sources-tbody" class="grid gap-3" style="grid-template-columns:repeat(auto-fill,minmax(min(100%,20rem),1fr))"></div>
                         </div>
                     </div>
 
