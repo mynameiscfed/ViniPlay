@@ -14,15 +14,22 @@ import { guideState } from './state.js';
  * @param {object} options - Options for the fetch request (method, headers, body, etc.).
  * @returns {Promise<Response|null>} - The fetch Response object or null on failure.
  */
+// Why the last apiFetch returned null: { status, message }. status is null when the request never got a response.
+export let lastApiError = null;
+
 export async function apiFetch(url, options = {}) {
+    const started = performance.now();
+    const elapsed = () => `${Math.round(performance.now() - started)}ms`;
+    lastApiError = null;
     console.log(`[API_FETCH] Requesting: ${options.method || 'GET'} ${url}`);
     try {
         const response = await fetch(url, options);
-        console.log(`[API_FETCH] Response received for ${url}: Status ${response.status} ${response.statusText}`);
+        console.log(`[API_FETCH] Response received for ${url}: Status ${response.status} ${response.statusText} after ${elapsed()}`);
 
         // If the session expired, the server will return a 401 Unauthorized
         if (response.status === 401) {
             console.warn('[API_FETCH] 401 Unauthorized. Session expired or invalid.');
+            lastApiError = { status: 401, message: 'Session expired' };
             showLoginScreen("Your session has expired. Please log in again.");
             return null; // Prevent further processing of this response
         }
@@ -30,13 +37,18 @@ export async function apiFetch(url, options = {}) {
         // Handle other non-ok responses
         if (!response.ok) {
             let errorData = {};
+            // A reverse proxy's 502/504 is usually an HTML page, so keep the raw text for the log.
+            const raw = await response.text().catch(() => '');
             try {
-                errorData = await response.json(); // Try to parse error message if available
+                errorData = JSON.parse(raw);
             } catch (e) {
-                console.warn(`[API_FETCH] Could not parse error response as JSON for ${url}:`, e);
+                console.warn(`[API_FETCH] Could not parse error response as JSON for ${url}. Body starts: "${raw.slice(0, 300).replace(/\s+/g, ' ')}"`);
                 errorData.error = response.statusText || 'An unknown error occurred.';
             }
-            console.error(`[API_FETCH] API call failed for ${url}: Status ${response.status}, Error: ${errorData.error || 'No specific error message.'}`);
+            const hdr = (n) => response.headers.get(n) || 'n/a';
+            console.error(`[API_FETCH] API call failed for ${url}: Status ${response.status}, Error: ${errorData.error || 'No specific error message.'} `
+                + `(after ${elapsed()}, content-type=${hdr('content-type')}, server=${hdr('server')}, via=${hdr('via')}, cf-ray=${hdr('cf-ray')})`);
+            lastApiError = { status: response.status, message: errorData.error || response.statusText };
             showNotification(errorData.error || `API Error: ${response.status} ${response.statusText}`, true);
             return null;
         }
@@ -44,7 +56,10 @@ export async function apiFetch(url, options = {}) {
         console.log(`[API_FETCH] API call to ${url} successful.`);
         return response;
     } catch (error) {
-        console.error(`[API_FETCH] Network or unexpected error during fetch for ${url}:`, error);
+        // fetch() only rejects when no HTTP response arrived (dropped connection, proxy cut, DNS, offline, abort).
+        console.error(`[API_FETCH] Network or unexpected error during fetch for ${options.method || 'GET'} ${url} after ${elapsed()}: `
+            + `${error.name}: ${error.message} (navigator.onLine=${navigator.onLine}, page=${location.origin})`, error);
+        lastApiError = { status: null, message: `${error.name}: ${error.message}` };
         showNotification("Could not connect to the server. Please check your network or server status.", true);
         return null;
     }

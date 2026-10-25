@@ -107,6 +107,32 @@ const safeUrlForLog = (value) => {
     }
 };
 
+// Like safeUrlForLog but keeps path and query keys for diagnosing provider requests. Query values are masked,
+// and so are the credential segments of /live|movie|series/<user>/<pass>/<id> stream paths.
+const redactUrlForLog = (value) => {
+    try {
+        const u = new URL(value);
+        const segs = u.pathname.split('/');
+        if (['live', 'movie', 'series'].includes(segs[1])) segs.splice(2, 2, '***', '***');
+        const keys = [...new Set(u.searchParams.keys())].map(k => `${k}=***`).join('&');
+        return `${u.origin}${segs.join('/')}${keys ? `?${keys}` : ''}`;
+    } catch (e) {
+        return '[invalid url]';
+    }
+};
+const SENSITIVE_HEADER = /^(authorization|cookie|set-cookie|proxy-authorization|x-api-key)$/i;
+const redactHeaders = (headers = {}) => Object.fromEntries(
+    Object.entries(headers).map(([k, v]) => [k, SENSITIVE_HEADER.test(k) ? '[redacted]' : v]));
+// The bits of a Node network error that say why it failed (ECONNRESET, ETIMEDOUT, ENOTFOUND, ...). Nested
+// causes (AggregateError from happy-eyeballs, undici's `cause`) are included.
+const describeNetError = (err) => {
+    const e = err?.cause || err;
+    return `code=${err?.code || e?.code || 'n/a'} syscall=${e?.syscall || 'n/a'} errno=${e?.errno ?? 'n/a'} `
+        + `address=${e?.address || 'n/a'}:${e?.port ?? 'n/a'} hostname=${e?.hostname || 'n/a'} message="${err?.message}"`
+        + (e !== err ? ` cause="${e?.message}"` : '')
+        + (err?.errors?.length ? ` errors=[${err.errors.map(x => `${x.code}@${x.address}:${x.port}`).join(', ')}]` : '');
+};
+
 // Stable, non-reversible stream identity. Also used inside activeStreamProcesses keys, so
 // the provider URL (and its credentials) never lands in a log line or the admin activity feed.
 const streamUrlKey = (url) => crypto.createHash('sha256').update(String(url)).digest('hex').slice(0, 32);
@@ -1778,9 +1804,22 @@ function fetchUrlContent(url, options = {}, asStream = false) { // asStream reso
     return new Promise((resolve, reject) => {
         const protocol = url.startsWith('https') ? https : http;
         const TIMEOUT_DURATION = 180000;
-        console.log(`[FETCH] Attempting to fetch URL content from ${safeUrlForLog(url)} (Timeout: ${TIMEOUT_DURATION / 1000}s)`);
+        const started = Date.now();
+        const elapsed = () => `${Date.now() - started}ms`;
+        const label = `GET ${redactUrlForLog(url)}`;
+        console.log(`[FETCH] ${label} (Timeout: ${TIMEOUT_DURATION / 1000}s) headers=${JSON.stringify(redactHeaders(options.headers))}`);
 
         const request = protocol.get(url, { timeout: TIMEOUT_DURATION, ...options }, (res) => { // <-- MODIFIED
+            const h = res.headers;
+            console.log(`[FETCH] ${label} -> ${res.statusCode} ${res.statusMessage || ''} after ${elapsed()} (headers received) `
+                + `content-type=${h['content-type'] || 'n/a'} content-length=${h['content-length'] || 'n/a'} `
+                + `content-encoding=${h['content-encoding'] || 'n/a'} server=${h.server || 'n/a'}`);
+            // A body that dies mid-download (reverse proxy cut, provider reset) never fires request 'error'.
+            res.on('error', (err) => {
+                console.error(`[FETCH] ${label} response stream error after ${elapsed()}: ${describeNetError(err)}`);
+                reject(err);
+            });
+            res.on('aborted', () => console.error(`[FETCH] ${label} connection aborted by the remote end after ${elapsed()}`));
             if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
                 let nextUrl;
                 try {
@@ -1788,13 +1827,19 @@ function fetchUrlContent(url, options = {}, asStream = false) { // asStream reso
                 } catch (e) {
                     return reject(new Error('Invalid redirect location.'));
                 }
-                console.log(`[FETCH] Redirecting to: ${safeUrlForLog(nextUrl)}`);
+                console.log(`[FETCH] Redirecting to: ${redactUrlForLog(nextUrl)}`);
                 request.abort();
                 return fetchUrlContent(nextUrl, options, asStream).then(resolve, reject);
             }
             if (res.statusCode !== 200) {
-                console.error(`[FETCH] Failed to fetch ${safeUrlForLog(url)}: Status Code ${res.statusCode}`);
-                return reject(new Error(`Failed to fetch: Status Code ${res.statusCode}`));
+                let snippet = '';
+                res.setEncoding('utf8');
+                res.on('data', (chunk) => { if (snippet.length < 300) snippet += chunk; });
+                res.on('end', () => {
+                    console.error(`[FETCH] Failed ${label}: Status Code ${res.statusCode} after ${elapsed()} body="${snippet.slice(0, 300).replace(/\s+/g, ' ')}"`);
+                    reject(new Error(`Failed to fetch: Status Code ${res.statusCode}`));
+                });
+                return;
             }
 
             if (asStream) return resolve(res);
@@ -1803,7 +1848,7 @@ function fetchUrlContent(url, options = {}, asStream = false) { // asStream reso
             res.setEncoding('utf8');
             res.on('data', (chunk) => { data += chunk; });
             res.on('end', () => {
-                console.log(`[FETCH] Successfully fetched content from: ${safeUrlForLog(url)}`);
+                console.log(`[FETCH] Fetched ${label}: ${data.length} chars in ${elapsed()}`);
                 resolve(data);
             });
         });
@@ -1811,12 +1856,12 @@ function fetchUrlContent(url, options = {}, asStream = false) { // asStream reso
         request.on('timeout', () => {
             request.destroy();
             const timeoutError = new Error(`Request to ${safeUrlForLog(url)} timed out after ${TIMEOUT_DURATION / 1000} seconds.`);
-            console.error(`[FETCH] ${timeoutError.message}`);
+            console.error(`[FETCH] ${label} idle timeout after ${elapsed()} (no data for ${TIMEOUT_DURATION / 1000}s)`);
             reject(timeoutError);
         });
 
         request.on('error', (err) => {
-            console.error(`[FETCH] Network error fetching ${safeUrlForLog(url)}: ${err.message}`);
+            console.error(`[FETCH] Network error ${label} after ${elapsed()}: ${describeNetError(err)}`);
             reject(err);
         });
     });
@@ -3764,7 +3809,10 @@ app.delete('/api/sources/:sourceType/:id', requireAuth, requireAdmin, async (req
 });
 
 app.post('/api/process-sources', requireAuth, requireAdmin, async (req, res) => {
-    console.log('[API] Received request to /api/process-sources (manual trigger).');
+    const t0 = Date.now();
+    console.log(`[API] Received request to /api/process-sources (manual trigger). via=${req.headers.via || 'n/a'} x-forwarded-for=${req.headers['x-forwarded-for'] || 'n/a'}`);
+    // Fires if the browser (or a proxy in front of us) hangs up before we answered: the client then reports "Could not connect".
+    res.on('close', () => { if (!res.writableFinished) console.error(`[API] /api/process-sources: connection closed before the response was sent, after ${Date.now() - t0}ms (client or reverse proxy gave up; processing continues on the server).`); });
     const { sourceId } = req.body || {}; // optional: refresh only this source
     const settings = getSettings();
     if (sourceId && ![...settings.m3uSources, ...settings.epgSources].some(s => s.id === sourceId && s.isActive)) {
@@ -3776,7 +3824,7 @@ app.post('/api/process-sources', requireAuth, requireAdmin, async (req, res) => 
 
         // Save the successful sources even when another one failed.
         saveProcessedSettings(result.updatedSettings);
-        console.log('[API] Source processing completed and settings saved (manual trigger).');
+        console.log(`[API] Source processing completed and settings saved (manual trigger) in ${Date.now() - t0}ms.`);
         res.json({ success: result.success, message: result.message, failedSources: result.failedSources });
     }
     catch (error) {
