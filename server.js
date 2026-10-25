@@ -21,6 +21,9 @@ const SQLiteStore = require('connect-sqlite3')(session);
 const { configureConnection, INDEX_DDL } = require('./dbConfig');
 const { throttleSessionTouch } = require('./sessionTouch');
 const { createUserCache } = require('./userCache');
+const { createTransactionRunner, openConnection } = require('./dbTransaction');
+const { createVodStore } = require('./vodStore');
+const { createLibraryCache } = require('./vodLibraryCache');
 const xmlJS = require('xml-js');
 const zlib = require('zlib');
 const webpush = require('web-push');
@@ -28,7 +31,7 @@ const schedule = require('node-schedule');
 const disk = require('diskusage');
 const si = require('systeminformation'); // NEW: For system health monitoring
 //vod processor
-const { refreshVodContent, processM3uVod } = require('./vodProcessor');
+const { refreshVodContent } = require('./vodProcessor');
 const XtreamClient = require('./xtreamClient');
 
 
@@ -345,6 +348,9 @@ const db = new sqlite3.Database(DB_PATH, (err) => {
             });
             // Refresh planner statistics so the new indexes are picked correctly.
             db.run('PRAGMA optimize');
+            // Runs after the statements above, so the VOD tables exist: adds the unique keys the
+            // VOD upserts rely on (and removes duplicate episodes first).
+            db.run('SELECT 1', () => { vodStore.ready().catch(() => { }); });
 
             // --- DVR Job Loading, Scheduling and Restart Recovery ---
             console.log('[DVR] Checking and recovering pending/active DVR jobs from database...');
@@ -711,6 +717,17 @@ const dbAll = (db, sql, params = []) => {
     });
 };
 // --- End Database Helper Functions ---
+
+// Multi-statement transactions run on a connection of their own, one at a time, so they can no
+// longer interleave with other requests' statements on the shared `db` (see dbTransaction.js).
+const { withTransaction } = createTransactionRunner(async () => {
+    await dbConfigured; // the main connection sets the journal mode first
+    return openConnection(DB_PATH, 'tx');
+});
+
+// Serialized /api/vod/library responses, dropped whenever the VOD catalog changes.
+const vodLibraryCache = createLibraryCache();
+const vodStore = createVodStore({ db, withTransaction, onChange: () => vodLibraryCache.invalidate() });
 
 
 /**
@@ -1365,10 +1382,9 @@ initializeLogSystem();
 /**
  * Initiates the VOD refresh process for a given XC provider.
  * @param {object} provider - The M3U source object (must be type 'xc').
- * @param {sqlite3.Database} dbInstance - The active database connection.
  * @param {function} sendStatus - Function to send status updates.
  */
-async function triggerVodRefreshForProvider(provider, dbInstance, sendStatus = () => { }) {
+async function triggerVodRefreshForProvider(provider, sendStatus = () => { }) {
     if (!provider || provider.type !== 'xc' || !provider.xc_data) {
         console.error(`[VOD Trigger] Invalid provider object passed for VOD refresh. ID: ${provider?.id}`);
         return;
@@ -1381,7 +1397,7 @@ async function triggerVodRefreshForProvider(provider, dbInstance, sendStatus = (
         const settings = getSettings();
         const activeUserAgent = settings.userAgents.find(ua => ua.id === settings.activeUserAgentId)?.value || 'VLC/3.0.20 (Linux; x86_64)';
         // Call the main processing function from vodProcessor.js
-        await refreshVodContent(dbInstance, dbGet, dbAll, dbRun, provider, sendStatus, activeUserAgent);
+        await refreshVodContent(vodStore, provider, sendStatus, activeUserAgent);
 
         console.log(`[VOD Trigger] Successfully finished VOD refresh for provider: ${provider.name}`);
 
@@ -1624,14 +1640,6 @@ async function processAndMergeSources(req) {
                 sendProcessingStatus(req, ` -> Successfully fetched M3U content from XC server.`, 'info');
             }
 
-            // --- NEW: Trigger VOD Refresh for all non-XC Sources ---
-            if (source.type === 'file' || source.type === 'url') {
-                console.log(`[PROCESS] Source "${source.name}" is a non-XC M3U. Triggering VOD processing.`);
-                sendProcessingStatus(req, ` -> Triggering VOD content processing for M3U source "${source.name}"...`, 'info');
-                await processM3uVod(db, dbGet, dbAll, dbRun, content, source, (msg, type) => sendProcessingStatus(req, msg, type));
-            }
-            // --- END VOD Trigger ---
-
             const lines = content.split('\n');
             let currentExtInf = '';
             let liveStreamCount = 0;
@@ -1705,8 +1713,7 @@ async function processAndMergeSources(req) {
                 console.log(`[PROCESS] Source "${source.name}" is XC. Triggering VOD refresh.`);
                 sendProcessingStatus(req, ` -> Triggering VOD content refresh for XC source "${source.name}"...`, 'info');
                 // Use setImmediate to run the VOD refresh *after* the current M3U processing finishes
-                // Pass the source object and the global db instance
-                await triggerVodRefreshForProvider(source, db, (msg, type) => sendProcessingStatus(req, msg, type));
+                await triggerVodRefreshForProvider(source, (msg, type) => sendProcessingStatus(req, msg, type));
             }
             // --- END VOD Trigger ---
 
@@ -2436,6 +2443,105 @@ app.get('/api/config', requireAuth, async (req, res) => {
     }
 });
 
+// Builds the /api/vod/library payload from the database. Only runs on a cache miss.
+async function buildVodLibrary(providerMap, allowedSources) {
+    const activeProviderIds = Array.from(providerMap.keys());
+    const providerIdPlaceholders = activeProviderIds.map(() => '?').join(',');
+
+    // 2. Fetch all movies from active providers
+    const movieQuery = `
+        SELECT m.provider_unique_id, m.name, m.year, m.description, m.logo, m.tmdb_id, m.imdb_id, m.category_name, r.stream_id, r.container_extension, r.provider_id
+        FROM movies m
+        JOIN provider_movie_relations r ON m.id = r.movie_id
+        WHERE r.provider_id IN (${providerIdPlaceholders})
+        ORDER BY m.name
+    `;
+    const movies = await dbAll(db, movieQuery, activeProviderIds);
+
+    const processedMovies = movies.map(m => {
+        const provider = providerMap.get(m.provider_id);
+        if (!provider) return null; // Skip if provider is not active
+
+        // PERMISSION CHECK: Filter by category if strict groups are defined
+        if (allowedSources) {
+            const perms = allowedSources[m.provider_id];
+            if (perms && perms.allowed) {
+                const allowedGroups = perms.groups || [];
+                // If whitelist exists (length > 0) AND this category is NOT in it, skip
+                if (allowedGroups.length > 0 && !allowedGroups.includes(m.category_name)) {
+                    return null;
+                }
+            }
+        }
+
+        const ext = m.container_extension || 'mp4';
+        // Build the full playable URL
+        const url = `${provider.baseUrl}/movie/${provider.username}/${provider.password}/${m.stream_id}.${ext}`;
+        return {
+            id: m.provider_unique_id, // Use the stable provider_unique_id
+            name: m.name,
+            year: m.year,
+            description: m.description,
+            logo: m.logo,
+            tmdb_id: m.tmdb_id,
+            imdb_id: m.imdb_id,
+            url: url, // The all-important URL
+            type: 'movie',
+            group: m.category_name
+        };
+    }).filter(Boolean); // Filter out null entries
+    console.log(`[API_VOD] Fetched ${processedMovies.length} movies from DB.`);
+
+    // 3. Fetch all series headers from active providers
+    // Added r.provider_id to SELECT so we can filter permissions
+    const seriesQuery = `
+        SELECT DISTINCT s.provider_unique_id, s.name, s.year, s.description, s.logo, s.tmdb_id, s.imdb_id, s.category_name, r.provider_id
+        FROM series s
+        JOIN provider_series_relations r ON s.id = r.series_id
+        WHERE r.provider_id IN (${providerIdPlaceholders})
+        ORDER BY s.name
+    `;
+    const seriesList = await dbAll(db, seriesQuery, activeProviderIds);
+
+    // Process series headers with permission checks
+    const processedSeries = seriesList.map(series => {
+        // PERMISSION CHECK: Filter by category if strict groups are defined
+        if (allowedSources) {
+            const perms = allowedSources[series.provider_id];
+            if (perms && perms.allowed) {
+                const allowedGroups = perms.groups || [];
+                // If whitelist exists (length > 0) AND this category is NOT in it, skip
+                if (allowedGroups.length > 0 && !allowedGroups.includes(series.category_name)) {
+                    return null;
+                }
+            }
+        }
+
+        return {
+            ...series,
+            type: 'series',
+            id: series.provider_unique_id, // Use the stable provider_unique_id
+            group: series.category_name
+            // seasons property removed as it is lazy loaded
+        };
+    }).filter(Boolean);
+
+    console.log(`[API_VOD] Processed ${processedSeries.length} series headers (filtered). Episodes will be lazy-loaded.`);
+
+    // FIX: Derive categories from the filtered content to ensure we only show relevant groups
+    const uniqueCategories = new Set();
+    processedMovies.forEach(m => {
+        if (m.group) uniqueCategories.add(m.group);
+    });
+    processedSeries.forEach(s => {
+        if (s.group) uniqueCategories.add(s.group);
+    });
+
+    const categoryNames = Array.from(uniqueCategories).sort();
+
+    return { movies: processedMovies, series: processedSeries, categories: categoryNames };
+}
+
 // --- NEW: VOD Library Endpoint (Reads from DB and builds URLs) ---
 app.get('/api/vod/library', requireAuth, async (req, res) => {
     console.log('[API_VOD] Request received for /api/vod/library (DB Query)');
@@ -2491,106 +2597,22 @@ app.get('/api/vod/library', requireAuth, async (req, res) => {
             return res.json({ movies: [], series: [] });
         }
 
-        const providerIdPlaceholders = activeProviderIds.map(() => '?').join(',');
+        // Everything the response depends on: the providers and their credentials (they end up in the
+        // stream URLs) and, per provider, the categories this user is allowed to see.
+        const cacheKey = crypto.createHash('sha1').update(JSON.stringify(
+            activeProviderIds.map(id => [id, providerMap.get(id), allowedSources ? [...(allowedSources[id]?.groups || [])].sort() : null])
+        )).digest('hex');
 
-        // 2. Fetch all movies from active providers
-        const movieQuery = `
-            SELECT m.provider_unique_id, m.name, m.year, m.description, m.logo, m.tmdb_id, m.imdb_id, m.category_name, r.stream_id, r.container_extension, r.provider_id
-            FROM movies m
-            JOIN provider_movie_relations r ON m.id = r.movie_id
-            WHERE r.provider_id IN (${providerIdPlaceholders})
-            ORDER BY m.name
-        `;
-        const movies = await dbAll(db, movieQuery, activeProviderIds);
-
-        const processedMovies = movies.map(m => {
-            const provider = providerMap.get(m.provider_id);
-            if (!provider) return null; // Skip if provider is not active
-
-            // PERMISSION CHECK: Filter by category if strict groups are defined
-            if (allowedSources) {
-                const perms = allowedSources[m.provider_id];
-                if (perms && perms.allowed) {
-                    const allowedGroups = perms.groups || [];
-                    // If whitelist exists (length > 0) AND this category is NOT in it, skip
-                    if (allowedGroups.length > 0 && !allowedGroups.includes(m.category_name)) {
-                        return null;
-                    }
-                }
-            }
-
-            const ext = m.container_extension || 'mp4';
-            // Build the full playable URL
-            const url = `${provider.baseUrl}/movie/${provider.username}/${provider.password}/${m.stream_id}.${ext}`;
-            return {
-                id: m.provider_unique_id, // Use the stable provider_unique_id
-                name: m.name,
-                year: m.year,
-                description: m.description,
-                logo: m.logo,
-                tmdb_id: m.tmdb_id,
-                imdb_id: m.imdb_id,
-                url: url, // The all-important URL
-                type: 'movie',
-                group: m.category_name
-            };
-        }).filter(Boolean); // Filter out null entries
-        console.log(`[API_VOD] Fetched ${processedMovies.length} movies from DB.`);
-
-        // 3. Fetch all series headers from active providers
-        // Added r.provider_id to SELECT so we can filter permissions
-        const seriesQuery = `
-            SELECT DISTINCT s.provider_unique_id, s.name, s.year, s.description, s.logo, s.tmdb_id, s.imdb_id, s.category_name, r.provider_id
-            FROM series s
-            JOIN provider_series_relations r ON s.id = r.series_id
-            WHERE r.provider_id IN (${providerIdPlaceholders})
-            ORDER BY s.name
-        `;
-        const seriesList = await dbAll(db, seriesQuery, activeProviderIds);
-
-        // Process series headers with permission checks
-        const processedSeries = seriesList.map(series => {
-            // PERMISSION CHECK: Filter by category if strict groups are defined
-            if (allowedSources) {
-                const perms = allowedSources[series.provider_id];
-                if (perms && perms.allowed) {
-                    const allowedGroups = perms.groups || [];
-                    // If whitelist exists (length > 0) AND this category is NOT in it, skip
-                    if (allowedGroups.length > 0 && !allowedGroups.includes(series.category_name)) {
-                        return null;
-                    }
-                }
-            }
-
-            return {
-                ...series,
-                type: 'series',
-                id: series.provider_unique_id, // Use the stable provider_unique_id
-                group: series.category_name
-                // seasons property removed as it is lazy loaded
-            };
-        }).filter(Boolean);
-
-        console.log(`[API_VOD] Processed ${processedSeries.length} series headers (filtered). Episodes will be lazy-loaded.`);
-
-        // 5. Respond
-        // 5. Respond
-        // FIX: Derive categories from the filtered content to ensure we only show relevant groups
-        const uniqueCategories = new Set();
-        processedMovies.forEach(m => {
-            if (m.group) uniqueCategories.add(m.group);
-        });
-        processedSeries.forEach(s => {
-            if (s.group) uniqueCategories.add(s.group);
-        });
-
-        const categoryNames = Array.from(uniqueCategories).sort();
-
-        res.json({
-            movies: processedMovies,
-            series: processedSeries,
-            categories: categoryNames
-        });
+        const library = await vodLibraryCache.get(cacheKey, () => buildVodLibrary(providerMap, allowedSources));
+        res.set({ 'Content-Type': 'application/json; charset=utf-8', 'Vary': 'Accept-Encoding' });
+        if (req.acceptsEncodings('gzip')) {
+            const compressed = await library.gzip();
+            res.set({ 'Content-Encoding': 'gzip', 'ETag': library.gzipEtag });
+            res.send(compressed);
+        } else {
+            res.set('ETag', library.etag);
+            res.send(library.body);
+        }
 
     } catch (error) {
         console.error(`[API_VOD] Error fetching VOD library from DB: ${error.message}`, error);
@@ -2727,7 +2749,10 @@ app.get('/api/vod/series/:seriesId', requireAuth, async (req, res) => {
                             const director = seriesDetails.info.director || seriesInfo.director || null;
                             const cast = seriesDetails.info.cast || seriesInfo.cast || null;
                             if ((director && director !== seriesInfo.director) || (cast && cast !== seriesInfo.cast)) {
-                                db.run("UPDATE series SET director = COALESCE(?, director), cast = COALESCE(?, cast) WHERE id = ?", [director, cast, numericSeriesId], () => { });
+                                // "cast" is quoted because CAST is an SQL keyword: unquoted, this statement was a syntax error whose failure the empty callback hid.
+                                db.run('UPDATE series SET director = COALESCE(?, director), "cast" = COALESCE(?, "cast") WHERE id = ?', [director, cast, numericSeriesId], (updateErr) => {
+                                    if (updateErr) console.error(`[API_VOD_SERIES] Could not save director/cast for Series ID ${numericSeriesId}: ${updateErr.message}`);
+                                });
                                 seriesInfo.director = director || seriesInfo.director;
                                 seriesInfo.cast = cast || seriesInfo.cast;
                             }
@@ -2735,63 +2760,35 @@ app.get('/api/vod/series/:seriesId', requireAuth, async (req, res) => {
 
                         if (seriesDetails && seriesDetails.episodes && typeof seriesDetails.episodes === 'object') {
                             console.log(`[API_VOD_SERIES] Processing episodes and metadata from provider for Series ID ${numericSeriesId}...`);
-                            const episodeInsertStmt = db.prepare(`INSERT OR IGNORE INTO episodes (series_id, season_num, episode_num, name, description, air_date, duration, duration_secs, tmdb_id, imdb_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-                            const episodeRelationInsertStmt = db.prepare(`INSERT OR IGNORE INTO provider_episode_relations (provider_id, episode_id, provider_stream_id, container_extension, last_seen) VALUES (?, ?, ?, ?, ?)`);
-                            const lastSeen = new Date().toISOString();
-
-                            await dbRun(db, "BEGIN TRANSACTION");
-                            try {
-                                for (const seasonNum in seriesDetails.episodes) {
-                                    const epList = seriesDetails.episodes[seasonNum];
-                                    if (!Array.isArray(epList)) continue;
-                                    for (const epData of epList) {
-                                        const actualSeason = epData.season !== undefined ? epData.season : parseInt(seasonNum, 10);
-                                        const actualEpisode = epData.episode_num !== undefined ? epData.episode_num : 1;
-                                        const durationSecs = parseInt(epData.info?.duration_secs || epData.duration_secs || 0, 10) || null;
-                                        const durationStr = epData.info?.duration || epData.duration || (durationSecs ? `${Math.floor(durationSecs / 60)} min` : null);
-                                        const airDate = epData.info?.releasedate || epData.info?.air_date || epData.releasedate || epData.air_date || null;
-                                        const plot = epData.info?.plot || epData.plot || null;
-                                        const title = epData.title || epData.name || `Episode ${actualEpisode}`;
-
-                                        let episodeId;
-                                        const existingEp = await dbGet(db, `SELECT id, duration, duration_secs, air_date FROM episodes WHERE series_id = ? AND season_num = ? AND episode_num = ?`, [numericSeriesId, actualSeason, actualEpisode]);
-
-                                        if (existingEp) {
-                                            episodeId = existingEp.id;
-                                            if ((durationSecs || durationStr || airDate) && (!existingEp.duration && !existingEp.duration_secs)) {
-                                                await new Promise((resolve) => {
-                                                    db.run("UPDATE episodes SET duration = COALESCE(?, duration), duration_secs = COALESCE(?, duration_secs), air_date = COALESCE(air_date, ?) WHERE id = ?",
-                                                        [durationStr, durationSecs, airDate, episodeId],
-                                                        () => resolve()
-                                                    );
-                                                });
-                                            }
-                                        } else {
-                                            const epResult = await new Promise((resolve, reject) => {
-                                                episodeInsertStmt.run(numericSeriesId, actualSeason, actualEpisode, title, plot, airDate, durationStr, durationSecs, null, null, function (err) {
-                                                    if (err) reject(err);
-                                                    else resolve(this);
-                                                });
-                                            });
-                                            episodeId = epResult.lastID;
-                                        }
-
-                                        await new Promise((resolve, reject) => {
-                                            episodeRelationInsertStmt.run(relation.provider_id, episodeId, String(epData.id), epData.container_extension || 'mp4', lastSeen, function (err) {
-                                                if (err) reject(err);
-                                                else resolve(this);
-                                            });
-                                        });
-                                    }
+                            const toInt = (value) => Number.parseInt(value, 10);
+                            const episodeRows = [];
+                            for (const seasonNum in seriesDetails.episodes) {
+                                const epList = seriesDetails.episodes[seasonNum];
+                                if (!Array.isArray(epList)) continue;
+                                for (const epData of epList) {
+                                    const actualSeason = toInt(epData.season !== undefined ? epData.season : seasonNum);
+                                    const actualEpisode = toInt(epData.episode_num !== undefined ? epData.episode_num : 1);
+                                    if (!Number.isFinite(actualSeason) || !Number.isFinite(actualEpisode) || epData.id === undefined || epData.id === null) continue;
+                                    const durationSecs = parseInt(epData.info?.duration_secs || epData.duration_secs || 0, 10) || null;
+                                    episodeRows.push({
+                                        season: actualSeason,
+                                        episode: actualEpisode,
+                                        name: epData.title || epData.name || `Episode ${actualEpisode}`,
+                                        description: epData.info?.plot || epData.plot || null,
+                                        airDate: epData.info?.releasedate || epData.info?.air_date || epData.releasedate || epData.air_date || null,
+                                        duration: epData.info?.duration || epData.duration || (durationSecs ? `${Math.floor(durationSecs / 60)} min` : null),
+                                        durationSecs,
+                                        streamId: epData.id,
+                                        containerExtension: epData.container_extension
+                                    });
                                 }
-                                await dbRun(db, "COMMIT");
+                            }
+
+                            try {
+                                await vodStore.saveEpisodes(numericSeriesId, relation.provider_id, episodeRows);
                                 console.log(`[API_VOD_SERIES] Successfully updated episodes and metadata for Series ID ${numericSeriesId}.`);
                             } catch (dbError) {
-                                await dbRun(db, "ROLLBACK");
                                 console.error(`[API_VOD_SERIES] DB Error saving episodes for Series ID ${numericSeriesId}: ${dbError.message}`);
-                            } finally {
-                                episodeInsertStmt.finalize();
-                                episodeRelationInsertStmt.finalize();
                             }
 
                             episodesToReturn = await dbAll(db, `
@@ -3269,20 +3266,9 @@ app.delete('/api/sources/:sourceType/:id', requireAuth, requireAdmin, async (req
     if (sourceType === 'm3u' && source.type === 'xc') {
         try {
             console.log(`[SOURCES_API] Deleting VOD relations for provider: ${id}`);
-            await dbRun(db, "BEGIN TRANSACTION");
-            await dbRun(db, `DELETE FROM provider_movie_relations WHERE provider_id = ?`, [id]);
-            await dbRun(db, `DELETE FROM provider_series_relations WHERE provider_id = ?`, [id]);
-            await dbRun(db, `DELETE FROM provider_episode_relations WHERE provider_id = ?`, [id]);
-
-            // Cleanup orphans
-            await dbRun(db, `DELETE FROM movies WHERE id NOT IN (SELECT DISTINCT movie_id FROM provider_movie_relations)`);
-            await dbRun(db, `DELETE FROM series WHERE id NOT IN (SELECT DISTINCT series_id FROM provider_series_relations)`);
-            await dbRun(db, `DELETE FROM episodes WHERE id NOT IN (SELECT DISTINCT episode_id FROM provider_episode_relations)`);
-
-            await dbRun(db, "COMMIT");
+            await vodStore.removeProvider(id);
             console.log(`[SOURCES_API] Successfully cleaned up VOD data for provider: ${id}`);
         } catch (dbErr) {
-            await dbRun(db, "ROLLBACK");
             console.error(`[SOURCES_API] Error cleaning up VOD data for provider ${id}:`, dbErr.message);
         }
     }
@@ -3718,6 +3704,7 @@ app.delete('/api/data', requireAuth, requireAdmin, (req, res) => {
         });
 
         userCache.clear();
+        vodLibraryCache.invalidate();
         console.log('[API_RESET] Hard reset complete. The application is now in a fresh-install state.');
         res.json({ success: true, message: 'All application data has been cleared.' });
 
