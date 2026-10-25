@@ -120,6 +120,8 @@ const redactUrlForLog = (value) => {
         return '[invalid url]';
     }
 };
+// A source path is a URL (may carry credentials) or a local file path.
+const sourcePathForLog = (p) => (/^https?:/i.test(p) ? redactUrlForLog(p) : p);
 const SENSITIVE_HEADER = /^(authorization|cookie|set-cookie|proxy-authorization|x-api-key)$/i;
 const redactHeaders = (headers = {}) => Object.fromEntries(
     Object.entries(headers).map(([k, v]) => [k, SENSITIVE_HEADER.test(k) ? '[redacted]' : v]));
@@ -1904,7 +1906,7 @@ async function mergeEpg(req, settings, liveChannels, onlyIds, failedSources) {
     const syntheticChannelIds = new Set(); // guide channels whose <channel id=""> had to be synthesized from the name
     const fallbackEpgSources = new Set(); // guides that failed to refresh and are re-merged from their cache
     for (const source of activeEpgSources) {
-        console.log(`[EPG] Processing source: "${source.name}" (ID: ${source.id}, Type: ${source.type}, Path: ${source.path})`);
+        console.log(`[EPG] Processing source: "${source.name}" (ID: ${source.id}, Type: ${source.type}, Path: ${sourcePathForLog(source.path)})`);
         const cached = onlyIds && !onlyIds.includes(source.id);
         sendProcessingStatus(req, `Processing EPG source: "${source.name}"...`, 'info');
         try {
@@ -1999,7 +2001,7 @@ async function mergeEpg(req, settings, liveChannels, onlyIds, failedSources) {
                 source.status = 'Success';
                 source.statusMessage = `Processed ${programCount} programs, added ${epgAddedCount} to live guide.`;
             }
-            console.log(`[EPG] Source "${source.name}" processed successfully from ${safeUrlForLog(source.path)}.`);
+            console.log(`[EPG] Source "${source.name}" processed successfully from ${sourcePathForLog(source.path)}.`);
             sendProcessingStatus(req, ` -> Processed ${programCount} programs, added ${epgAddedCount} to live guide from "${source.name}".`, 'info');
         } catch (error) {
             failEpg(source, error);
@@ -2060,7 +2062,7 @@ async function processAndMergeSources(req, onlyIds, keepStoredVod = false) {
     }
 
     for (const source of activeM3uSources) {
-        console.log(`[M3U] Processing source: "${source.name}" (ID: ${source.id}, Type: ${source.type}, Path: ${source.path})`);
+        console.log(`[M3U] Processing source: "${source.name}" (ID: ${source.id}, Type: ${source.type}, Path: ${sourcePathForLog(source.path)})`);
         const cached = onlyIds && !onlyIds.includes(source.id);
         sendProcessingStatus(req, `Processing M3U source: "${source.name}"...`, 'info');
 
@@ -2075,14 +2077,14 @@ async function processAndMergeSources(req, onlyIds, keepStoredVod = false) {
         let usedCachedFallback = false;
         try {
             let content = '';
-            let sourcePathForLog = source.path;
+            let processedPath = source.path;
             let m3uFetchOptions = {}; // NEW: For XC User-Agent
 
             if (source.type === 'file') {
                 const sourceFilePath = path.join(SOURCES_DIR, path.basename(source.path));
                 if (fs.existsSync(sourceFilePath)) {
                     content = fs.readFileSync(sourceFilePath, 'utf-8');
-                    sourcePathForLog = sourceFilePath;
+                    processedPath = sourceFilePath;
                 } else {
                     const errorMsg = `File not found for source "${source.name}". Skipping.`;
                     sendProcessingStatus(req, `Error: ${errorMsg}`, 'error');
@@ -2215,7 +2217,7 @@ async function processAndMergeSources(req, onlyIds, keepStoredVod = false) {
                     }
                 }
 
-                sourcePathForLog = liveStreamsUrl;
+                processedPath = liveStreamsUrl;
                 sendProcessingStatus(req, ` -> Successfully fetched M3U content from XC server.`, 'info');
             }
 
@@ -2290,7 +2292,7 @@ async function processAndMergeSources(req, onlyIds, keepStoredVod = false) {
                 source.status = 'Success';
                 source.statusMessage = `Processed ${liveStreamCount} Live channels.`;
             }
-            console.log(`[M3U] Source "${source.name}" processed successfully from ${sourcePathForLog}.`);
+            console.log(`[M3U] Source "${source.name}" processed successfully from ${sourcePathForLog(processedPath)}.`);
             sendProcessingStatus(req, ` -> Processed ${liveStreamCount} Live channels from "${source.name}".`, 'info');
 
             // --- NEW: Trigger VOD Refresh for XC Sources ---
