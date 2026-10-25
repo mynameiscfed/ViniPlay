@@ -9,7 +9,7 @@ const axios = require('axios');
 const { normalizeName } = require('./epgMatch');
 
 const API = 'https://openrouter.ai/api/v1';
-const BATCH = 25; // channels per request
+const BATCH = 100; // channels per request
 const MODELS_TTL = 60 * 60 * 1000;
 
 const SYSTEM = [
@@ -41,7 +41,7 @@ async function chat({ apiKey, model, messages, maxTokens, post = axios.post }) {
     let res;
     try {
         res = await post(`${API}/chat/completions`, { model, temperature: 0, max_tokens: maxTokens, messages },
-            { headers: { Authorization: `Bearer ${apiKey}`, 'X-Title': 'ViniPlay' }, timeout: 60000 });
+            { headers: { Authorization: `Bearer ${apiKey}`, 'X-Title': 'ViniPlay' }, timeout: 120000 }); // a 100-channel batch can take a minute
     } catch (e) {
         throw upstream(e);
     }
@@ -72,7 +72,7 @@ async function pickWithLlm(items, { apiKey, model, post }) {
             candidates: it.candidates.map(({ id, names }) => ({ id, names, norm: [...new Set(names.map(normalizeName))] })),
         }]));
         const reply = await chat({
-            apiKey, model, post, maxTokens: 800,
+            apiKey, model, post, maxTokens: 3000, // ~25 tokens per answer, 100 answers
             messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: JSON.stringify(listing) }],
         });
         const choices = parseChoices(reply);

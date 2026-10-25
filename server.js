@@ -3617,7 +3617,7 @@ function startMatch(useAi) {
     const items = (readChannels() || [])
         .filter((c) => !overrides[c.id] && !withGuide.has(c.id) && !stored.has(c.id))
         .map((c) => ({ id: c.id, name: c.displayName, group: c.group }));
-    const chunkSize = useAi ? 25 : 300;
+    const chunkSize = useAi ? 100 : 300; // one AI request per chunk (epgLlm BATCH)
     const chunks = [];
     for (let i = 0; i < items.length; i += chunkSize) chunks.push(items.slice(i, i + chunkSize));
 

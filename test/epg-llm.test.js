@@ -18,16 +18,16 @@ test('an unreadable answer gives no picks instead of failing the run', async () 
     assert.deepStrictEqual(picks, [undefined]);
 });
 
-test('sends batches of 25 with the key and model, never more than the candidates', async () => {
+test('sends batches of 100 with the key and model, never more than the candidates', async () => {
     const calls = [];
     const post = async (url, body, config) => { calls.push({ url, body, config }); return { data: { choices: [{ message: { content: '{}' } }] } }; };
-    await pickWithLlm(Array.from({ length: 60 }, (_, i) => item(`C${i}`, 'X.us')), { apiKey: 'sekret', model: 'some/model', post });
+    await pickWithLlm(Array.from({ length: 250 }, (_, i) => item(`C${i}`, 'X.us')), { apiKey: 'sekret', model: 'some/model', post });
     assert.strictEqual(calls.length, 3);
     assert.strictEqual(calls[0].url, 'https://openrouter.ai/api/v1/chat/completions');
     assert.strictEqual(calls[0].config.headers.Authorization, 'Bearer sekret');
     assert.strictEqual(calls[0].body.model, 'some/model');
-    assert.strictEqual(Object.keys(JSON.parse(calls[0].body.messages[1].content)).length, 25);
-    assert.strictEqual(Object.keys(JSON.parse(calls[2].body.messages[1].content)).length, 10);
+    assert.strictEqual(Object.keys(JSON.parse(calls[0].body.messages[1].content)).length, 100);
+    assert.strictEqual(Object.keys(JSON.parse(calls[2].body.messages[1].content)).length, 50);
 });
 
 test('sends the app-normalized names beside the raw ones, and only name, group and candidates', async () => {
