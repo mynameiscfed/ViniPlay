@@ -742,7 +742,34 @@ function renderSettingsOverview() {
             </button>`).join('')}</div>`;
 }
 
+// Number fields get - and + buttons: big targets for touch and a remote, and one save when the clicking stops.
+function addSteppers() {
+    document.querySelectorAll('#page-settings input[type="number"]:not([data-stepper])').forEach((input) => {
+        input.dataset.stepper = '1';
+        let timer = 0;
+        const btn = (label, step) => {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.className = 'chip flex-none justify-center';
+            b.textContent = label;
+            b.setAttribute('aria-label', `${step > 0 ? 'Increase' : 'Decrease'} ${input.labels?.[0]?.textContent.trim() || 'value'}`);
+            b.addEventListener('click', () => {
+                if (step > 0) input.stepUp(); else input.stepDown();
+                clearTimeout(timer);
+                timer = setTimeout(() => input.dispatchEvent(new Event('change', { bubbles: true })), 600);
+            });
+            return b;
+        };
+        const wrap = document.createElement('div');
+        wrap.className = 'flex items-center gap-2';
+        input.replaceWith(wrap);
+        input.classList.add('text-center', 'min-w-0');
+        wrap.append(btn('−', -1), input, btn('+', 1));
+    });
+}
+
 export const renderSettingsNav = () => {
+    addSteppers();
     const nav = document.getElementById('settings-nav');
     if (!document.getElementById('settings-overview')) nav.insertAdjacentHTML('afterend', '<section id="settings-overview" aria-label="Overview"></section>');
     nav.innerHTML = SETTINGS_PAGES.map(([key, label]) => `<button type="button" class="chip" data-page="${key}">${label}</button>`).join('');
