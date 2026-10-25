@@ -21,8 +21,9 @@ const SQLiteStore = require('connect-sqlite3')(session);
 const { configureConnection, INDEX_DDL } = require('./dbConfig');
 const { throttleSessionTouch } = require('./sessionTouch');
 const { createUserCache } = require('./userCache');
-const xmlJS = require('xml-js');
 const zlib = require('zlib');
+const { pipeline } = require('stream');
+const { forEachProgramme } = require('./epgStream');
 const webpush = require('web-push');
 const schedule = require('node-schedule');
 const disk = require('diskusage');
@@ -1394,7 +1395,7 @@ async function triggerVodRefreshForProvider(provider, dbInstance, sendStatus = (
 
 // ... existing helper functions (fetchUrlContent, parseEpgTime, processAndMergeSources) remain the same ...
 
-function fetchUrlContent(url, options = {}, asBuffer = false) { // <-- MODIFIED
+function fetchUrlContent(url, options = {}, asStream = false) { // asStream resolves with the response stream, unread
     return new Promise((resolve, reject) => {
         const protocol = url.startsWith('https') ? https : http;
         const TIMEOUT_DURATION = 60000;
@@ -1404,30 +1405,22 @@ function fetchUrlContent(url, options = {}, asBuffer = false) { // <-- MODIFIED
             if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
                 console.log(`[FETCH] Redirecting to: ${res.headers.location}`);
                 request.abort();
-                // Pass the asBuffer flag through redirects
-                return fetchUrlContent(new URL(res.headers.location, url).href, options, asBuffer).then(resolve, reject);
+                return fetchUrlContent(new URL(res.headers.location, url).href, options, asStream).then(resolve, reject);
             }
             if (res.statusCode !== 200) {
                 console.error(`[FETCH] Failed to fetch ${url}: Status Code ${res.statusCode}`);
                 return reject(new Error(`Failed to fetch: Status Code ${res.statusCode}`));
             }
 
-            if (asBuffer) {
-                const chunks = [];
-                res.on('data', (chunk) => chunks.push(chunk));
-                res.on('end', () => {
-                    console.log(`[FETCH] Successfully fetched content as buffer from: ${url}`);
-                    resolve(Buffer.concat(chunks));
-                });
-            } else {
-                let data = '';
-                res.setEncoding('utf8');
-                res.on('data', (chunk) => { data += chunk; });
-                res.on('end', () => {
-                    console.log(`[FETCH] Successfully fetched content from: ${url}`);
-                    resolve(data);
-                });
-            }
+            if (asStream) return resolve(res);
+
+            let data = '';
+            res.setEncoding('utf8');
+            res.on('data', (chunk) => { data += chunk; });
+            res.on('end', () => {
+                console.log(`[FETCH] Successfully fetched content from: ${url}`);
+                resolve(data);
+            });
         });
 
         request.on('timeout', () => {
@@ -1481,6 +1474,7 @@ async function processAndMergeSources(req) {
 
     const activeM3uSources = settings.m3uSources.filter(s => s.isActive);
     const activeEpgSources = settings.epgSources.filter(s => s.isActive);
+    const failedSources = []; // names, for the final summary
 
     if (activeM3uSources.length === 0) {
         console.log('[PROCESS] No active M3U sources found.');
@@ -1514,6 +1508,7 @@ async function processAndMergeSources(req) {
                     sendProcessingStatus(req, `Error: ${errorMsg}`, 'error');
                     source.status = 'Error';
                     source.statusMessage = 'File not found.';
+                    failedSources.push(source.name);
                     continue;
                 }
             } else if (source.type === 'url') {
@@ -1714,6 +1709,7 @@ async function processAndMergeSources(req) {
             const errorMsg = `Failed to process source "${source.name}" from ${source.path}: ${error.message}`;
             console.error(`[M3U] ${errorMsg}`);
             sendProcessingStatus(req, `Error: ${errorMsg}`, 'error');
+            failedSources.push(source.name);
             source.status = 'Error';
             source.statusMessage = `Processing failed: ${error.message.substring(0, 100)}...`;
         }
@@ -1743,54 +1739,33 @@ async function processAndMergeSources(req) {
         console.log(`[EPG] Processing source: "${source.name}" (ID: ${source.id}, Type: ${source.type}, Path: ${source.path})`);
         sendProcessingStatus(req, `Processing EPG source: "${source.name}"...`, 'info');
         try {
-            let xmlString = '';
-            let epgFilePath = path.join(SOURCES_DIR, `epg_${source.id}.xml`);
+            let stream;
 
             if (source.type === 'file') {
                 if (fs.existsSync(source.path)) {
-                    xmlString = fs.readFileSync(source.path, 'utf-8');
+                    stream = fs.createReadStream(source.path);
                 } else {
                     const errorMsg = `File not found for source "${source.name}". Skipping.`;
                     sendProcessingStatus(req, `Error: ${errorMsg}`, 'error');
                     source.status = 'Error';
                     source.statusMessage = 'File not found.';
+                    failedSources.push(source.name);
                     continue;
                 }
             } else if (source.type === 'url') {
                 sendProcessingStatus(req, ` -> Fetching content from URL...`, 'info');
-
-                // Use a different function to fetch raw buffer for compressed files
-                if (source.path.endsWith('.gz')) {
-                    const buffer = await fetchUrlContent(source.path, source.fetchOptions || {}, true); // Fetch as buffer
-                    xmlString = zlib.gunzipSync(buffer).toString('utf-8');
-                    sendProcessingStatus(req, ` -> Successfully fetched and decompressed EPG content.`, 'info');
-                } else {
-                    xmlString = await fetchUrlContent(source.path, source.fetchOptions || {});
-                    sendProcessingStatus(req, ` -> Successfully fetched EPG content.`, 'info');
-                }
-
-                try {
-                    fs.writeFileSync(epgFilePath, xmlString);
-                    console.log(`[EPG] Downloaded EPG for "${source.name}" saved to ${epgFilePath}.`);
-                } catch (writeErr) {
-                    console.error(`[EPG] Error saving EPG file from URL for "${source.name}": ${writeErr.message}`);
-                }
+                stream = await fetchUrlContent(source.path, source.fetchOptions || {}, true);
             }
+            // The guide is parsed as a stream: big ones don't fit in a single string.
+            if (source.path.endsWith('.gz')) stream = pipeline(stream, zlib.createGunzip(), () => {});
 
-            const epgJson = xmlJS.xml2js(xmlString, { compact: true });
-            const programs = epgJson.tv && epgJson.tv.programme ? [].concat(epgJson.tv.programme) : [];
             let programCount = 0;
             let epgAddedCount = 0; // NEW: Count only added programs
-
-            if (programs.length === 0) {
-                sendProcessingStatus(req, `Warning: No programs found in "${source.name}".`, 'info');
-            }
-
             const m3uSourceProviders = settings.m3uSources.filter(m3u => m3u.isActive);
 
-            for (const prog of programs) {
+            await forEachProgramme(stream, (prog) => {
                 const originalChannelId = prog._attributes?.channel;
-                if (!originalChannelId) continue;
+                if (!originalChannelId) return;
                 programCount++;
 
                 for (const m3uSource of m3uSourceProviders) {
@@ -1819,6 +1794,10 @@ async function processAndMergeSources(req) {
                         desc: descNode.trim()
                     });
                 }
+            });
+
+            if (programCount === 0) {
+                sendProcessingStatus(req, `Warning: No programs found in "${source.name}".`, 'info');
             }
             if (!source.isXcEpg) {
                 source.status = 'Success';
@@ -1831,6 +1810,7 @@ async function processAndMergeSources(req) {
             const errorMsg = `Failed to process source "${source.name}" from ${source.path}: ${error.message}`;
             console.error(`[EPG] ${errorMsg}`);
             sendProcessingStatus(req, `Error: ${errorMsg}`, 'error');
+            failedSources.push(source.name);
             if (!source.isXcEpg) {
                 source.status = 'Error';
                 source.statusMessage = `Processing failed: ${error.message.substring(0, 100)}...`;
@@ -1854,7 +1834,11 @@ async function processAndMergeSources(req) {
 
     settings.sourcesLastUpdated = new Date().toISOString();
     console.log(`[PROCESS] Finished processing. New 'sourcesLastUpdated' timestamp: ${settings.sourcesLastUpdated}`);
-    sendProcessingStatus(req, 'All sources processed successfully!', 'final_success');
+    if (failedSources.length) {
+        sendProcessingStatus(req, `Finished with ${failedSources.length} failed source(s): ${failedSources.join(', ')}.`, 'error');
+    } else {
+        sendProcessingStatus(req, 'All sources processed successfully!', 'final_success');
+    }
 
     return { success: true, message: 'Sources merged successfully.', updatedSettings: settings };
 }
