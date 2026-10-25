@@ -179,20 +179,24 @@ function createSuggester(epgChannels) {
 }
 
 /**
- * Top suggestion, demoted when the runner-up is nearly as good: bulk "accept all" must not take coin flips.
- * A time-shifted channel only matches a same-shift guide, and a wrong shift is never "confident".
+ * Top suggestion. Returns flags the caller needs to place it: `tie` when the runner-up is nearly as good
+ * (bulk accept must not take coin flips) and `shiftBad` when a shifted query only matched a non-shifted
+ * guide (never confident). Confidence is demoted by the same amounts for display and tests.
  */
 function bestMatch(suggest, name) {
     const shift = shiftOf(name);
     const found = suggest(name, 10);
     let [best, second] = found;
+    if (!best) return null;
+    let tie = false;
+    let shiftBad = false;
     if (shift != null) {
         const same = found.find((c) => shiftOf(`${c.names[0]} ${c.id}`) === shift);
         if (same) { best = same; second = undefined; }
-        else best = best ? { ...best, confidence: Math.min(best.confidence, CONFIDENT - 0.01) } : null;
+        else { shiftBad = true; best = { ...best, confidence: Math.min(best.confidence, CONFIDENT - 0.01) }; }
     }
-    if (!best) return null;
-    return second && best.confidence - second.confidence < 0.05 ? { ...best, confidence: best.confidence - 0.2 } : best;
+    if (second && best.confidence - second.confidence < 0.05) { tie = true; best = { ...best, confidence: best.confidence - 0.2 }; }
+    return { ...best, tie, shiftBad };
 }
 
 module.exports = { normalizeName, nameKey, shiftOf, buildTargets, createSuggester, bestMatch, CONFIDENT };

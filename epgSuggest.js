@@ -26,7 +26,9 @@ async function suggestChunk(items, { suggestName, bestOf, pickWithLlm, withAi, a
     for (const { id, name, group } of items) {
         const best = bestOf(suggestName, name);
         if (best) {
-            suggestions[id] = { channelId: id, epgId: best.id, names: best.names, sample: best.sample, confidence: best.confidence, confident: best.confidence >= CONFIDENT, via: 'name' };
+            // exact: a clear winner; likely: a solid match, safe in bulk; guess: a tie or wrong shift, review by hand.
+            const tier = (best.shiftBad || best.tie) ? 'guess' : best.confidence >= CONFIDENT ? 'exact' : best.confidence >= 0.5 ? 'likely' : 'guess';
+            suggestions[id] = { channelId: id, epgId: best.id, names: best.names, sample: best.sample, confidence: best.confidence, confident: best.confidence >= CONFIDENT, via: 'name', tier, tie: !!best.tie };
         }
         const candidates = suggestName(name, 10);
         if (withAi && candidates.length && !suggestions[id]?.confident) ask.push({ id, name, group, candidates });
@@ -40,10 +42,10 @@ async function suggestChunk(items, { suggestName, bestOf, pickWithLlm, withAi, a
                 if (pick === undefined) return; // no usable answer: keep the name-based suggestion
                 const found = candidates.find((c) => c.id === pick);
                 if (found) {
-                    suggestions[id] = { channelId: id, epgId: found.id, names: found.names, sample: found.sample, confidence: AI_CONFIDENCE, confident: false, via: 'ai' };
+                    suggestions[id] = { channelId: id, epgId: found.id, names: found.names, sample: found.sample, confidence: AI_CONFIDENCE, confident: false, via: 'ai', tier: 'ai' };
                 } else if (suggestions[id]) {
                     // The model judged none to be the same channel: demote the name suggestion, don't drop it.
-                    suggestions[id] = { ...suggestions[id], confident: false, aiDisagreed: true };
+                    suggestions[id] = { ...suggestions[id], confident: false, aiDisagreed: true, tier: 'guess' };
                 }
             });
         } catch (e) {

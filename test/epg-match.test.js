@@ -64,7 +64,9 @@ test('a near tie is demoted so bulk accept skips it', () => {
     const tie = bestMatch(suggest, 'BBC One');
     const clear = bestMatch(suggest, 'CNN');
     assert.ok(tie.confidence < 0.9);
+    assert.ok(tie.tie === true);
     assert.ok(clear.confidence >= 0.9);
+    assert.ok(clear.tie === false);
 });
 
 // --- Real feeds: an Xtream panel's guides (sat.tv and an Arabic sports lineup) ---
@@ -121,4 +123,5 @@ test('a time-shifted channel never auto-matches its base channel', () => {
     assert.ok(base && base.id === 'ESPN.us');
     const shifted = bestMatch(suggest, 'ESPN +1');
     assert.ok(!shifted || shifted.confidence < 0.9, 'a wrong shift is never confident');
+    assert.ok(shifted.shiftBad === true);
 });

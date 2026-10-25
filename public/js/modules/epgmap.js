@@ -41,13 +41,16 @@ const guideCell = (ch) => {
 };
 
 // A Dice similarity is not a probability, so say what it is in plain words instead of "90%".
-const confidenceLabel = (c) => (c >= 0.9 ? 'Exact' : c >= 0.5 ? 'Likely' : 'Guess');
+// tier is set by the server; older stored suggestions lack it, so derive it the same way.
+const tierOf = (s) => s.tier || (s.via === 'ai' ? 'ai' : s.confident ? 'exact' : s.confidence >= 0.5 ? 'likely' : 'guess');
+const TIER_LABEL = { exact: 'Exact', likely: 'Likely', ai: 'AI pick', guess: 'Guess' };
+const BULK = new Set(['exact', 'likely', 'ai']); // guess (ties and wrong shifts) still needs a human eye
 
 const suggestionCell = (s) => {
     if (!s) return '';
-    const via = s.via === 'ai' ? 'AI pick' : confidenceLabel(s.confidence);
     const disagree = s.aiDisagreed ? '<span class="text-yellow-400">AI disagreed · </span>' : '';
-    return `<div>${escapeHtml(s.names[0] || s.epgId)} <span class="text-xs text-gray-500">${disagree}${via}</span></div>` +
+    const hint = !s.aiDisagreed && s.tie ? '<span class="text-yellow-400">Tie · </span>' : '';
+    return `<div>${escapeHtml(s.names[0] || s.epgId)} <span class="text-xs text-gray-500">${hint}${disagree}${TIER_LABEL[tierOf(s)]}</span></div>` +
         `<div class="text-xs text-gray-500">${escapeHtml(s.epgId)}${s.sample ? ` · e.g. ${escapeHtml(s.sample)}` : ''}</div>`;
 };
 
@@ -76,9 +79,9 @@ export function renderEpgMap() {
     $('epg-map-more-btn').classList.toggle('hidden', rows.length <= shown);
     $('epg-map-summary').textContent = `${without} of ${guideState.channels.length} channels have no guide data · ${suggestions.size} suggestions`;
     document.querySelectorAll('[data-epg-filter]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.epgFilter === filter)));
-    const confident = [...suggestions.values()].filter((s) => s.confident || s.via === 'ai').length;
-    $('epg-map-accept-btn').classList.toggle('hidden', !confident);
-    $('epg-map-accept-btn').textContent = `Accept all (${confident})`;
+    const bulk = [...suggestions.values()].filter((s) => BULK.has(tierOf(s))).length;
+    $('epg-map-accept-btn').classList.toggle('hidden', !bulk);
+    $('epg-map-accept-btn').textContent = `Accept all (${bulk})`;
 }
 
 /** Loads the persisted suggestions from the server (survive refresh and restart). */
@@ -198,10 +201,13 @@ export function setupEpgMap() {
     $('epg-map-auto-btn').addEventListener('click', suggest);
     $('epg-map-accept-btn').addEventListener('click', () => {
         const set = {};
-        suggestions.forEach((s, id) => { if (s.confident || s.via === 'ai') set[id] = s.epgId; });
+        suggestions.forEach((s, id) => { if (BULK.has(tierOf(s))) set[id] = s.epgId; });
         const n = Object.keys(set).length;
         if (!n) return;
-        showConfirm('Accept all suggestions?', `Permanently assign guide data to ${n} channels. Check the list first: there is no undo.`, () => whileBusy(() => apply(set)));
+        const by = { exact: 0, likely: 0, ai: 0 };
+        Object.keys(set).forEach((id) => { by[tierOf(suggestions.get(id))]++; });
+        const parts = [`${by.exact} exact`, `${by.likely} likely`]; if (by.ai) parts.push(`${by.ai} AI`);
+        showConfirm('Accept all suggestions?', `Permanently assign guide data to ${n} channels (${parts.join(', ')}). Check the list first: there is no undo.`, () => whileBusy(() => apply(set)));
     });
 
     $('epg-map-tbody').addEventListener('click', (e) => {

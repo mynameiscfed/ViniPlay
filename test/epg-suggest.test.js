@@ -29,6 +29,7 @@ test('a non-confident name match that the AI also picks is recorded as an AI mat
     const pickWithLlm = async () => ['ESPN.us'];
     const { suggestions, failed } = await suggestChunk(items(['a']), { suggestName, bestOf, pickWithLlm, withAi: true, apiKey: 'k', model: 'm', ...C });
     assert.strictEqual(suggestions.a.via, 'ai');
+    assert.strictEqual(suggestions.a.tier, 'ai');
     assert.strictEqual(suggestions.a.confident, false);
     assert.strictEqual(failed, 0);
 });
@@ -41,6 +42,7 @@ test('an AI "null" demotes the name suggestion instead of deleting it', async ()
     assert.strictEqual(suggestions.a.epgId, 'ESPN.us');
     assert.strictEqual(suggestions.a.confident, false);
     assert.strictEqual(suggestions.a.aiDisagreed, true);
+    assert.strictEqual(suggestions.a.tier, 'guess'); // bulk accept skips it
 });
 
 test('an AI failure fails only that chunk and keeps its name suggestions', async () => {
