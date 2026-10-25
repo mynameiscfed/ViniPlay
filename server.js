@@ -28,6 +28,7 @@ const { cachedFile, writeFileAtomic } = require('./fileStore');
 const { sendJson } = require('./sendJson');
 const { createEpgPayload } = require('./epgPayload');
 const { applyProcessed } = require('./processedSettings');
+const { validateJobWindow } = require('./dvrTime');
 const zlib = require('zlib');
 const { pipeline } = require('stream');
 const { pipeline: pipelineAsync } = require('stream/promises');
@@ -6042,14 +6043,21 @@ app.get('/api/dvr/timeshift/:jobId', requireAuth, requireDvrAccess, (req, res) =
 });
 
 
-app.post('/api/dvr/schedule', requireAuth, requireDvrAccess, async (req, res) => {
+// Express 4 does not forward a rejected async handler, so every async DVR write route
+// goes through this wrapper to reach the last-resort error handler instead of Node's.
+const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+app.post('/api/dvr/schedule', requireAuth, requireDvrAccess, asyncHandler(async (req, res) => {
     const { channelId, channelName, programTitle, programStart, programStop } = req.body;
+    const window = validateJobWindow(programStart, programStop, { startLabel: 'programStart', endLabel: 'programStop' });
+    if (!window.ok) return res.status(400).json({ error: window.error });
+
     const settings = getSettings();
     const dvrSettings = settings.dvr || {};
     const preBuffer = (dvrSettings.preBufferMinutes || 0) * 60 * 1000;
     const postBuffer = (dvrSettings.postBufferMinutes || 0) * 60 * 1000;
 
-    const plannedStart = new Date(new Date(programStart).getTime() - preBuffer).toISOString();
+    const plannedStart = new Date(window.start.getTime() - preBuffer).toISOString();
     const nowMs = Date.now();
     // If the program already started (or is starting right now), actual start time of recording is now!
     const effectiveStartTime = (new Date(plannedStart).getTime() < nowMs) ? new Date(nowMs).toISOString() : plannedStart;
@@ -6060,8 +6068,8 @@ app.post('/api/dvr/schedule', requireAuth, requireDvrAccess, async (req, res) =>
         channelName,
         programTitle,
         startTime: effectiveStartTime,
-        programStart: programStart,
-        endTime: new Date(new Date(programStop).getTime() + postBuffer).toISOString(),
+        programStart: window.start.toISOString(),
+        endTime: new Date(window.end.getTime() + postBuffer).toISOString(),
         status: 'scheduled',
         profileId: dvrSettings.activeRecordingProfileId,
         userAgentId: settings.activeUserAgentId,
@@ -6087,10 +6095,13 @@ app.post('/api/dvr/schedule', requireAuth, requireDvrAccess, async (req, res) =>
             res.status(201).json({ success: true, job: jobWithId });
         }
     );
-});
+}));
 
-app.post('/api/dvr/schedule/manual', requireAuth, requireDvrAccess, async (req, res) => {
+app.post('/api/dvr/schedule/manual', requireAuth, requireDvrAccess, asyncHandler(async (req, res) => {
     const { channelId, channelName, startTime, endTime } = req.body;
+    const window = validateJobWindow(startTime, endTime);
+    if (!window.ok) return res.status(400).json({ error: window.error });
+
     const settings = getSettings();
     const dvrSettings = settings.dvr || {};
 
@@ -6099,8 +6110,8 @@ app.post('/api/dvr/schedule/manual', requireAuth, requireDvrAccess, async (req, 
         channelId,
         channelName,
         programTitle: `Manual Recording: ${channelName}`,
-        startTime,
-        endTime,
+        startTime: window.start.toISOString(),
+        endTime: window.end.toISOString(),
         status: 'scheduled',
         profileId: dvrSettings.activeRecordingProfileId,
         userAgentId: settings.activeUserAgentId,
@@ -6123,7 +6134,7 @@ app.post('/api/dvr/schedule/manual', requireAuth, requireDvrAccess, async (req, 
             res.status(201).json({ success: true, job: jobWithId });
         }
     );
-});
+}));
 
 // MODIFIED: Endpoint logic to show all jobs to admin, or user's jobs to them.
 app.get('/api/dvr/jobs', requireAuth, (req, res) => {
@@ -6360,11 +6371,12 @@ app.post('/api/dvr/jobs/:id/stop', requireAuth, requireDvrAccess, (req, res) => 
     });
 });
 
-app.put('/api/dvr/jobs/:id', requireAuth, requireDvrAccess, (req, res) => {
+app.put('/api/dvr/jobs/:id', requireAuth, requireDvrAccess, asyncHandler((req, res) => {
     const { id } = req.params;
     const { startTime, endTime } = req.body;
-    if (!startTime || !endTime) {
-        return res.status(400).json({ error: 'Both startTime and endTime are required.' });
+    const window = validateJobWindow(startTime, endTime);
+    if (!window.ok) {
+        return res.status(400).json({ error: window.error });
     }
 
     // MODIFIED: Admin can edit any job, user can only edit their own.
@@ -6376,17 +6388,19 @@ app.put('/api/dvr/jobs/:id', requireAuth, requireDvrAccess, (req, res) => {
         if (!job) return res.status(404).json({ error: 'Job not found or unauthorized.' });
         if (job.status !== 'scheduled') return res.status(400).json({ error: 'Only scheduled jobs can be modified.' });
 
-        db.run("UPDATE dvr_jobs SET startTime = ?, endTime = ? WHERE id = ?", [startTime, endTime, id], function (err) {
+        const startIso = window.start.toISOString();
+        const endIso = window.end.toISOString();
+        db.run("UPDATE dvr_jobs SET startTime = ?, endTime = ? WHERE id = ?", [startIso, endIso, id], function (err) {
             if (err) return res.status(500).json({ error: 'Could not update job.' });
 
-            const updatedJob = { ...job, startTime, endTime };
+            const updatedJob = { ...job, startTime: startIso, endTime: endIso };
             scheduleDvrJob(updatedJob);
 
             console.log(`[DVR_API] Updated and rescheduled job ${id}.`);
             res.json({ success: true, job: updatedJob });
         });
     });
-});
+}));
 
 app.delete('/api/dvr/jobs/:id/history', requireAuth, requireDvrAccess, (req, res) => {
     const { id } = req.params;
