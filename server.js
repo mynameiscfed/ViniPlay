@@ -7,6 +7,7 @@ require('dotenv').config();
 const express = require('express');
 const crypto = require('crypto');
 const { spawn, exec, execFile } = require('child_process');
+const { safeGet, assertSafeUrl, SsrfBlockedError } = require('./ssrfGuard');
 const http = require('http');
 const https = require('https');
 const fs = require('fs');
@@ -108,6 +109,7 @@ const VAPID_KEYS_PATH = path.join(DATA_DIR, 'vapid.json');
 const SOURCES_DIR = path.join(DATA_DIR, 'sources');
 const RAW_CACHE_DIR = path.join(SOURCES_DIR, 'raw_cache');
 const IMAGE_CACHE_DIR = path.join(DATA_DIR, 'image_cache'); // NEW: VOD poster image cache
+const IMAGE_PROXY_MAX_BYTES = 10 * 1024 * 1024; // Largest poster/logo the image proxy will fetch
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const DB_PATH = path.join(DATA_DIR, 'viniplay.db');
 const LIVE_CHANNELS_M3U_PATH = path.join(DATA_DIR, 'live_channels.m3u'); // Renamed
@@ -5952,9 +5954,16 @@ app.post('/api/validate-url', requireAuth, requireAdmin, async (req, res) => {
     }
     console.log(`[VALIDATE_URL] Testing URL: ${url}`);
     try {
-        await fetchUrlContent(url);
+        // safeGet blocks non-http(s) schemes and internal/private addresses on every redirect hop.
+        const { response } = await safeGet(url, { timeout: 30000 });
+        response.destroy(); // Only reachability matters; don't download the whole playlist/EPG.
         res.json({ success: true, message: 'URL is reachable and returned a successful response.' });
     } catch (error) {
+        if (error instanceof SsrfBlockedError) {
+            console.warn(`[VALIDATE_URL] Blocked: ${error.message}`);
+            const hint = /address/.test(error.message) ? ' To allow LAN sources, set SSRF_ALLOW_PRIVATE_NETWORKS=true or list the host in SSRF_ALLOWED_HOSTS.' : '';
+            return res.status(400).json({ success: false, error: `${error.message}${hint}` });
+        }
         res.status(400).json({ success: false, error: `URL is not reachable. Error: ${error.message}` });
     }
 });
@@ -5990,11 +5999,12 @@ app.get('/api/image-proxy', allowLocalOrAuth, (req, res) => {
         return res.status(400).send('Missing url parameter');
     }
 
-    // Validate URL
+    // Validate URL scheme and IP-literal hosts up front; hostnames are re-checked at connect time.
     try {
-        new URL(imageUrl);
+        assertSafeUrl(imageUrl);
     } catch (err) {
-        return res.status(400).send('Invalid URL');
+        console.warn(`[IMAGE_PROXY] Blocked URL ${imageUrl}: ${err.message}`);
+        return res.status(400).send('Invalid or disallowed URL');
     }
 
     // Generate a cache filename based on the URL hash
@@ -6036,15 +6046,18 @@ app.get('/api/image-proxy', allowLocalOrAuth, (req, res) => {
 
     console.log(`[IMAGE_PROXY] Fetching and caching image: ${imageUrl}`);
 
-    // Determine protocol (http or https)
-    const protocol = imageUrl.startsWith('https') ? https : http;
-
-    protocol.get(imageUrl, (imageRes) => {
+    safeGet(imageUrl, { timeout: 15000 }).then(({ response: imageRes }) => {
         // Check if response is an image
         const contentType = imageRes.headers['content-type'];
         if (!contentType || !contentType.startsWith('image/')) {
             console.error(`[IMAGE_PROXY] Invalid content type: ${contentType}`);
+            imageRes.destroy();
             return res.status(400).send('URL does not point to an image');
+        }
+        const declaredLength = parseInt(imageRes.headers['content-length'], 10);
+        if (declaredLength > IMAGE_PROXY_MAX_BYTES) {
+            imageRes.destroy();
+            return res.status(413).send('Image too large');
         }
 
         // Set response headers
@@ -6052,8 +6065,31 @@ app.get('/api/image-proxy', allowLocalOrAuth, (req, res) => {
         res.setHeader('Cache-Control', 'public, max-age=2592000'); // 30 days
         res.setHeader('X-Cache', 'MISS');
 
-        // Create write stream to save to cache
-        const fileStream = fs.createWriteStream(cacheFilePath);
+        // Write to a temp file and only move it into the cache once the full image arrived,
+        // so a truncated or oversized download is never served from cache.
+        const tempCachePath = `${cacheFilePath}.${process.pid}.${Date.now()}.tmp`;
+        const fileStream = fs.createWriteStream(tempCachePath);
+        let receivedBytes = 0;
+        let aborted = false;
+
+        const discardTemp = () => fs.unlink(tempCachePath, () => { });
+
+        imageRes.on('data', (chunk) => {
+            receivedBytes += chunk.length;
+            if (receivedBytes > IMAGE_PROXY_MAX_BYTES && !aborted) {
+                aborted = true;
+                console.warn(`[IMAGE_PROXY] Image exceeded ${IMAGE_PROXY_MAX_BYTES} bytes, aborting: ${imageUrl}`);
+                imageRes.destroy();
+                fileStream.destroy();
+                discardTemp();
+                res.destroy();
+            }
+        });
+        imageRes.on('error', () => {
+            aborted = true;
+            fileStream.destroy();
+            discardTemp();
+        });
 
         // Pipe to both cache and response
         imageRes.pipe(fileStream);
@@ -6061,16 +6097,19 @@ app.get('/api/image-proxy', allowLocalOrAuth, (req, res) => {
 
         // Save metadata when done
         fileStream.on('finish', () => {
+            if (aborted) return discardTemp();
             const meta = {
                 url: imageUrl,
                 contentType: contentType,
                 cachedAt: new Date().toISOString()
             };
             try {
+                fs.renameSync(tempCachePath, cacheFilePath);
                 fs.writeFileSync(cacheMetaPath, JSON.stringify(meta, null, 2));
                 console.log(`[IMAGE_PROXY] Cached image: ${urlHash}`);
             } catch (err) {
-                console.error(`[IMAGE_PROXY] Failed to write cache metadata:`, err.message);
+                console.error(`[IMAGE_PROXY] Failed to write cache entry:`, err.message);
+                discardTemp();
             }
         });
 
@@ -6079,9 +6118,13 @@ app.get('/api/image-proxy', allowLocalOrAuth, (req, res) => {
             // Continue serving even if cache write fails
         });
 
-    }).on('error', (err) => {
+    }).catch((err) => {
+        if (err instanceof SsrfBlockedError) {
+            console.warn(`[IMAGE_PROXY] Blocked ${imageUrl}: ${err.message}`);
+            return res.status(400).send('Invalid or disallowed URL');
+        }
         console.error(`[IMAGE_PROXY] Error fetching image from ${imageUrl}:`, err.message);
-        res.status(500).send('Failed to fetch image');
+        res.status(502).send('Failed to fetch image');
     });
 });
 
