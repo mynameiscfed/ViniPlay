@@ -30,6 +30,16 @@ test('sends batches of 25 with the key and model, never more than the candidates
     assert.strictEqual(Object.keys(JSON.parse(calls[2].body.messages[1].content)).length, 10);
 });
 
+test('sends the app-normalized names beside the raw ones, and only name, group and candidates', async () => {
+    let sent;
+    const post = async (url, body) => { sent = body; return { data: { choices: [{ message: { content: '{}' } }] } }; };
+    await pickWithLlm([{ name: 'UK: BBC One FHD', group: 'UK', candidates: [{ id: 'BBCOne.uk', names: ['BBC One', 'BBC 1'], extra: 'x' }] }], { apiKey: 'k', model: 'm', post });
+    assert.deepStrictEqual(JSON.parse(sent.messages[1].content), {
+        0: { channel: 'UK: BBC One FHD', group: 'UK', norm: 'bbc 1', candidates: [{ id: 'BBCOne.uk', names: ['BBC One', 'BBC 1'], norm: ['bbc 1'] }] },
+    });
+    assert.match(sent.messages[0].content, /null/);
+});
+
 test('an upstream error rejects with its message', async () => {
     const post = async () => { throw Object.assign(new Error('Request failed with status code 402'), { response: { data: { error: { message: 'Insufficient credits' } } } }); };
     await assert.rejects(pickWithLlm([item('A', 'A.us')], { apiKey: 'k', model: 'm', post }), /Insufficient credits/);
