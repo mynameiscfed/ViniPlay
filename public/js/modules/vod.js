@@ -7,7 +7,7 @@
 import { appState, UIElements, guideState } from './state.js'; // Keep guideState for settings
 import { openModal, closeModal, showNotification, showResumePrompt } from './ui.js';
 import { ICONS } from './icons.js';
-import { saveUserSetting, fetchVodLibrary, fetchSeriesDetails, getWatchProgress, deleteWatchProgress } from './api.js';
+import { saveUserSetting, fetchVodPage, fetchVodGroups, fetchSeriesDetails, getWatchProgress, deleteWatchProgress } from './api.js';
 import { playVOD } from './player.js';
 import { escapeHtml } from './utils.js';
 
@@ -15,15 +15,16 @@ import { escapeHtml } from './utils.js';
 let listenersBound = false;
 
 const vodState = {
-    // This will hold the parsed and combined list of all movies and series objects
-    fullLibrary: [],
-    // This will hold the items currently being shown after filters are applied
-    filteredLibrary: [],
+    // The page on screen; a clicked card is looked up here.
+    items: [],
+    // Categories that have titles: { movies: [], series: [] }
+    groups: { movies: [], series: [] },
     // Simple debounce timer for search
     searchDebounce: null,
     currentSeriesData: null,
     currentSeason: null,
-    // --- NEW: Pagination State ---
+    // Newest page request; an older answer arriving late is dropped.
+    request: 0,
     pagination: {
         currentPage: 1,
         pageSize: 50, // Default page size
@@ -31,6 +32,12 @@ const vodState = {
         totalPages: 1,
     },
 };
+
+// Shown for titles without a poster and when a poster fails to load. Local, so it costs no request.
+const NO_POSTER = `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2 3"><rect width="2" height="3" fill="#374151"/></svg>')}`;
+// TMDB serves each poster at several widths; a grid card needs ~342px, not the original.
+const gridPoster = (url) => url.replace(/(image\.tmdb\.org\/t\/p\/)[^/]+\//, '$1w342/');
+const viaProxy = (url) => (url.startsWith('http') ? `/api/image-proxy?url=${encodeURIComponent(url)}` : url);
 
 function triggerDownload(url, silent = false) {
     const a = document.createElement('a');
@@ -113,21 +120,8 @@ function formatEpisodeDate(dateStr) {
 export async function initVodPage() {
     console.log('[VOD] Initializing VOD Page...');
 
-    // 1. Fetch the structured library from the server
-    const library = await fetchVodLibrary();
-
-    if (library) {
-        // Combine movies and series (which now only contain basic info)
-        vodState.fullLibrary = [...library.movies, ...library.series];
-        // Ensure all IDs are strings for consistent lookup later
-        vodState.fullLibrary.forEach(item => item.id = String(item.id));
-        vodState.fullLibrary.sort((a, b) => a.name.localeCompare(b.name));
-        console.log(`[VOD] Library loaded: ${library.movies.length} movies, ${library.series.length} series headers.`);
-    } else {
-        console.error('[VOD] Failed to load VOD library from server.');
-        vodState.fullLibrary = [];
-        showNotification('Could not load VOD library.', true);
-    }
+    // 1. Fetch the category lists; the titles themselves are fetched a page at a time
+    vodState.groups = await fetchVodGroups();
 
     // 2. Populate the category filter dropdown based on active tab ('all' by default)
     populateVodGroups('all');
@@ -139,7 +133,7 @@ export async function initVodPage() {
     console.log(`[VOD] Initial VOD Direct Play state: ${savedVodDirectPlay}`);
 
     // 4. Render the grid
-    renderVodGrid();
+    await renderVodGrid();
 
     // 5. Bind the page controls once. Re-opening the tab only refreshes the library.
     if (!listenersBound) {
@@ -159,19 +153,9 @@ function populateVodGroups(typeFilter = 'all') {
     if (!selectEl) return;
     const currentFilter = selectEl.value;
 
-    const availableGroups = new Set();
-    if (Array.isArray(vodState.fullLibrary)) {
-        vodState.fullLibrary.forEach(item => {
-            if (!item.group) return;
-            if (typeFilter === 'all') {
-                availableGroups.add(item.group);
-            } else if (typeFilter === 'movies' && item.type === 'movie') {
-                availableGroups.add(item.group);
-            } else if (typeFilter === 'series' && item.type === 'series') {
-                availableGroups.add(item.group);
-            }
-        });
-    }
+    const availableGroups = new Set(typeFilter === 'movies' ? vodState.groups.movies
+        : typeFilter === 'series' ? vodState.groups.series
+            : [...vodState.groups.movies, ...vodState.groups.series]);
 
     selectEl.innerHTML = '';
 
@@ -200,9 +184,9 @@ function populateVodGroups(typeFilter = 'all') {
 }
 
 /**
- * Renders the VOD grid based on the current filters and pagination state.
+ * Fetches the current page for the current filters and renders it.
  */
-function renderVodGrid() {
+async function renderVodGrid() {
     const gridEl = UIElements.vodGrid;
     const noResultsEl = UIElements.vodNoResults;
     if (!gridEl || !noResultsEl) return;
@@ -211,60 +195,43 @@ function renderVodGrid() {
     const activeTypeBtn = document.querySelector('.vod-type-btn.active');
     const typeFilter = activeTypeBtn ? activeTypeBtn.id.replace('vod-type-', '') : 'all'; // 'all', 'movies', 'series'
     const groupFilter = UIElements.vodGroupFilter.value; // 'all' or specific group
-    const searchFilter = UIElements.vodSearchInput.value.toLowerCase();
+    const searchFilter = UIElements.vodSearchInput.value.trim();
+    const { pageSize } = vodState.pagination;
 
-    // 2. Apply filters to the full library
-    vodState.filteredLibrary = vodState.fullLibrary.filter(item => {
-        const typeMatch = (typeFilter === 'all') || (typeFilter === 'movies' && item.type === 'movie') || (typeFilter === 'series' && item.type === 'series');
-        const groupMatch = (groupFilter === 'all') || (item.group === groupFilter);
-        const searchMatch = (searchFilter === '') || (item.name.toLowerCase().includes(searchFilter));
-
-        return typeMatch && groupMatch && searchMatch;
-    });
+    // 2. Ask the server for the page
+    const params = { type: typeFilter, page: vodState.pagination.currentPage, limit: pageSize };
+    if (groupFilter !== 'all') params.group = groupFilter;
+    if (searchFilter) params.q = searchFilter;
+    const request = ++vodState.request;
+    const result = await fetchVodPage(params);
+    if (request !== vodState.request) return; // a newer filter or page was asked for meanwhile
 
     // 3. Update Pagination State
-    vodState.pagination.totalItems = vodState.filteredLibrary.length;
-    vodState.pagination.totalPages = Math.ceil(vodState.pagination.totalItems / vodState.pagination.pageSize);
-    // Ensure currentPage is valid after filtering
-    if (vodState.pagination.currentPage > vodState.pagination.totalPages) {
-        vodState.pagination.currentPage = Math.max(1, vodState.pagination.totalPages);
+    vodState.items = result?.items || [];
+    vodState.pagination.totalItems = result?.total || 0;
+    vodState.pagination.totalPages = Math.ceil(vodState.pagination.totalItems / pageSize);
+    if (vodState.pagination.currentPage > vodState.pagination.totalPages && vodState.pagination.totalPages > 0) {
+        vodState.pagination.currentPage = vodState.pagination.totalPages; // the catalog shrank
+        return renderVodGrid();
     }
 
-    // 4. Calculate items for the current page
-    const startIndex = (vodState.pagination.currentPage - 1) * vodState.pagination.pageSize;
-    const endIndex = startIndex + vodState.pagination.pageSize;
-    const itemsToRender = vodState.filteredLibrary.slice(startIndex, endIndex);
-
-    // 5. Render Grid HTML
-    if (itemsToRender.length === 0) {
+    // 4. Render Grid HTML
+    if (vodState.items.length === 0) {
         gridEl.innerHTML = ''; // Clear grid
         noResultsEl.classList.remove('hidden');
     } else {
         noResultsEl.classList.add('hidden');
-        gridEl.innerHTML = itemsToRender.map(item => {
+        gridEl.innerHTML = vodState.items.map(item => {
             const itemType = item.type === 'movie' ? 'Movie' : 'Series';
-            // Sanitize the name for placeholder text just in case
-            const safeName = item.name ? String(item.name).replace(/[^a-zA-Z0-9 ]/g, '') : 'VOD';
-            const placeholderImageUrl = `https://placehold.co/400x600/1f2937/d1d5db?text=${encodeURIComponent(safeName)}`;
-            // Ensure ID is treated as a string for the data attribute
-            const itemIdStr = String(item.id);
-
-            // --- SERIES RENDERING FIX ---
-            // Display the series name, not individual episode names here
             const displayName = item.name || (item.type === 'series' ? 'Unknown Series' : 'Unknown Movie');
             const displayGroup = item.group || 'Uncategorized';
-            const displayLogo = item.logo || placeholderImageUrl;
-
-            // Use image proxy for both HTTP and HTTPS posters to avoid mixed content warnings
-            const proxiedLogo = displayLogo.startsWith('http') ? `/api/image-proxy?url=${encodeURIComponent(displayLogo)}` : displayLogo;
+            const poster = item.logo ? viaProxy(gridPoster(item.logo)) : NO_POSTER;
 
             return `
-                <div class="vod-item" tabindex="-1" role="button" data-id="${escapeHtml(itemIdStr)}">
+                <div class="vod-item" tabindex="-1" role="button" data-id="${escapeHtml(item.id)}">
                     <span class="vod-type-badge">${itemType}</span>
                     <div class="vod-item-poster">
-                        <img src="${escapeHtml(proxiedLogo)}"
-                             alt="${escapeHtml(displayName)}"
-                             onerror="this.onerror=null; this.src='${placeholderImageUrl}'; this.style.objectFit='cover';">
+                        <img src="${escapeHtml(poster)}" alt="${escapeHtml(displayName)}" loading="lazy" decoding="async">
                     </div>
                     <div class="vod-item-info">
                         <p class="vod-item-title" title="${escapeHtml(displayName)}">${escapeHtml(displayName)}</p>
@@ -275,7 +242,7 @@ function renderVodGrid() {
         }).join('');
     }
 
-    // 6. Render Pagination Controls
+    // 5. Render Pagination Controls
     renderVodPaginationControls();
 }
 
@@ -294,8 +261,7 @@ async function openVodDetails(item) { // Make the function async
         if (UIElements.vodDetailsTitle) UIElements.vodDetailsTitle.textContent = item.name || '';
 
         // Use image proxy for modal posters/backdrops
-        const posterUrl = item.logo || `https://placehold.co/400x600/1f2937/d1d5db?text=${encodeURIComponent(item.name || 'VOD')}`;
-        const proxiedPoster = posterUrl.startsWith('http') ? `/api/image-proxy?url=${encodeURIComponent(posterUrl)}` : posterUrl;
+        const proxiedPoster = item.logo ? viaProxy(item.logo) : NO_POSTER;
         if (UIElements.vodDetailsPoster) UIElements.vodDetailsPoster.src = proxiedPoster;
         if (UIElements.vodDetailsBackdropImg) UIElements.vodDetailsBackdropImg.src = item.logo ? proxiedPoster : '';
 
@@ -570,6 +536,11 @@ function setupVodEventListeners() {
         }
     }
 
+    // A poster that fails to load gets the local placeholder (load errors do not bubble, hence capture).
+    UIElements.vodGrid.addEventListener('error', (e) => {
+        if (e.target.tagName === 'IMG' && e.target.src !== NO_POSTER) e.target.src = NO_POSTER;
+    }, true);
+
     // --- VOD Grid Click Listener (Event Delegation) ---
     UIElements.vodGrid.addEventListener('click', (e) => {
         const vodItemEl = e.target.closest('.vod-item');
@@ -577,18 +548,16 @@ function setupVodEventListeners() {
             const itemId = vodItemEl.dataset.id; // ID is always a string from data-*
             console.log(`[VOD_CLICK] Click detected on item with data-id: ${itemId}`); // Keep log
 
-            // --- FIX: Ensure string comparison ---
-            const item = vodState.fullLibrary.find(i => String(i.id) === itemId);
-            // --- END FIX ---
+            const item = vodState.items.find(i => i.id === itemId);
 
             if (item) {
-                console.log(`[VOD_CLICK] Found item in library:`, item);
+                console.log(`[VOD_CLICK] Found item on the current page:`, item);
                 openVodDetails(item).catch(err => {
                     console.error(`[VOD_CLICK] Error opening details for item ${itemId}:`, err);
                 });
             } else {
                 // Keep error handling
-                console.error(`[VOD_CLICK] Could not find VOD item in fullLibrary with ID: ${itemId}`);
+                console.error(`[VOD_CLICK] Could not find VOD item on the current page with ID: ${itemId}`);
                 showNotification(`Error: Could not find details for the selected item (ID: ${itemId}).`, true);
             }
         }
