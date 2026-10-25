@@ -3689,6 +3689,23 @@ app.post('/api/epg/ai/test', requireAuth, requireAdmin, async (req, res) => {
 
 // {set: {channelId: xmltvId}, clear: [channelId]}. Re-merges the guides (not the playlists) so it shows at once.
 let epgRemerge = Promise.resolve(); // one at a time: merges share their temp files
+let epgRemergeQueued = false;
+
+// Queues one guide re-merge; saves made while one waits ride along, since it reads the settings when it starts.
+function scheduleEpgRemerge(req, channels) {
+    if (epgRemergeQueued) return;
+    epgRemergeQueued = true;
+    epgRemerge = epgRemerge.then(async () => {
+        epgRemergeQueued = false;
+        const settings = getSettings();
+        // Same shape as processAndMergeSources builds from the playlists; the prefix before the first "_" is the source id.
+        const liveChannels = new Map(channels.map(c => [c.id, { originalId: c.id.slice(c.id.indexOf('_') + 1), name: c.displayName, tvgName: c.name, group: c.group }]));
+        await mergeEpg(req, settings, liveChannels, [], []);
+        settings.sourcesLastUpdated = new Date().toISOString(); // tells every client its cached guide is stale
+        saveProcessedSettings(settings);
+    }).catch((error) => console.error('[API] Error re-merging the guide after EPG overrides:', error));
+}
+
 app.put('/api/epg/overrides', requireAuth, requireAdmin, async (req, res) => {
     const { set = {}, clear = [] } = req.body || {};
     const isIdMap = set && typeof set === 'object' && !Array.isArray(set) && Object.values(set).every(v => typeof v === 'string');
@@ -3701,28 +3718,16 @@ app.put('/api/epg/overrides', requireAuth, requireAdmin, async (req, res) => {
     const unknown = Object.entries(set).find(([id, epgId]) => !channelIds.has(id) || !epgIds.has(epgId));
     if (unknown) return res.status(400).json({ error: `Unknown channel or EPG channel: ${unknown[0]} -> ${unknown[1]}` });
 
-    const run = epgRemerge.then(async () => {
-        const settings = getSettings();
-        settings.epgOverrides = { ...settings.epgOverrides, ...set };
-        for (const id of clear) delete settings.epgOverrides[id];
-        writeSettings(settings);
-        // Accepted suggestions are no longer pending: drop them from the store so they do not resurface.
-        if (Object.keys(set).length) suggestStore.remove(Object.keys(set));
-
-        // Same shape as processAndMergeSources builds from the playlists; the prefix before the first "_" is the source id.
-        const liveChannels = new Map(channels.map(c => [c.id, { originalId: c.id.slice(c.id.indexOf('_') + 1), name: c.displayName, tvgName: c.name, group: c.group }]));
-        await mergeEpg(req, settings, liveChannels, [], []);
-        settings.sourcesLastUpdated = new Date().toISOString(); // tells every client its cached guide is stale
-        saveProcessedSettings(settings);
-    });
-    epgRemerge = run.catch(() => { });
-    try {
-        await run;
-        res.json({ success: true, epgOverrides: getSettings().epgOverrides });
-    } catch (error) {
-        console.error('[API] Error applying EPG overrides:', error);
-        res.status(500).json({ error: 'Failed to apply EPG changes. Check server logs.' });
-    }
+    // Saved before answering, not after the re-merge: on a big guide that takes minutes, and a refresh
+    // meanwhile would show the accepted suggestions again.
+    const settings = getSettings();
+    settings.epgOverrides = { ...settings.epgOverrides, ...set };
+    for (const id of clear) delete settings.epgOverrides[id];
+    writeSettings(settings);
+    // Accepted suggestions are no longer pending: drop them from the store so they do not resurface.
+    if (Object.keys(set).length) suggestStore.remove(Object.keys(set));
+    res.json({ success: true, epgOverrides: settings.epgOverrides });
+    scheduleEpgRemerge(req, channels);
 });
 
 app.post('/api/save/settings', requireAuth, requireAdmin, async (req, res) => {

@@ -160,8 +160,8 @@ async function hydrateSuggestions() {
     return true;
 }
 
-// Changes show at once and are sent in one batch shortly after: the server re-merges the whole guide
-// on every save, which can take minutes on a big guide, so clicks must never wait on it.
+// Changes show at once and are sent in one batch shortly after. The server saves them right away and
+// re-merges the guide in the background, which can take minutes on a big guide.
 let queued = { set: {}, clear: new Set() };
 let flushTimer = null;
 let inFlight = 0;
@@ -190,16 +190,18 @@ async function flush() {
         method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ set, clear }),
     });
     inFlight -= n;
-    if (savingCount()) return renderEpgMap(); // more changes queued meanwhile: refresh once they land
-    const config = await fetchConfig();
-    if (config) {
-        guideState.programs = config.epgContent || {};
+    if (!res) {
         // A failed save leaves the server as it was: take its assignments and suggestions back.
-        if (!res) { guideState.settings.epgOverrides = config.settings.epgOverrides || {}; await hydrateSuggestions(); }
-    }
-    showNotification(res ? 'Guide data updated.' : 'Could not save the guide changes. They were undone.', !res);
+        const config = await fetchConfig();
+        if (config) guideState.settings.epgOverrides = config.settings.epgOverrides || {};
+        await hydrateSuggestions();
+        showNotification('Could not save the guide changes. They were undone.', true);
+    } else if (!savingCount()) showNotification('Saved. The guide updates in the background.');
     renderEpgMap();
 }
+
+// Changes still waiting to be sent are lost on a refresh: let the browser ask first.
+window.addEventListener('beforeunload', (e) => { if (savingCount()) e.preventDefault(); });
 
 // Re-merging a big guide takes a while: keep the controls from piling up requests meanwhile.
 async function whileBusy(work) {
