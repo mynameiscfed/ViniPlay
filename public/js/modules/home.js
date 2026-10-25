@@ -5,10 +5,10 @@
  */
 
 import { appState, dvrState, guideState, UIElements } from './state.js';
-import { apiFetch } from './api.js';
+import { apiFetch, saveUserSetting } from './api.js';
 import { cardHTML, toggleFavorite } from './guide.js';
 import { playChannel } from './player.js';
-import { navigate } from './ui.js';
+import { navigate, showConfirm } from './ui.js';
 import { escapeHtml } from './utils.js';
 
 const SHELF_SIZE = 6;
@@ -50,7 +50,8 @@ const draw = () => {
     const byId = (id) => guideState.channels.find(c => c.id === id);
     const recent = (guideState.settings.recentChannels || []).map(byId).filter(Boolean).slice(0, SHELF_SIZE);
     const favorites = guideState.channels.filter(c => c.isFavorite).slice(0, SHELF_SIZE);
-    const body = channelShelf('Recently watched', recent) + channelShelf('Favorites', favorites) + upcomingShelf();
+    const clearRecents = '<button type="button" class="btn btn-ghost btn-sm" data-clear-recents>Clear</button>';
+    const body = channelShelf(`Recently watched${clearRecents}`, recent) + channelShelf('Favorites', favorites) + upcomingShelf();
     UIElements.homeContent.innerHTML = `<div class="home"><div class="home-hello"><div><h2>${greeting()}, ${escapeHtml(appState.currentUser?.username || '')}</h2><p>${guideState.channels.length} channels ready to watch.</p></div><button type="button" class="btn btn-primary" data-go="/tvguide">Open the TV guide</button></div>${body || '<div class="card hm-empty"><p>Nothing here yet. Open the TV guide, tap the star on a channel to add it to Favorites, and the channels you watch will show up here.</p></div>'}</div>`;
 };
 
@@ -69,6 +70,11 @@ const activate = (e) => {
     const star = e.target.closest('.favorite-star');
     const card = e.target.closest('.channel-info');
     if (go) navigate(go.dataset.go);
+    else if (e.target.closest('[data-clear-recents]')) showConfirm('Clear recently watched?', 'This empties your Recently watched list and the Recents filter in the guide. Favorites are not affected.', () => {
+        guideState.settings.recentChannels = [];
+        saveUserSetting('recentChannels', []);
+        draw();
+    });
     else if (star) { toggleFavorite(star.dataset.channelId); draw(); }
     else if (card) playChannel(card.dataset.url, card.dataset.name, card.dataset.id);
 };
