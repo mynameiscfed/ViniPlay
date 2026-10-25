@@ -132,17 +132,6 @@
     box-shadow: inset 0 0 0 1px var(--rd);
 }
 
-/* Menu rows that repeat a header button on phones (see player.js). */
-@media (min-width: 768px) {
-    .pm-phone {
-        display: none !important;
-    }
-}
-
-#video-modal:not(.is-live) .pm-live {
-    display: none;
-}
-
 /* ---------- The one control bar ---------- */
 #player-bar {
     position: absolute;
@@ -345,13 +334,6 @@
     width: 6em;
 }
 
-/* The track menus open above the bar. */
-#video-modal #audio-track-menu,
-#video-modal #subtitle-track-menu {
-    bottom: 8em;
-    right: 1.25em;
-}
-
 /* ---------- Now/next card ---------- */
 #player-osd {
     position: absolute;
@@ -449,8 +431,9 @@
     white-space: nowrap;
 }
 
-/* ---------- Channels panel ---------- */
-#player-channels {
+/* ---------- Channels panel and Playback panel ---------- */
+#player-channels,
+#player-panel {
     position: absolute;
     top: 0;
     right: 0;
@@ -467,7 +450,8 @@
     color: #fff;
 }
 
-#player-channels.hidden {
+#player-channels.hidden,
+#player-panel.hidden {
     display: none;
 }
 
@@ -546,6 +530,113 @@
     font: 600 .85em var(--f-mono);
 }
 
+/* Rows of the Playback panel: a button row with its value, or a field with a choice under its label. */
+.pp-row {
+    display: flex;
+    align-items: center;
+    gap: .8em;
+    width: 100%;
+    padding: .6em .7em;
+    border: 0;
+    border-radius: .8em;
+    background: transparent;
+    color: #fff;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.pp-row:hover {
+    background: var(--s3);
+}
+
+.pp-row .ic {
+    display: grid;
+    flex: none;
+    place-items: center;
+    width: 2.4em;
+    height: 2.4em;
+    border-radius: .7em;
+    background: var(--s4);
+}
+
+.pp-row .t {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-weight: 650;
+    line-height: 1.2;
+}
+
+.pp-row small,
+.pp-field small {
+    display: block;
+    margin-top: .2em;
+    color: var(--tx3);
+    font-weight: 500;
+}
+
+.pp-row .v {
+    flex: none;
+    color: var(--cy);
+    font-size: .85em;
+    font-weight: 700;
+}
+
+.pp-field {
+    padding: .55em .7em;
+}
+
+.pp-field>label {
+    display: block;
+    margin-bottom: .45em;
+    color: var(--tx3);
+    font: 700 .75em var(--f-ui);
+    letter-spacing: .08em;
+    text-transform: uppercase;
+}
+
+.pp-field .seg {
+    display: flex;
+}
+
+.pp-field .seg>button {
+    flex: 1 1 0;
+    padding: 0 .2em;
+}
+
+.pp-field .seg>button.on {
+    background: var(--tint-cy);
+    color: var(--cy);
+    box-shadow: inset 0 0 0 1px var(--cy);
+}
+
+.pp-field select {
+    width: 100%;
+    min-height: 2.6em;
+    padding: 0 .8em;
+    border: 1px solid var(--line);
+    border-radius: .7em;
+    background: var(--s2);
+    color: #fff;
+    font: inherit;
+}
+
+.pp-field select:disabled {
+    opacity: .5;
+}
+
+.pp-row.hidden,
+.pp-field.hidden,
+.pp-row .v.hidden {
+    display: none;
+}
+
+.pp-sep {
+    height: 1px;
+    margin: .4em .5em;
+    background: var(--line);
+}
+
 /* ---------- TV: keep controls inside the safe area ---------- */
 html.tv #video-modal {
     font-size: 1rem;
@@ -570,8 +661,11 @@ html.tv #player-bar input[type="range"] {
     min-height: 0;
 }
 
-/* A TV has no picture-in-picture and is already full screen. */
+/* A TV has no picture-in-picture, casting out, touch lock or saving to disk, and is already full screen. */
 html.tv #pip-btn,
+html.tv #cast-btn,
+html.tv #player-lock-btn,
+html.tv #pp-download-btn,
 html.tv #player-fullscreen-btn {
     display: none;
 }
@@ -589,6 +683,17 @@ html.tv #player-fullscreen-btn {
         padding-left: .9em;
     }
 
+    #player-panel {
+        top: auto;
+        width: auto;
+        max-width: none;
+        max-height: 80%;
+        left: 0;
+        border-top: 1px solid var(--line);
+        border-left: 0;
+        border-radius: 1.2em 1.2em 0 0;
+    }
+
     /* Phones have hardware volume keys. */
     #pb-mute,
     #pb-volume {
@@ -601,12 +706,6 @@ html.tv #player-fullscreen-btn {
 
     #video-modal #video-title {
         font-size: 1.05em !important;
-    }
-
-    /* Eight header buttons pushed Close off a 360px screen; these two move into the menu. */
-    #refresh-stream-btn,
-    #pip-btn {
-        display: none;
     }
 
     /* The word stays for screen readers; the colour carries the state. */

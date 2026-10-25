@@ -7,7 +7,7 @@
  */
 
 import { guideState } from './state.js';
-import { playChannel } from './player.js';
+import { playChannel, refreshPlaybackPanel } from './player.js';
 import { escapeHtml, nowNext } from './utils.js';
 import { formatTimeInZone } from './time.js';
 import { focusEl } from './focus.js';
@@ -35,13 +35,13 @@ export const isPlayerOpen = () => !$('video-modal').classList.contains('hidden')
 const channelList = () => guideState.visibleChannels.length ? guideState.visibleChannels : guideState.channels;
 const play = (channel) => playChannel(channel.url, channel.displayName || channel.name, channel.id);
 
-/** Shows the header, card and control bar, then hides them after a quiet spell (not while the menu is open or the video is paused). */
+/** Shows the header, card and control bar, then hides them after a quiet spell (not while a panel is open or the video is paused). */
 const wake = () => {
     const modal = $('video-modal');
     modal.classList.remove('osd-idle');
     clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
-        if (!$('player-more-options-menu').classList.contains('hidden') || $('videoElement').paused) wake();
+        if (openLayer() || $('videoElement').paused) wake();
         else modal.classList.add('osd-idle');
     }, IDLE_MS);
 };
@@ -82,17 +82,30 @@ const renderPanel = () => {
     if (hadFocus && row) row.focus({ preventScroll: true });
 };
 
-const panelOpen = () => !$('player-channels').classList.contains('hidden');
+// The two panels share the right edge: the Channels panel and the Playback panel. Each has the button that opens it.
+const LAYERS = [['player-channels', 'player-channels-btn'], ['player-panel', 'pb-panel-btn']];
+const openLayer = () => LAYERS.find(([panel]) => !$(panel).classList.contains('hidden'));
+
+/** Closes whichever panel is open and puts focus back on the button that opened it. */
+const closeLayers = () => {
+    const open = openLayer();
+    LAYERS.forEach(([panel]) => $(panel).classList.add('hidden'));
+    if (open) $(open[1]).focus({ preventScroll: true });
+};
 
 const openPanel = () => {
+    closeLayers();
     renderPanel();
     $('player-channels').classList.remove('hidden');
     focusEl($('player-channels-list').querySelector('.cur'));
 };
 
-const closePanel = () => {
-    $('player-channels').classList.add('hidden');
-    $('player-channels-btn').focus({ preventScroll: true });
+const openPlayback = () => {
+    closeLayers();
+    refreshPlaybackPanel();
+    $('player-panel').classList.remove('hidden');
+    const rows = Array.from($('player-panel').querySelectorAll('.pc-list button, .pc-list select')).filter(el => el.offsetParent && !el.disabled);
+    focusEl(rows.find(el => el.classList.contains('on')) || rows[0]);
 };
 
 const zap = (dir) => {
@@ -121,7 +134,7 @@ export function setupOsd() {
         renderOsd();
         $('player-channels-btn').classList.remove('hidden');
         ['pb-prev', 'pb-next'].forEach(id => $(id).classList.remove('hidden'));
-        if (panelOpen()) renderPanel();
+        if (openLayer()?.[0] === 'player-channels') renderPanel();
         clearInterval(clock);
         clock = setInterval(renderOsd, 30000);
     });
@@ -129,13 +142,15 @@ export function setupOsd() {
         current = null;
         clearInterval(clock);
         $('player-osd').classList.add('hidden');
-        $('player-channels').classList.add('hidden');
+        LAYERS.forEach(([panel]) => $(panel).classList.add('hidden'));
         $('player-channels-btn').classList.add('hidden');
         ['pb-prev', 'pb-next'].forEach(id => $(id).classList.add('hidden'));
     });
 
-    $('player-channels-btn').addEventListener('click', () => (panelOpen() ? closePanel() : openPanel()));
-    $('player-channels-close').addEventListener('click', closePanel);
+    $('player-channels-btn').addEventListener('click', () => (openLayer()?.[0] === 'player-channels' ? closeLayers() : openPanel()));
+    $('pb-panel-btn').addEventListener('click', () => (openLayer()?.[0] === 'player-panel' ? closeLayers() : openPlayback()));
+    $('player-channels-close').addEventListener('click', closeLayers);
+    $('player-panel-close').addEventListener('click', closeLayers);
     $('pb-prev').addEventListener('click', () => zap(-1));
     $('pb-next').addEventListener('click', () => zap(1));
     $('player-channels-list').addEventListener('click', (e) => {
@@ -148,11 +163,9 @@ export function setupOsd() {
         if (!isPlayerOpen()) return;
         wake();
         const isBack = e.key === 'Escape' || e.key === 'BrowserBack' || e.key === 'GoBack' || e.keyCode === 10009;
-        // Back closes an open menu first, so one press never closes both the menu and the player.
-        const menu = isBack && document.querySelector('#player-more-options-menu:not(.hidden), #audio-track-menu:not(.hidden), #subtitle-track-menu:not(.hidden)');
-        if (menu) {
-            menu.classList.add('hidden');
-            $('player-more-options-btn').focus({ preventScroll: true });
+        // Back closes an open panel first, so one press never closes both the panel and the player.
+        if (isBack && openLayer()) {
+            closeLayers();
             e.preventDefault();
             e.stopPropagation();
             return;
@@ -168,7 +181,6 @@ export function setupOsd() {
         const media = MEDIA[e.key] || MEDIA[e.keyCode];
         let act = '';
         if (media) act = media;
-        else if (isBack && panelOpen()) act = 'closepanel';
         else if (e.key === 'PageDown') act = 'chnext';
         else if (e.key === 'PageUp') act = 'chprev';
         else if (k === 'k' || (nothing || t.id === 'pb-seek') && (k === ' ' || k === 'Enter')) act = 'toggle';
@@ -195,7 +207,6 @@ export function setupOsd() {
             cc: () => $('pb-cc').classList.contains('hidden') || $('pb-cc').click(),
             live: () => bar.classList.contains('is-live') && goLive(),
             bar: () => focusEl($('pb-play')),
-            closepanel: closePanel,
             chnext: () => zap(1), chprev: () => zap(-1),
         };
         run[act]();

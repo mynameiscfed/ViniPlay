@@ -9,7 +9,6 @@ import { apiFetch, saveUserSetting, stopStream, startRedirectStream, stopRedirec
 import { showNotification, openModal, closeModal, showConfirm } from './ui.js';
 import { castState, loadMedia, setLocalPlayerState } from './cast.js';
 import { logToPlayerConsole } from './player_direct.js';
-import { ICONS } from './icons.js'; // NEW: Import ICONS
 import { getCodecName } from './codecs.js'; // NEW: Import codec utility
 import { sendTelemetry, tracePlayerAction } from './telemetry.js';
 import { nowNext, escapeHtml } from './utils.js';
@@ -39,6 +38,7 @@ let retryTimeout = null;
 
 // --- Player extras ---
 let sleepTimer = null;
+const closePlaybackPanel = () => document.getElementById('player-panel')?.classList.add('hidden');
 let currentRecordJob = null;
 let playerFallbackUsed = false;
 let currentEpisodeContext = null;
@@ -495,7 +495,7 @@ export function togglePlayerLock(forceState = null) {
     const videoEl = UIElements.videoElement;
 
     // Dismiss options dropdown if open
-    document.getElementById('player-more-options-menu')?.classList.add('hidden');
+    closePlaybackPanel();
 
     if (isPlayerLocked) {
         videoModal?.classList.add('player-locked');
@@ -535,7 +535,7 @@ export function toggleAudioOnly(forceState = null) {
     const videoEl = UIElements.videoElement;
 
     // Dismiss options dropdown if open
-    document.getElementById('player-more-options-menu')?.classList.add('hidden');
+    closePlaybackPanel();
 
     if (isAudioOnly) {
         if (titleEl) {
@@ -706,7 +706,7 @@ export async function forceRefreshStream() {
  * Stops the current local stream, cleans up the mpegts.js player instance, and closes the modal.
  * This does NOT affect an active Google Cast session.
  */
-export const stopAndCleanupPlayer = async () => { // MODIFIED: Made function async
+export const stopAndCleanupPlayer = async ({ keepSleepTimer = false } = {}) => { // bindTap passes an Event, which has no such field
     tracePlayerAction('stopAndCleanupPlayer() invoked', {
         currentLocalStreamUrl,
         currentRedirectHistoryId,
@@ -729,13 +729,12 @@ export const stopAndCleanupPlayer = async () => { // MODIFIED: Made function asy
     playerFallbackUsed = false;
     currentChannelInfo = null;
     currentRecordJob = null;
-    if (sleepTimer) {
+    if (sleepTimer && !keepSleepTimer) {
         clearTimeout(sleepTimer);
         sleepTimer = null;
     }
     const recordBtn = document.getElementById('record-current-btn');
     if (recordBtn) recordBtn.classList.add('hidden');
-    document.getElementById('audio-track-btn')?.classList.add('hidden');
     hideBar();
     document.dispatchEvent(new CustomEvent('playerstop'));
 
@@ -855,7 +854,7 @@ export const stopAndCleanupPlayer = async () => { // MODIFIED: Made function asy
     const refreshBtn = document.getElementById('refresh-stream-btn');
     if (refreshBtn) refreshBtn.classList.remove('hidden');
 
-    document.getElementById('player-more-options-menu')?.classList.add('hidden');
+    closePlaybackPanel();
     UIElements.videoModal?.classList.remove('pip-active');
     closeModal(UIElements.videoModal);
 };
@@ -1019,7 +1018,6 @@ async function playLiveRewind(url, name, channelId, logo, profileId) {
     updateMediaSession(name, logo);
     requestScreenWakeLock();
     openModal(UIElements.videoModal);
-    document.getElementById('audio-track-btn')?.classList.add('hidden');
     showBar({ live: true, seekable: true, goLive: jumpToLive });
     refreshPlayerRecordState();
     setPrimaryPlayerButtons(true);
@@ -1220,7 +1218,6 @@ export const playChannel = async (url, name, channelId, forceLive = false, profi
         showBar({ live: true, goLive: jumpToLive });
         refreshPlayerRecordState();
         setPrimaryPlayerButtons(true);
-        if (supportsAudioSelection) document.getElementById('audio-track-btn')?.classList.remove('hidden');
 
         UIElements.videoElement.addEventListener('loadedmetadata', () => {
             if (window.innerWidth >= 768 && isAspectRatioLocked && UIElements.videoElement.videoWidth) {
@@ -1258,7 +1255,7 @@ export const playRecordingOrDirectVideo = async (url, title, logo = '', isVod = 
     console.log(`[PLAYER] Playing direct/recording video: "${title}" from ${url} (isVod: ${isVod}, startTime: ${startTime})`);
 
     // 1. Cleanly stop any existing active stream
-    await stopAndCleanupPlayer();
+    await stopAndCleanupPlayer({ keepSleepTimer: true });
     isUserInitiatedPause = false;
     currentStreamUrlToPlay = url;
     if (isAudioOnly) {
@@ -1429,7 +1426,7 @@ export const playVOD = async (url, title, logo = '', startTime = 0, knownDuratio
     const preservedDuration = knownDuration !== null ? knownDuration : (currentVodTranscodeSession?.url === url ? currentVodTranscodeSession?.duration : (mediaInfo?.duration || null));
 
     // 1. Stop any existing player (live or VOD), regardless of play method chosen
-    await stopAndCleanupPlayer();
+    await stopAndCleanupPlayer({ keepSleepTimer: true });
     await new Promise(r => setTimeout(r, 50)); // Short micro-yield to allow browser MSE decoder to flush
 
     // 2. Get necessary settings
@@ -1611,177 +1608,94 @@ export const playVOD = async (url, title, logo = '', startTime = 0, knownDuratio
     }
 };
 
-function isTranscodedLive() {
-    const profile = (guideState.settings.streamProfiles || []).find(p => p.id === currentProfileId);
+function isTranscodedLive(profileId = currentProfileId) {
+    const profile = (guideState.settings.streamProfiles || []).find(p => p.id === profileId);
     return !!(currentChannelInfo?.channelId && /^https?:/i.test(currentChannelInfo.url || '') &&
         profile && profile.command !== 'redirect' && !profile.command.includes('-f mp4'));
 }
 
-/**
- * Detects and populates available audio tracks in the menu.
- */
-function updateAudioTrackList() {
-    const video = UIElements.videoElement;
-    const audioTracks = video.audioTracks;
-    const listEl = document.getElementById('audio-track-list');
-    const btnEl = document.getElementById('audio-track-btn');
-
-    console.log('[AUDIO_TRACKS] Checking for audio tracks...');
-    console.log('[AUDIO_TRACKS] audioTracks object:', audioTracks);
-    console.log('[AUDIO_TRACKS] Number of tracks:', audioTracks ? audioTracks.length : 0);
-
-    if (!audioTracks || audioTracks.length <= 1) {
-        if (isTranscodedLive()) {
-            btnEl?.classList.remove('hidden');
-            return;
-        }
-        console.log('[AUDIO_TRACKS] Not enough tracks, hiding button');
-        btnEl?.classList.add('hidden');
-        return;
-    }
-
-    console.log('[AUDIO_TRACKS] Multiple tracks found! Showing button and populating menu');
-    btnEl?.classList.remove('hidden');
-    if (!listEl) return;
-
-    listEl.innerHTML = '';
-
-    for (let i = 0; i < audioTracks.length; i++) {
-        const track = audioTracks[i];
-        console.log(`[AUDIO_TRACKS] Track ${i}:`, { label: track.label, language: track.language, enabled: track.enabled });
-        const item = document.createElement('div');
-        item.className = `px-4 py-2 cursor-pointer hover:bg-gray-700 transition-colors ${track.enabled ? 'bg-blue-600 font-semibold' : ''}`;
-        item.textContent = track.label || track.language || `Track ${i + 1}`;
-        item.onclick = () => selectAudioTrack(i);
-        listEl.appendChild(item);
-    }
+function fillSelect(select, options, selected) {
+    select.innerHTML = options.map(([value, label]) => `<option value="${escapeHtml(String(value))}">${escapeHtml(label)}</option>`).join('');
+    select.value = String(selected);
 }
 
-/**
- * Selects an audio track by index.
- */
+/** Selects an audio track of the video element by index. */
 function selectAudioTrack(index) {
     const audioTracks = UIElements.videoElement.audioTracks;
     if (!audioTracks) return;
-
-    for (let i = 0; i < audioTracks.length; i++) {
-        audioTracks[i].enabled = (i === index);
-    }
-    updateAudioTrackList();
-    document.getElementById('audio-track-menu')?.classList.add('hidden');
-    showNotification(`Audio track switched`, false, 1500);
-}
-
-async function prepareAudioTrackMenu() {
-    const listEl = document.getElementById('audio-track-list');
-    const menu = document.getElementById('audio-track-menu');
-    if (!listEl || !menu) return;
-    menu.classList.remove('hidden');
-    listEl.innerHTML = '<div class="px-4 py-2 text-sm text-gray-400">Loading tracks...</div>';
-
-    if (UIElements.videoElement.audioTracks && UIElements.videoElement.audioTracks.length > 1) {
-        updateAudioTrackList();
-        return;
-    }
-    if (!isTranscodedLive() || !currentChannelInfo?.channelId) {
-        listEl.innerHTML = '<div class="px-4 py-2 text-sm text-gray-400">No alternate audio tracks.</div>';
-        return;
-    }
-    try {
-        const res = await apiFetch(`/api/stream/tracks?url=${encodeURIComponent(currentChannelInfo.url)}&userAgentId=${encodeURIComponent(guideState.settings.activeUserAgentId || '')}`);
-        if (!res) {
-            listEl.innerHTML = '<div class="px-4 py-2 text-sm text-red-400">Could not read audio tracks.</div>';
-            return;
-        }
-        currentStreamTracks = await res.json();
-        const tracks = currentStreamTracks.audio || [];
-        if (!tracks.length) {
-            listEl.innerHTML = '<div class="px-4 py-2 text-sm text-gray-400">No alternate audio tracks.</div>';
-            return;
-        }
-        listEl.innerHTML = '';
-        tracks.forEach((track) => {
-            const item = document.createElement('div');
-            const active = selectedAudioTrack === track.ordinal;
-            item.className = `px-4 py-2 cursor-pointer hover:bg-gray-700 transition-colors ${active ? 'bg-blue-600 font-semibold' : ''}`;
-            item.textContent = track.title || track.language || `Audio ${track.ordinal + 1}`;
-            item.onclick = () => selectServerAudioTrack(track.ordinal);
-            listEl.appendChild(item);
-        });
-    } catch (e) {
-        listEl.innerHTML = '<div class="px-4 py-2 text-sm text-red-400">Could not read audio tracks.</div>';
-    }
+    for (let i = 0; i < audioTracks.length; i++) audioTracks[i].enabled = (i === index);
+    showNotification('Audio track switched', false, 1500);
 }
 
 function selectServerAudioTrack(ordinal) {
     selectedAudioTrack = ordinal;
-    document.getElementById('audio-track-menu')?.classList.add('hidden');
     showNotification(`Audio track ${ordinal + 1} selected.`, false, 1500);
+    closePlaybackPanel();
     if (!currentChannelInfo?.channelId) return;
     const forceLive = !!appState.hlsPlayer || currentChannelInfo.forceLive === true;
     playChannel(currentChannelInfo.url, currentChannelInfo.name, currentChannelInfo.channelId, forceLive, currentProfileId);
 }
 
-/**
- * Detects and populates available subtitle tracks in the menu.
- */
-function updateSubtitleTrackList() {
-    const video = UIElements.videoElement;
-    const textTracks = video.textTracks;
-    const listEl = document.getElementById('subtitle-track-list');
-    const btnEl = document.getElementById('subtitle-track-btn');
-
-    console.log('[SUBTITLES] Checking for subtitle tracks...');
-    console.log('[SUBTITLES] textTracks object:', textTracks);
-    console.log('[SUBTITLES] Number of tracks:', textTracks ? textTracks.length : 0);
-
-    if (!textTracks || textTracks.length === 0) {
-        console.log('[SUBTITLES] No subtitle tracks found, hiding button');
-        btnEl?.classList.add('hidden');
-        document.getElementById('pb-cc')?.classList.add('hidden');
-        return;
-    }
-
-    console.log('[SUBTITLES] Subtitle tracks found! Showing button and populating menu');
-    btnEl?.classList.remove('hidden');
-    document.getElementById('pb-cc')?.classList.remove('hidden');
-    if (!listEl) return;
-
-    listEl.innerHTML = '';
-
-    // Add "Off" option
-    const offItem = document.createElement('div');
-    const anyShowing = Array.from(textTracks).some(t => t.mode === 'showing');
-    offItem.className = `px-4 py-2 cursor-pointer hover:bg-gray-700 transition-colors ${!anyShowing ? 'bg-blue-600 font-semibold' : ''}`;
-    offItem.textContent = 'Off';
-    offItem.onclick = () => selectSubtitleTrack(-1);
-    listEl.appendChild(offItem);
-
-    // Add each track
-    for (let i = 0; i < textTracks.length; i++) {
-        const track = textTracks[i];
-        console.log(`[SUBTITLES] Track ${i}:`, { label: track.label, language: track.language, kind: track.kind, mode: track.mode });
-        const item = document.createElement('div');
-        item.className = `px-4 py-2 cursor-pointer hover:bg-gray-700 transition-colors ${track.mode === 'showing' ? 'bg-blue-600 font-semibold' : ''}`;
-        item.textContent = track.label || track.language || `Subtitle ${i + 1}`;
-        item.onclick = () => selectSubtitleTrack(i);
-        listEl.appendChild(item);
+/** The audio row: the video's own tracks, else the server's tracks of a transcoded channel, else (rewind) a reason. */
+async function refreshAudioRow() {
+    const row = document.getElementById('pp-audio-row');
+    const select = document.getElementById('pp-audio');
+    const note = document.getElementById('pp-audio-note');
+    const channel = currentChannelInfo;
+    const native = Array.from(UIElements.videoElement.audioTracks || []);
+    select.disabled = false;
+    note.textContent = '';
+    row.classList.add('hidden');
+    if (native.length > 1) {
+        fillSelect(select, native.map((t, i) => [i, t.label || t.language || `Track ${i + 1}`]), Math.max(0, native.findIndex(t => t.enabled)));
+        select.onchange = () => selectAudioTrack(Number(select.value));
+        row.classList.remove('hidden');
+    } else if (channel?.channelId && appState.hlsPlayer) {
+        if (!isTranscodedLive(guideState.settings.activeStreamProfileId)) return;
+        fillSelect(select, [['', 'Default']], '');
+        select.disabled = true;
+        note.textContent = 'Not available with rewind';
+        row.classList.remove('hidden');
+    } else if (isTranscodedLive()) {
+        try {
+            if (!currentStreamTracks) {
+                const res = await apiFetch(`/api/stream/tracks?url=${encodeURIComponent(channel.url)}&userAgentId=${encodeURIComponent(guideState.settings.activeUserAgentId || '')}`);
+                currentStreamTracks = res ? await res.json() : null;
+            }
+        } catch (e) { console.warn('[PLAYER] Could not read audio tracks:', e); }
+        const tracks = currentStreamTracks?.audio || [];
+        if (tracks.length < 2 || currentChannelInfo !== channel) return;
+        fillSelect(select, tracks.map(t => [t.ordinal, t.title || t.language || `Audio ${t.ordinal + 1}`]), selectedAudioTrack ?? tracks[0].ordinal);
+        select.onchange = () => selectServerAudioTrack(Number(select.value));
+        row.classList.remove('hidden');
     }
 }
 
-/**
- * Selects a subtitle track by index (-1 for off).
- */
+/** The subtitle row and the CC button appear when the stream carries subtitle tracks. */
+function updateSubtitleTrackList() {
+    const tracks = Array.from(UIElements.videoElement.textTracks || []);
+    document.getElementById('pp-subs-row').classList.toggle('hidden', !tracks.length);
+    document.getElementById('pb-cc').classList.toggle('hidden', !tracks.length);
+    if (!tracks.length) return;
+    const select = document.getElementById('pp-subs');
+    fillSelect(select, [[-1, 'Off'], ...tracks.map((t, i) => [i, t.label || t.language || `Subtitle ${i + 1}`])], tracks.findIndex(t => t.mode === 'showing'));
+    select.onchange = () => selectSubtitleTrack(Number(select.value));
+}
+
+/** Shows track `index` (-1 for off). */
 function selectSubtitleTrack(index) {
     const textTracks = UIElements.videoElement.textTracks;
     if (!textTracks) return;
-
-    for (let i = 0; i < textTracks.length; i++) {
-        textTracks[i].mode = (i === index) ? 'showing' : 'hidden';
-    }
+    for (let i = 0; i < textTracks.length; i++) textTracks[i].mode = (i === index) ? 'showing' : 'hidden';
     updateSubtitleTrackList();
-    document.getElementById('subtitle-track-menu')?.classList.add('hidden');
     showNotification(index === -1 ? 'Subtitles off' : 'Subtitle track switched', false, 1500);
+}
+
+/** The CC button and the C key: off, then each track in turn. */
+export function cycleSubtitles() {
+    const tracks = Array.from(UIElements.videoElement.textTracks || []);
+    const next = tracks.findIndex(t => t.mode === 'showing') + 1;
+    if (tracks.length) selectSubtitleTrack(next < tracks.length ? next : -1);
 }
 
 async function maybePlayNextEpisode() {
@@ -1814,52 +1728,38 @@ async function maybePlayNextEpisode() {
     }
 }
 
+const SPEEDS = [1, 1.25, 1.5, 2, 0.75, 0.5];
+
+export function setPlaybackSpeed(speed) {
+    UIElements.videoElement.playbackRate = speed;
+    localStorage.setItem('iptvPlaybackRate', String(speed));
+}
+
 export function cyclePlaybackSpeed() {
     const video = UIElements.videoElement;
     if (!video) return;
-    const speeds = [1, 1.25, 1.5, 2, 0.75, 0.5];
-    const current = Number(video.playbackRate) || 1;
-    const next = speeds[(speeds.indexOf(current) + 1) % speeds.length] || 1;
-    video.playbackRate = next;
-    localStorage.setItem('iptvPlaybackRate', String(next));
-    showNotification(`Playback speed: ${next}x`, false, 1200);
+    setPlaybackSpeed(SPEEDS[(SPEEDS.indexOf(Number(video.playbackRate) || 1) + 1) % SPEEDS.length] || 1);
 }
 
-export function cycleSleepTimer() {
-    const steps = [0, 15, 30, 60, 90];
-    const current = Number(sessionStorage.getItem('iptvSleepMinutes') || 0);
-    const next = steps[(steps.indexOf(current) + 1) % steps.length] || 0;
-    sessionStorage.setItem('iptvSleepMinutes', String(next));
-    if (sleepTimer) {
-        clearTimeout(sleepTimer);
-        sleepTimer = null;
-    }
-    if (next > 0) {
+export const sleepMinutes = () => Number(sessionStorage.getItem('iptvSleepMinutes') || 0);
+
+export function setSleepTimer(minutes) {
+    sessionStorage.setItem('iptvSleepMinutes', String(minutes));
+    clearTimeout(sleepTimer);
+    sleepTimer = null;
+    if (minutes > 0) {
         sleepTimer = setTimeout(() => {
             showNotification('Sleep timer ended. Stopping playback.', false, 3000);
             stopAndCleanupPlayer();
-        }, next * 60 * 1000);
-        showNotification(`Sleep timer: ${next} minutes`, false, 1500);
-    } else {
-        showNotification('Sleep timer off', false, 1500);
+        }, minutes * 60 * 1000);
     }
+    showNotification(minutes > 0 ? `Sleep timer: ${minutes} minutes` : 'Sleep timer off', false, 1500);
 }
 
 function setPrimaryPlayerButtons(isLive) {
     UIElements.videoModal?.classList.toggle('is-live', isLive);
-    const speedBtn = document.getElementById('player-speed-btn');
-    if (speedBtn) speedBtn.classList.toggle('hidden', isLive);
-    const autoplayBtn = document.getElementById('player-autoplay-btn');
-    if (autoplayBtn) {
-        autoplayBtn.classList.toggle('hidden', isLive);
-        autoplayBtn.classList.toggle('flex', !isLive);
-    }
-    const badge = document.getElementById('player-autoplay-badge');
-    if (badge) {
-        const on = localStorage.getItem('iptvAutoplayNext') !== 'off';
-        badge.textContent = on ? 'On' : 'Off';
-        badge.className = `text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full border ${on ? 'bg-blue-500/20 text-blue-400 border-blue-500/30' : 'bg-gray-800 text-gray-400 border-gray-700'}`;
-    }
+    const on = localStorage.getItem('iptvAutoplayNext') !== 'off';
+    document.getElementById('player-autoplay-badge').textContent = on ? 'On' : 'Off';
     refreshQualityMenu(isLive);
 }
 
@@ -1885,11 +1785,42 @@ function refreshQualityMenu(isLive) {
     select.value = currentProfileId || guideState.settings.activeStreamProfileId;
     select.onchange = () => {
         if (!currentChannelInfo?.channelId) return;
-        document.getElementById('player-more-options-menu')?.classList.add('hidden');
+        closePlaybackPanel();
         const forceLive = !!appState.hlsPlayer || currentChannelInfo.forceLive === true;
         playChannel(currentChannelInfo.url, currentChannelInfo.name, currentChannelInfo.channelId, forceLive, select.value);
     };
     row.classList.remove('hidden');
+}
+
+function downloadHref() {
+    const media = currentActiveMedia;
+    if (guideState.settings.downloads?.enabled === false || document.documentElement.classList.contains('tv')) return null;
+    if (media?.contentType === 'vod_movie') return `/api/vod/download/movie/${encodeURIComponent(media.contentId)}`;
+    if (media?.contentType === 'vod_episode') return `/api/vod/download/episode/${encodeURIComponent(media.contentId)}`;
+    return currentStreamUrlToPlay?.startsWith('/dvr/') ? currentStreamUrlToPlay : null;
+}
+
+const markOn = (group, isOn) => Array.from(group.children).forEach(button => button.classList.toggle('on', isOn(button)));
+
+/** Brings every row of the Playback panel up to date with what is playing; called when it opens. */
+export function refreshPlaybackPanel() {
+    const $ = (id) => document.getElementById(id);
+    const video = UIElements.videoElement;
+    const channelId = currentChannelInfo?.channelId;
+    const rewind = !!channelId && !!appState.hlsPlayer;
+    $('pp-speed-row').classList.toggle('hidden', !!channelId);
+    markOn($('pp-speed'), b => Number(b.dataset.speed) === (video.playbackRate || 1));
+    markOn($('pp-sleep'), b => Number(b.dataset.min) === sleepMinutes());
+    $('player-quality-select').disabled = rewind;
+    $('pp-quality-note').textContent = rewind ? 'Fixed while rewind is on' : '';
+    updateSubtitleTrackList();
+    refreshAudioRow();
+    const program = channelId && (appState.currentUser?.isAdmin || appState.currentUser?.canUseDvr) ? nowNext(channelId).now : null;
+    $('player-autoplay-btn').classList.toggle('hidden', !currentEpisodeContext);
+    $('pp-series-btn').classList.toggle('hidden', !program);
+    $('pp-series-name').textContent = program ? program.title : '';
+    $('pp-download-btn').classList.toggle('hidden', !downloadHref());
+    $('pip-btn').classList.toggle('hidden', !document.pictureInPictureEnabled);
 }
 
 /**
@@ -1905,76 +1836,62 @@ export function setupPlayerEventListeners() {
         } catch (e) {}
     }
 
-    // NEW: Add event listener for the refresh button
-    const refreshBtn = document.getElementById('refresh-stream-btn');
-    if (refreshBtn) {
-        bindTap(refreshBtn, forceRefreshStream);
-    }
+    bindTap(document.getElementById('refresh-stream-btn'), () => { closePlaybackPanel(); forceRefreshStream(); });
 
     const recordBtn = document.getElementById('record-current-btn');
     if (recordBtn) bindTap(recordBtn, toggleCurrentRecording);
-    const speedBtn = document.getElementById('player-speed-btn');
-    if (speedBtn) bindTap(speedBtn, () => { document.getElementById('player-more-options-menu')?.classList.add('hidden'); cyclePlaybackSpeed(); });
     bindTap(document.getElementById('pb-speed'), cyclePlaybackSpeed);
-    bindTap(document.getElementById('pb-cc'), () => document.getElementById('subtitle-track-btn').click());
-    const sleepBtn = document.getElementById('player-sleep-btn');
-    if (sleepBtn) bindTap(sleepBtn, () => { document.getElementById('player-more-options-menu')?.classList.add('hidden'); cycleSleepTimer(); });
-    const autoplayBtn = document.getElementById('player-autoplay-btn');
-    if (autoplayBtn) bindTap(autoplayBtn, () => {
+    bindTap(document.getElementById('pb-cc'), cycleSubtitles);
+    bindTap(document.getElementById('player-autoplay-btn'), () => {
         const next = localStorage.getItem('iptvAutoplayNext') === 'off' ? 'on' : 'off';
         localStorage.setItem('iptvAutoplayNext', next);
         showNotification(`Autoplay next episode ${next}.`, false, 1500);
         setPrimaryPlayerButtons(false);
     });
 
-    // On phones the header drops Refresh and PiP; their menu rows press the same buttons.
-    [['menu-pip-btn', 'pip-btn'], ['menu-refresh-btn', 'refresh-stream-btn']].forEach(([row, button]) => {
-        bindTap(document.getElementById(row), () => {
-            document.getElementById('player-more-options-menu')?.classList.add('hidden');
-            document.getElementById(button)?.click();
-        });
+    // Speed and sleep timer are choices on a row, not buttons that cycle blind.
+    document.getElementById('pp-speed').addEventListener('click', (e) => {
+        const button = e.target.closest('[data-speed]');
+        if (button) { setPlaybackSpeed(Number(button.dataset.speed)); refreshPlaybackPanel(); }
+    });
+    document.getElementById('pp-sleep').addEventListener('click', (e) => {
+        const button = e.target.closest('[data-min]');
+        if (button) { setSleepTimer(Number(button.dataset.min)); refreshPlaybackPanel(); }
+    });
+    bindTap(document.getElementById('pp-series-btn'), async () => {
+        closePlaybackPanel();
+        const program = nowNext(currentChannelInfo?.channelId).now;
+        if (!program) return;
+        const { addSeriesRule } = await import('./dvr.js'); // dvr.js imports this file, so it loads on use
+        addSeriesRule({ channelId: currentChannelInfo.channelId, title: program.title });
+    });
+    bindTap(document.getElementById('pp-download-btn'), () => {
+        closePlaybackPanel();
+        Object.assign(document.createElement('a'), { href: downloadHref(), download: '' }).click();
+        showNotification('Download started.', false, 2000);
     });
 
     bindTap(UIElements.pipBtn, () => {
+        closePlaybackPanel();
         if (document.pictureInPictureEnabled && UIElements.videoElement && (UIElements.videoElement.readyState >= 1 || !UIElements.videoElement.paused)) {
             requestScreenWakeLock();
             UIElements.videoElement.requestPictureInPicture().catch(() => showNotification("Could not enter Picture-in-Picture.", true));
         }
     });
 
-    // More Options Dropdown Toggle & Outside Click
-    const moreOptionsBtn = document.getElementById('player-more-options-btn');
-    const moreOptionsMenu = document.getElementById('player-more-options-menu');
-    if (moreOptionsBtn && moreOptionsMenu) {
-        bindTap(moreOptionsBtn, (e) => {
-            if (e && e.stopPropagation) e.stopPropagation();
-            moreOptionsMenu.classList.toggle('hidden');
-        });
-
-        // Close on outside click
-        document.addEventListener('click', (e) => {
-            if (!moreOptionsBtn.contains(e.target) && !moreOptionsMenu.contains(e.target)) {
-                moreOptionsMenu.classList.add('hidden');
-            }
-        });
-    }
+    // A click anywhere outside the Playback panel closes it.
+    document.addEventListener('click', (e) => {
+        if (!e.target.closest('#player-panel, #pb-panel-btn')) closePlaybackPanel();
+    });
 
     bindTap(UIElements.streamInfoToggleBtn, () => {
         UIElements.streamInfoOverlay.classList.toggle('hidden');
-        document.getElementById('player-more-options-menu')?.classList.add('hidden');
+        closePlaybackPanel();
     });
-
-    // NEW: Aspect Ratio Lock Toggle
-    const aspectRatioLockBtn = document.getElementById('aspect-ratio-lock-btn');
-    if (aspectRatioLockBtn) {
-        bindTap(aspectRatioLockBtn, toggleAspectRatioLock);
-        // Initialize button state
-        updateAspectRatioLockButton();
-    }
 
     if (UIElements.castBtn) {
         bindTap(UIElements.castBtn, () => {
-            document.getElementById('player-more-options-menu')?.classList.add('hidden');
+            closePlaybackPanel();
             console.log('[PLAYER] Custom cast button clicked. Requesting session...');
             try {
                 const castContext = cast.framework.CastContext.getInstance();
@@ -2146,54 +2063,16 @@ export function setupPlayerEventListeners() {
         }
     });
 
-    // Audio track button
-    const audioTrackBtn = document.getElementById('audio-track-btn');
-    if (audioTrackBtn) {
-        audioTrackBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            document.getElementById('player-more-options-menu')?.classList.add('hidden');
-            const menu = document.getElementById('audio-track-menu');
-            if (menu && !menu.classList.contains('hidden')) {
-                menu.classList.add('hidden');
-            } else {
-                prepareAudioTrackMenu();
-            }
-            document.getElementById('subtitle-track-menu')?.classList.add('hidden');
-        });
-    }
-
-    // Subtitle track button
-    const subtitleTrackBtn = document.getElementById('subtitle-track-btn');
-    if (subtitleTrackBtn) {
-        subtitleTrackBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            document.getElementById('player-more-options-menu')?.classList.add('hidden');
-            const menu = document.getElementById('subtitle-track-menu');
-            menu?.classList.toggle('hidden');
-            document.getElementById('audio-track-menu')?.classList.add('hidden');
-        });
-    }
-
-    // Close menus when clicking outside
-    document.addEventListener('click', () => {
-        document.getElementById('audio-track-menu')?.classList.add('hidden');
-        document.getElementById('subtitle-track-menu')?.classList.add('hidden');
-    });
-
     // Update track lists when stream loads
     UIElements.videoElement.addEventListener('loadedmetadata', () => {
         console.log('[PLAYER] Media metadata loaded, checking for audio/subtitle tracks...');
         // Small delay to ensure tracks are fully loaded
-        setTimeout(() => {
-            updateAudioTrackList();
-            updateSubtitleTrackList();
-        }, 500);
+        setTimeout(updateSubtitleTrackList, 500);
     });
 
     // Also check when tracks change
     UIElements.videoElement.addEventListener('addtrack', () => {
         console.log('[PLAYER] Track added, updating lists...');
-        updateAudioTrackList();
         updateSubtitleTrackList();
     });
 
@@ -2222,44 +2101,7 @@ export function setupPlayerEventListeners() {
 }
 
 // --- Aspect Ratio Logic ---
-let isAspectRatioLocked = true; // Default to locked
-
-export const toggleAspectRatioLock = () => {
-    isAspectRatioLocked = !isAspectRatioLocked;
-    updateAspectRatioLockButton();
-    document.getElementById('player-more-options-menu')?.classList.add('hidden');
-    showNotification(isAspectRatioLocked ? 'Aspect ratio locked to 16:9' : 'Aspect ratio free resize enabled', false, 1500);
-};
-
-const updateAspectRatioLockButton = () => {
-    const btn = document.getElementById('aspect-ratio-lock-btn');
-    if (!btn) return;
-
-    const statusBadge = document.getElementById('aspect-ratio-status');
-    const iconContainer = btn.querySelector('.aspect-ratio-icon-container');
-
-    if (isAspectRatioLocked) {
-        btn.classList.add('text-blue-400');
-        btn.classList.remove('text-gray-400');
-        if (statusBadge) {
-            statusBadge.textContent = '16:9 Locked';
-            statusBadge.className = 'text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-400 border border-blue-500/30';
-        }
-        if (iconContainer) {
-            iconContainer.className = 'p-1.5 rounded-md bg-blue-600/30 text-blue-400 transition-colors flex-shrink-0 aspect-ratio-icon-container';
-        }
-    } else {
-        btn.classList.remove('text-blue-400');
-        btn.classList.add('text-gray-400');
-        if (statusBadge) {
-            statusBadge.textContent = 'Free Resize';
-            statusBadge.className = 'text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-gray-800 text-gray-400 border border-gray-700';
-        }
-        if (iconContainer) {
-            iconContainer.className = 'p-1.5 rounded-md bg-gray-800/80 text-gray-400 transition-colors flex-shrink-0 aspect-ratio-icon-container';
-        }
-    }
-};
+const isAspectRatioLocked = true; // the player is full-bleed, so its window is always kept at the video's ratio
 
 export const shouldMaintainAspectRatio = () => {
     return isAspectRatioLocked;

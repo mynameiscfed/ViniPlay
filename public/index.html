@@ -42,7 +42,7 @@
     <link rel="stylesheet" href="/css/guide.css?v=5">
     <link rel="stylesheet" href="/css/home.css?v=6">
     <link rel="stylesheet" href="/css/legacy.css?v=7">
-    <link rel="stylesheet" href="/css/player.css?v=3">
+    <link rel="stylesheet" href="/css/player.css?v=4">
     <link rel="stylesheet" href="/css/tv.css?v=1">
 
     <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.8.2/dist/mpegts.js" integrity="sha384-sQp+4cJv0jChNCYvgy6W0RSfQZB/w6d3ZTDoIBlY4Uorfw4PLS56T2yM2z47bSkl" crossorigin="anonymous"></script>
@@ -1463,220 +1463,18 @@
                     <button id="player-channels-btn" type="button" class="pbtn hidden" title="Channels">
                         <span data-icon="channelList"></span>
                     </button>
-                    <!-- 1. Refresh Stream -->
-                    <button id="refresh-stream-btn" type="button" class="pbtn"
-                        title="Refresh Stream">
-                        <span data-icon="refresh"></span>
-                    </button>
                     <!-- Record current programme -->
                     <button id="record-current-btn" type="button" class="pbtn hidden"
                         title="Record current programme">
                         <span data-icon="rec"></span>
                         <span data-rec-state>Record</span>
                     </button>
-                    <!-- 2. Picture-in-Picture -->
-                    <button id="pip-btn" type="button" class="pbtn"
-                        title="Picture-in-Picture">
-                        <span data-icon="pip"></span>
-                    </button>
-                    <!-- 4. More Options Dropdown Trigger -->
-                    <div class="relative flex-shrink-0">
-                        <button id="player-more-options-btn" type="button" class="pbtn"
-                            title="More Options">
-                            <span data-icon="more"></span>
-                        </button>
 
-                        <!-- Dropdown Menu -->
-                        <div id="player-more-options-menu"
-                            class="hidden absolute right-0 top-full mt-2 w-72 sm:w-80 max-w-[calc(100vw-32px)] max-h-[min(380px,80vh)] overflow-y-auto custom-scrollbar bg-gray-900/95 backdrop-blur-xl border border-gray-700/80 rounded-xl shadow-2xl p-1.5 z-50 transition-all duration-150 flex flex-col gap-0.5">
-
-                            <!-- Phones only: header buttons that moved here (see player.css) -->
-                            <button id="menu-refresh-btn"
-                                class="pm-phone pm-live w-full flex items-center gap-3 px-3 py-2.5 text-left text-gray-300 hover:text-white hover:bg-gray-800/80 transition-colors rounded-lg group cursor-pointer"
-                                title="Refresh Stream">
-                                <span class="p-1.5 rounded-md bg-gray-800/80 group-hover:bg-gray-700 text-gray-400 group-hover:text-white transition-colors flex-shrink-0">
-                                    <span data-icon="refresh"></span>
-                                </span>
-                                <div class="flex flex-col flex-1 min-w-0">
-                                    <span class="text-sm font-medium leading-snug">Reload Stream</span>
-                                    <span class="text-xs text-gray-400 leading-tight">Try again if playback stalls</span>
-                                </div>
-                            </button>
-                            <button id="menu-pip-btn"
-                                class="pm-phone w-full flex items-center gap-3 px-3 py-2.5 text-left text-gray-300 hover:text-white hover:bg-gray-800/80 transition-colors rounded-lg group cursor-pointer"
-                                title="Picture-in-Picture">
-                                <span class="p-1.5 rounded-md bg-gray-800/80 group-hover:bg-gray-700 text-gray-400 group-hover:text-white transition-colors flex-shrink-0">
-                                    <span data-icon="pip"></span>
-                                </span>
-                                <div class="flex flex-col flex-1 min-w-0">
-                                    <span class="text-sm font-medium leading-snug">Picture-in-Picture</span>
-                                    <span class="text-xs text-gray-400 leading-tight">Keep watching in a small window</span>
-                                </div>
-                            </button>
-
-                            <!-- Audio-Only Toggle -->
-                            <button id="audio-only-btn"
-                                class="w-full flex items-center gap-3 px-3 py-2.5 text-left text-gray-300 hover:text-white hover:bg-gray-800/80 transition-colors rounded-lg group cursor-pointer"
-                                title="Toggle Audio Only Mode">
-                                <span class="p-1.5 rounded-md bg-gray-800/80 group-hover:bg-blue-600/30 text-gray-400 group-hover:text-blue-400 transition-colors flex-shrink-0">
-                                    <span data-icon="headphones"></span>
-                                </span>
-                                <div class="flex flex-col flex-1 min-w-0">
-                                    <span class="text-sm font-medium leading-snug">Audio-Only Mode</span>
-                                    <span class="text-xs text-gray-400 leading-tight">Background & lock screen playback</span>
-                                </div>
-                                <span id="audio-only-badge" class="hidden text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-400 border border-blue-500/30">Active</span>
-                            </button>
-
-                            <!-- Player Touch Lock -->
-                            <button id="player-lock-btn"
-                                class="w-full flex items-center gap-3 px-3 py-2.5 text-left text-gray-300 hover:text-white hover:bg-gray-800/80 transition-colors rounded-lg group cursor-pointer"
-                                title="Lock Player Controls">
-                                <span class="p-1.5 rounded-md bg-gray-800/80 group-hover:bg-yellow-600/30 text-gray-400 group-hover:text-yellow-400 transition-colors flex-shrink-0">
-                                    <span data-icon="lock"></span>
-                                </span>
-                                <div class="flex flex-col flex-1 min-w-0">
-                                    <span class="text-sm font-medium leading-snug">Lock Screen Controls</span>
-                                    <span class="text-xs text-gray-400 leading-tight">Prevent accidental taps</span>
-                                </div>
-                            </button>
-
-                            <!-- Aspect Ratio Lock -->
-                            <button id="aspect-ratio-lock-btn"
-                                class="w-full flex items-center gap-3 px-3 py-2.5 text-left text-gray-300 hover:text-white hover:bg-gray-800/80 transition-colors rounded-lg group cursor-pointer"
-                                title="Toggle Aspect Ratio Lock">
-                                <span class="p-1.5 rounded-md bg-gray-800/80 group-hover:bg-blue-600/30 text-blue-400 transition-colors flex-shrink-0 aspect-ratio-icon-container">
-                                    <span data-icon="aspectRatio"></span>
-                                </span>
-                                <div class="flex flex-col flex-1 min-w-0">
-                                    <span class="text-sm font-medium leading-snug">Aspect Ratio</span>
-                                    <span class="text-xs text-gray-400 leading-tight">Maintain 16:9 when resizing</span>
-                                </div>
-                                <span id="aspect-ratio-status" class="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-400 border border-blue-500/30">16:9 Locked</span>
-                            </button>
-
-                            <div class="my-1 border-t border-gray-800/80"></div>
-
-                            <!-- Playback speed (VOD and recordings) -->
-                            <button id="player-speed-btn"
-                                class="hidden w-full flex items-center gap-3 px-3 py-2.5 text-left text-gray-300 hover:text-white hover:bg-gray-800/80 transition-colors rounded-lg group cursor-pointer"
-                                title="Playback speed">
-                                <span class="p-1.5 rounded-md bg-gray-800/80 group-hover:bg-blue-600/30 text-gray-400 group-hover:text-blue-400 transition-colors flex-shrink-0">
-                                    <span data-icon="bolt"></span>
-                                </span>
-                                <div class="flex flex-col flex-1 min-w-0">
-                                    <span class="text-sm font-medium leading-snug">Playback Speed</span>
-                                    <span class="text-xs text-gray-400 leading-tight">Cycle 1x, 1.25x, 1.5x, 2x</span>
-                                </div>
-                            </button>
-
-                            <!-- Sleep timer -->
-                            <button id="player-sleep-btn"
-                                class="w-full flex items-center gap-3 px-3 py-2.5 text-left text-gray-300 hover:text-white hover:bg-gray-800/80 transition-colors rounded-lg group cursor-pointer"
-                                title="Sleep timer">
-                                <span class="p-1.5 rounded-md bg-gray-800/80 group-hover:bg-blue-600/30 text-gray-400 group-hover:text-blue-400 transition-colors flex-shrink-0">
-                                    <span data-icon="clock"></span>
-                                </span>
-                                <div class="flex flex-col flex-1 min-w-0">
-                                    <span class="text-sm font-medium leading-snug">Sleep Timer</span>
-                                    <span class="text-xs text-gray-400 leading-tight">Cycle off, 15, 30, 60, 90 min</span>
-                                </div>
-                            </button>
-
-                            <!-- Autoplay next episode -->
-                            <button id="player-autoplay-btn"
-                                class="hidden w-full items-center gap-3 px-3 py-2.5 text-left text-gray-300 hover:text-white hover:bg-gray-800/80 transition-colors rounded-lg group cursor-pointer"
-                                title="Autoplay next episode">
-                                <span class="p-1.5 rounded-md bg-gray-800/80 group-hover:bg-blue-600/30 text-gray-400 group-hover:text-blue-400 transition-colors flex-shrink-0">
-                                    <span data-icon="next"></span>
-                                </span>
-                                <div class="flex flex-col flex-1 min-w-0">
-                                    <span class="text-sm font-medium leading-snug">Autoplay Next Episode</span>
-                                    <span class="text-xs text-gray-400 leading-tight">Start the next episode when this one ends</span>
-                                </div>
-                                <span id="player-autoplay-badge" class="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-400 border border-blue-500/30">On</span>
-                            </button>
-
-                            <!-- Quality/profile switch -->
-                            <div id="player-quality-row" class="hidden px-3 py-2.5">
-                                <label for="player-quality-select" class="block text-xs font-medium text-gray-400 mb-1.5">Live Quality</label>
-                                <select id="player-quality-select" class="w-full bg-gray-800 border border-gray-600 rounded-md px-3 py-2 text-sm text-white"></select>
-                            </div>
-
-                            <div class="my-1 border-t border-gray-800/80"></div>
-
-                            <!-- Cast to device -->
-                            <button id="cast-btn"
-                                class="w-full flex items-center gap-3 px-3 py-2.5 text-left text-gray-300 hover:text-white hover:bg-gray-800/80 transition-colors rounded-lg group cursor-pointer"
-                                title="Cast to device">
-                                <span class="p-1.5 rounded-md bg-gray-800/80 group-hover:bg-gray-700 text-gray-400 group-hover:text-white transition-colors flex-shrink-0">
-                                    <span data-icon="cast"></span>
-                                </span>
-                                <div class="flex flex-col flex-1 min-w-0">
-                                    <span class="text-sm font-medium leading-snug">Cast to Device</span>
-                                    <span class="text-xs text-gray-400 leading-tight">Chromecast or smart display</span>
-                                </div>
-                            </button>
-
-                            <!-- Stream Diagnostics -->
-                            <button id="stream-info-toggle-btn"
-                                class="w-full flex items-center gap-3 px-3 py-2.5 text-left text-gray-300 hover:text-white hover:bg-gray-800/80 transition-colors rounded-lg group cursor-pointer"
-                                title="Toggle Stream Info">
-                                <span class="p-1.5 rounded-md bg-gray-800/80 group-hover:bg-gray-700 text-gray-400 group-hover:text-white transition-colors flex-shrink-0">
-                                    <span data-icon="info"></span>
-                                </span>
-                                <div class="flex flex-col flex-1 min-w-0">
-                                    <span class="text-sm font-medium leading-snug">Stream Diagnostics</span>
-                                    <span class="text-xs text-gray-400 leading-tight">Bitrate, resolution, dropped frames</span>
-                                </div>
-                            </button>
-
-                            <!-- Dynamic Audio Tracks -->
-                            <button id="audio-track-btn"
-                                class="hidden w-full flex items-center gap-3 px-3 py-2.5 text-left text-gray-300 hover:text-white hover:bg-gray-800/80 transition-colors rounded-lg group cursor-pointer"
-                                title="Audio Tracks">
-                                <span class="p-1.5 rounded-md bg-gray-800/80 group-hover:bg-gray-700 text-gray-400 group-hover:text-white transition-colors flex-shrink-0">
-                                    <span data-icon="audioTrack"></span>
-                                </span>
-                                <div class="flex flex-col flex-1 min-w-0">
-                                    <span class="text-sm font-medium leading-snug">Audio Tracks</span>
-                                    <span class="text-xs text-gray-400 leading-tight">Choose stream audio language</span>
-                                </div>
-                            </button>
-
-                            <!-- Dynamic Subtitles -->
-                            <button id="subtitle-track-btn"
-                                class="hidden w-full flex items-center gap-3 px-3 py-2.5 text-left text-gray-300 hover:text-white hover:bg-gray-800/80 transition-colors rounded-lg group cursor-pointer"
-                                title="Subtitles">
-                                <span class="p-1.5 rounded-md bg-gray-800/80 group-hover:bg-gray-700 text-gray-400 group-hover:text-white transition-colors flex-shrink-0">
-                                    <span data-icon="subtitles"></span>
-                                </span>
-                                <div class="flex flex-col flex-1 min-w-0">
-                                    <span class="text-sm font-medium leading-snug">Subtitles</span>
-                                    <span class="text-xs text-gray-400 leading-tight">Toggle closed captions</span>
-                                </div>
-                            </button>
-                        </div>
-                    </div>
-
-                    <!-- 5. Close Modal -->
+                    <!-- Close -->
                     <button id="close-modal" type="button" class="pbtn" title="Close"><span data-icon="close"></span></button>
                 </div>
             </div>
 
-            <!-- Audio Track Menu -->
-            <div id="audio-track-menu"
-                class="absolute bottom-16 right-4 bg-gray-900 rounded-lg shadow-xl border border-gray-700 min-w-[200px] max-h-[300px] overflow-y-auto z-50 hidden">
-                <div class="px-4 py-3 border-b border-gray-700 font-semibold text-white">Audio Tracks</div>
-                <div id="audio-track-list" class="py-2"></div>
-            </div>
-
-            <!-- Subtitle Track Menu -->
-            <div id="subtitle-track-menu"
-                class="absolute bottom-16 right-4 bg-gray-900 rounded-lg shadow-xl border border-gray-700 min-w-[200px] max-h-[300px] overflow-y-auto z-50 hidden">
-                <div class="px-4 py-3 border-b border-gray-700 font-semibold text-white">Subtitles</div>
-                <div id="subtitle-track-list" class="py-2"></div>
-            </div>
             <div id="video-content" class="flex-grow p-1 bg-black relative overflow-hidden rounded-b-lg">
                 <video id="videoElement" controls autoplay playsinline webkit-playsinline class="w-full h-full"></video>
                 <!-- Dedicated Audio Element for uninterrupted mobile lock-screen playback -->
@@ -1697,6 +1495,87 @@
                 <div id="player-channels" class="hidden" role="dialog" aria-label="Channels">
                     <div class="pc-head"><span>Channels</span><button id="player-channels-close" type="button" class="pbtn" aria-label="Close channels"><span data-icon="close"></span></button></div>
                     <div id="player-channels-list" class="pc-list" data-scroll-owner></div>
+                </div>
+
+                <!-- Playback panel: the tools that used to sit in the ... menu, each with its current value -->
+                <div id="player-panel" class="hidden" role="dialog" aria-label="Playback">
+                    <div class="pc-head"><span>Playback</span><button id="player-panel-close" type="button" class="pbtn" aria-label="Close playback options"><span data-icon="close"></span></button></div>
+                    <div class="pc-list" data-scroll-owner>
+                        <div id="pp-speed-row" class="pp-field hidden">
+                            <label>Speed</label>
+                            <div id="pp-speed" class="seg">
+                                <button type="button" data-speed="0.5">0.5&times;</button>
+                                <button type="button" data-speed="0.75">0.75&times;</button>
+                                <button type="button" data-speed="1">1&times;</button>
+                                <button type="button" data-speed="1.25">1.25&times;</button>
+                                <button type="button" data-speed="1.5">1.5&times;</button>
+                                <button type="button" data-speed="2">2&times;</button>
+                            </div>
+                        </div>
+                        <div id="pp-subs-row" class="pp-field hidden">
+                            <label for="pp-subs">Subtitles</label>
+                            <select id="pp-subs"></select>
+                        </div>
+                        <div id="pp-audio-row" class="pp-field hidden">
+                            <label for="pp-audio">Audio language</label>
+                            <select id="pp-audio"></select>
+                            <small id="pp-audio-note"></small>
+                        </div>
+                        <div id="player-quality-row" class="pp-field hidden">
+                            <label for="player-quality-select">Live quality</label>
+                            <select id="player-quality-select"></select>
+                            <small id="pp-quality-note"></small>
+                        </div>
+                        <div class="pp-field">
+                            <label>Sleep timer</label>
+                            <div id="pp-sleep" class="seg">
+                                <button type="button" data-min="0">Off</button>
+                                <button type="button" data-min="15">15</button>
+                                <button type="button" data-min="30">30</button>
+                                <button type="button" data-min="60">60</button>
+                                <button type="button" data-min="90">90</button>
+                            </div>
+                        </div>
+                        <button id="player-autoplay-btn" type="button" class="pp-row hidden">
+                            <span class="ic"><span data-icon="next"></span></span>
+                            <span class="t">Autoplay next episode<small>Start the next one when this ends</small></span>
+                            <span id="player-autoplay-badge" class="v">On</span>
+                        </button>
+                        <button id="pp-series-btn" type="button" class="pp-row hidden">
+                            <span class="ic"><span data-icon="rec"></span></span>
+                            <span class="t">Record whole series<small id="pp-series-name"></small></span>
+                        </button>
+                        <button id="pp-download-btn" type="button" class="pp-row hidden">
+                            <span class="ic"><span data-icon="export"></span></span>
+                            <span class="t">Download<small>Save this file to the device</small></span>
+                        </button>
+                        <div class="pp-sep"></div>
+                        <button id="pip-btn" type="button" class="pp-row">
+                            <span class="ic"><span data-icon="pip"></span></span>
+                            <span class="t">Picture-in-Picture<small>Keep watching in a small window</small></span>
+                        </button>
+                        <button id="cast-btn" type="button" class="pp-row">
+                            <span class="ic"><span data-icon="cast"></span></span>
+                            <span class="t">Cast to device<small>Chromecast or smart display</small></span>
+                        </button>
+                        <button id="audio-only-btn" type="button" class="pp-row">
+                            <span class="ic"><span data-icon="headphones"></span></span>
+                            <span class="t">Audio only<small>Background and lock screen playback</small></span>
+                            <span id="audio-only-badge" class="v hidden">On</span>
+                        </button>
+                        <button id="player-lock-btn" type="button" class="pp-row">
+                            <span class="ic"><span data-icon="lock"></span></span>
+                            <span class="t">Lock screen<small>Prevent accidental taps</small></span>
+                        </button>
+                        <button id="refresh-stream-btn" type="button" class="pp-row">
+                            <span class="ic"><span data-icon="refresh"></span></span>
+                            <span class="t">Reload stream<small>Try again if playback stalls</small></span>
+                        </button>
+                        <button id="stream-info-toggle-btn" type="button" class="pp-row">
+                            <span class="ic"><span data-icon="info"></span></span>
+                            <span class="t">Stream info<small>Bitrate, resolution, dropped frames</small></span>
+                        </button>
+                    </div>
                 </div>
 
                 <!-- NEW: Audio-Only Overlay -->
@@ -1767,6 +1646,7 @@
                             <button id="pb-mute" type="button" class="pbtn" title="Mute (M)"></button>
                             <input type="range" id="pb-volume" min="0" max="1" step="0.05" value="1" aria-label="Volume">
                             <button id="pb-cc" type="button" class="pbtn hidden" title="Subtitles (C)"><span data-icon="subtitles"></span></button>
+                            <button id="pb-panel-btn" type="button" class="pbtn" title="Playback options" aria-haspopup="dialog"><span data-icon="more"></span></button>
                             <button id="player-fullscreen-btn" type="button" class="pbtn" title="Fullscreen (F)"><span data-icon="fullscreen"></span></button>
                         </div>
                     </div>
