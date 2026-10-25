@@ -949,3 +949,8 @@ body.modal-open {
         scroll-behavior: auto !important;
     }
 }
+
+/* Channel EPG list is windowed: every row must be the same height. */
+#epg-map-tbody tr[data-id] {
+    height: 4rem;
+}
