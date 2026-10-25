@@ -3811,13 +3811,14 @@ app.delete('/api/sources/:sourceType/:id', requireAuth, requireAdmin, async (req
 app.post('/api/process-sources', requireAuth, requireAdmin, async (req, res) => {
     const t0 = Date.now();
     console.log(`[API] Received request to /api/process-sources (manual trigger). via=${req.headers.via || 'n/a'} x-forwarded-for=${req.headers['x-forwarded-for'] || 'n/a'}`);
-    // Fires if the browser (or a proxy in front of us) hangs up before we answered: the client then reports "Could not connect".
-    res.on('close', () => { if (!res.writableFinished) console.error(`[API] /api/process-sources: connection closed before the response was sent, after ${Date.now() - t0}ms (client or reverse proxy gave up; processing continues on the server).`); });
     const { sourceId } = req.body || {}; // optional: refresh only this source
     const settings = getSettings();
     if (sourceId && ![...settings.m3uSources, ...settings.epgSources].some(s => s.id === sourceId && s.isActive)) {
         return res.status(404).json({ error: 'Active source not found.' });
     }
+    // Answer now: a run can outlast a reverse proxy's timeout (504 in the browser). Progress and the outcome
+    // reach the page through the processing-status events.
+    res.status(202).json({ success: true, message: 'Processing started.' });
     try {
         // An XC source is refreshed together with its managed EPG.
         const result = await runSourceProcessing(req, sourceId && [sourceId, `epg_for_${sourceId}`]);
@@ -3825,12 +3826,10 @@ app.post('/api/process-sources', requireAuth, requireAdmin, async (req, res) => 
         // Save the successful sources even when another one failed.
         saveProcessedSettings(result.updatedSettings);
         console.log(`[API] Source processing completed and settings saved (manual trigger) in ${Date.now() - t0}ms.`);
-        res.json({ success: result.success, message: result.message, failedSources: result.failedSources });
     }
     catch (error) {
         console.error("[API] Error during manual source processing:", error);
         sendProcessingStatus(req, `A critical error occurred: ${error.message}`, 'error'); // <-- MODIFIED
-        res.status(500).json({ error: 'Failed to process sources. Check server logs.' });
     }
 });
 
