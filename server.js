@@ -6,7 +6,7 @@ require('dotenv').config();
 
 const express = require('express');
 const crypto = require('crypto');
-const { spawn, exec } = require('child_process');
+const { spawn, exec, execFile } = require('child_process');
 const http = require('http');
 const https = require('https');
 const fs = require('fs');
@@ -49,6 +49,37 @@ let detectedHardware = { nvidia: null, intel_qsv: null, intel_vaapi: null, radeo
 
 // Used to validate settings.
 const validFFmpegLogLevels = ["debug", "verbose", "info", "warning", "error"];
+
+// Protocols accepted as an FFmpeg input for /stream. Anything else (local paths, file:,
+// concat:, subfile:, pipe:, ...) would let a caller make FFmpeg read files from disk.
+const ALLOWED_STREAM_PROTOCOLS = ['http:', 'https:', 'rtmp:', 'rtmps:', 'rtsp:', 'rtsps:', 'rtp:', 'udp:', 'srt:', 'mms:', 'mmsh:'];
+
+function isAllowedStreamUrl(value) {
+    try {
+        return ALLOWED_STREAM_PROTOCOLS.includes(new URL(value).protocol);
+    } catch (e) {
+        return false;
+    }
+}
+
+/**
+ * Builds an FFmpeg argv array from a profile command template.
+ * The template is split into arguments BEFORE placeholders are substituted, so values
+ * such as a stream URL or user agent always land inside a single argument and can never
+ * inject extra FFmpeg options, however many spaces or quotes they contain.
+ * @param {string} template - Profile command, e.g. '-i "{streamUrl}" -c copy -f mpegts pipe:1'.
+ * @param {Object<string, string>} values - Placeholder name (without braces) to value.
+ * @param {string} logLevel - FFmpeg log level; falls back to 'warning' if not recognised.
+ * @returns {string[]}
+ */
+function buildFfmpegArgs(template, values, logLevel) {
+    const level = validFFmpegLogLevels.includes(logLevel) ? logLevel : 'warning';
+    const tokens = (String(template || '').match(/(?:[^\s"]+|"[^"]*")+/g) || []).map(arg => arg.replace(/^"|"$/g, ''));
+    const substituted = tokens.map(arg => arg.replace(/\{(\w+)\}/g, (match, name) =>
+        Object.prototype.hasOwnProperty.call(values, name) ? String(values[name]) : match
+    ));
+    return ['-v', `level+${level}`, ...substituted];
+}
 
 // --- ENHANCEMENT: For Server-Sent Events (SSE) ---
 // This map will store active client connections for real-time updates.
@@ -2530,9 +2561,13 @@ async function getStreamDurationSeconds(streamUrl, userAgentHeader) {
         return vodDurationCache.get(streamUrl);
     }
     return new Promise((resolve) => {
-        const uaFlag = userAgentHeader ? `-user_agent "${userAgentHeader.replace(/"/g, '')}"` : '';
-        const cmd = `ffprobe ${uaFlag} -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${streamUrl}"`;
-        exec(cmd, { timeout: 8000 }, (error, stdout) => {
+        if (!isAllowedStreamUrl(streamUrl)) {
+            return resolve(null);
+        }
+        // Pass arguments as an argv array (no shell) so the URL cannot run shell commands.
+        const args = userAgentHeader ? ['-user_agent', userAgentHeader] : [];
+        args.push('-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', streamUrl);
+        execFile('ffprobe', args, { timeout: 8000 }, (error, stdout) => {
             if (error || !stdout) {
                 return resolve(null);
             }
@@ -3762,6 +3797,10 @@ app.get('/stream', allowLocalOrAuth, async (req, res) => {
 
     console.log(`[STREAM] New request: URL=${streamUrl}, ProfileID=${profileId}, UserAgentID=${userAgentId}`);
     if (!streamUrl) return res.status(400).send('Error: `url` query parameter is required.');
+    if (!isAllowedStreamUrl(streamUrl)) {
+        console.warn(`[STREAM] Rejected stream URL with unsupported protocol: ${streamUrl}`);
+        return res.status(400).send('Error: unsupported stream URL protocol.');
+    }
 
     let settings = getSettings();
     // Check both streamProfiles and castProfiles arrays
@@ -3824,11 +3863,11 @@ app.get('/stream', allowLocalOrAuth, async (req, res) => {
         }
     }
 
-    const commandTemplate = `-v level+${settings.playerLogLevel} ` + profileCommand
-        .replace(/{streamUrl}/g, streamUrl)
-        .replace(/{userAgent}|{clientUserAgent}/g, userAgent.value);
-
-    const args = (commandTemplate.match(/(?:[^\s"]+|"[^"]*")+/g) || []).map(arg => arg.replace(/^"|"$/g, ''));
+    const args = buildFfmpegArgs(profileCommand, {
+        streamUrl,
+        userAgent: userAgent.value,
+        clientUserAgent: userAgent.value
+    }, settings.playerLogLevel);
 
     console.log(`[STREAM] FFmpeg command args: ffmpeg ${args.join(' ')}`);
     const ffmpeg = spawn('ffmpeg', args);
@@ -4615,7 +4654,7 @@ async function checkAndSendNotifications() {
 async function getMediaDurationSeconds(filePath) {
     return new Promise((resolve) => {
         if (!filePath || !fs.existsSync(filePath)) return resolve(null);
-        exec(`ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${filePath}"`, { timeout: 10000 }, (error, stdout) => {
+        execFile('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', filePath], { timeout: 10000 }, (error, stdout) => {
             if (error || !stdout) {
                 return resolve(null);
             }
@@ -4826,18 +4865,11 @@ class DvrSupervisor {
             await new Promise(r => setTimeout(r, 400));
         }
 
-        let commandStr = this.recProfile.command
-            .replace(/{streamUrl}/g, currentUrl)
-            .replace(/{userAgent}/g, this.userAgent.value);
-
-        if (this.isTs) {
-            commandStr = commandStr.replace(/{filePath}/g, 'pipe:1');
-        } else {
-            commandStr = commandStr.replace(/{filePath}/g, this.fullFilePath);
-        }
-
-        const fullCommand = `-v level+${this.settings.dvrLogLevel || 'warning'} ` + commandStr;
-        const args = (fullCommand.match(/(?:[^\s"]+|"[^"]*")+/g) || []).map(arg => arg.replace(/^"|"$/g, ''));
+        const args = buildFfmpegArgs(this.recProfile.command, {
+            streamUrl: currentUrl,
+            userAgent: this.userAgent.value,
+            filePath: this.isTs ? 'pipe:1' : this.fullFilePath
+        }, this.settings.dvrLogLevel);
 
         console.log(`[DVR_SUPERVISOR][${this.job.id}] Spawning FFmpeg (attempt ${this.retryCount + 1}/${this.maxRetries + 1}): ffmpeg ${args.join(' ')}`);
 
