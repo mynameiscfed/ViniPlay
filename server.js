@@ -1895,10 +1895,8 @@ async function mergeEpg(req, settings, liveChannels, onlyIds, failedSources) {
         console.error(`[EPG] ${errorMsg}`);
         sendProcessingStatus(req, `Error: ${errorMsg}`, 'error');
         failedSources.push(source.name);
-        if (!source.isXcEpg) {
-            source.status = 'Error';
-            source.statusMessage = `Processing failed: ${error.message.substring(0, 100)}...`;
-        }
+        source.status = 'Error';
+        source.statusMessage = `Processing failed: ${error.message.substring(0, 100)}...`;
     };
 
     // Pass 1: make every guide readable and list the channels it declares, so channels can be matched by name.
@@ -1950,7 +1948,7 @@ async function mergeEpg(req, settings, liveChannels, onlyIds, failedSources) {
             epgFiles.delete(source.id);
             failEpg(source, error);
         }
-        if (!source.isXcEpg && !cached && !fallbackEpgSources.has(source.id)) {
+        if (!cached && !fallbackEpgSources.has(source.id)) {
             source.lastUpdated = new Date().toISOString();
         }
     }
@@ -1994,16 +1992,14 @@ async function mergeEpg(req, settings, liveChannels, onlyIds, failedSources) {
             if (programCount === 0) {
                 sendProcessingStatus(req, `Warning: No programs found in "${source.name}".`, 'info');
             }
-            if (!source.isXcEpg) {
-                if (fallbackEpgSources.has(source.id)) {
-                    source.status = 'Error';
-                    source.statusMessage = 'Refresh failed; kept the last cached guide.';
-                } else {
-                    source.status = 'Success';
-                    source.statusMessage = `Processed ${programCount} programs, added ${epgAddedCount} to live guide.`;
-                }
-                console.log(`[EPG] Source "${source.name}" processed successfully from ${source.path}.`);
+            if (fallbackEpgSources.has(source.id)) {
+                source.status = 'Error';
+                source.statusMessage = 'Refresh failed; kept the last cached guide.';
+            } else {
+                source.status = 'Success';
+                source.statusMessage = `Processed ${programCount} programs, added ${epgAddedCount} to live guide.`;
             }
+            console.log(`[EPG] Source "${source.name}" processed successfully from ${safeUrlForLog(source.path)}.`);
             sendProcessingStatus(req, ` -> Processed ${programCount} programs, added ${epgAddedCount} to live guide from "${source.name}".`, 'info');
         } catch (error) {
             failEpg(source, error);
