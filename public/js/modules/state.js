@@ -97,18 +97,6 @@ export const UIElements = {
     closeModalBtn: null,
 
 
-    // --- Timeshift Controls Overlay Elements ---
-    timeshiftControlsOverlay: null,
-    timeshiftProgressBar: null,
-    timeshiftCurrentTime: null,
-    timeshiftTotalTime: null,
-    timeshiftLiveEdgeBtn: null,
-    timeshiftLiveDot: null,
-    timeshiftPlayPauseBtn: null,
-    timeshiftRewind15Btn: null,
-    timeshiftForward15Btn: null,
-    timeshiftStatusText: null,
-
     // --- Program Details Modal Elements ---
     programDetailsContainer: null,
     detailsResizeHandle: null,

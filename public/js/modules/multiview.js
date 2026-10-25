@@ -420,7 +420,7 @@ function addPlayerWidget(channel = null, layout = {}) {
                 <button class="play-pause-btn" title="Play/Pause">${ICONS.pause}</button>
                 <button class="mute-btn" title="Mute">${ICONS.unmute}</button>
                 <input type="range" min="0" max="1" step="0.05" value="0.5" class="volume-slider">
-                <button class="fullscreen-btn" title="Fullscreen">${ICONS.fullscreen}</button>
+                <button class="fullscreen-btn" title="Open in player">${ICONS.fullscreen}</button>
                 <button class="stop-btn" title="Stop Channel">${ICONS.stop}</button>
                 <button class="remove-widget-btn" title="Remove Player">${ICONS.removeWidget}</button>
             </div>
@@ -630,11 +630,14 @@ function attachWidgetEventListeners(widgetContentEl, widgetId) {
         }
     });
 
-    widgetContentEl.querySelector('.fullscreen-btn').addEventListener('click', (e) => {
+    // The main player has the full control bar, CH +/- and fullscreen; a bare fullscreen video has none of them.
+    widgetContentEl.querySelector('.fullscreen-btn').addEventListener('click', async (e) => {
         e.stopPropagation();
-        if (videoEl.requestFullscreen) {
-            videoEl.requestFullscreen();
-        }
+        const channel = guideState.channels.find(c => c.id === playerPlaceholderEl?.dataset.channelId);
+        if (!channel) return;
+        stopAndCleanupPlayer(widgetId, true);
+        const { playChannel } = await import('./player.js');
+        playChannel(channel.url, channel.displayName || channel.name, channel.id);
     });
 
     widgetContentEl.addEventListener('click', () => {

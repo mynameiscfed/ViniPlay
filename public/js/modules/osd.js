@@ -1,23 +1,33 @@
 /**
  * osd.js
- * What surrounds the video: the header and the now/next card fade out when nothing moves,
- * a channels panel lets you zap, CH+/CH- (or Page Down/Up) change channel.
+ * What surrounds the video: the header, now/next card and control bar fade out when nothing moves,
+ * a channels panel lets you zap, CH+/CH- (or Page Down/Up) change channel, and one key map
+ * (keyboard, remote and media keys) drives the control bar in every mode.
  * player.js announces live channels with a "playchannel" event and stops with "playerstop".
  */
 
 import { guideState } from './state.js';
-import { playChannel } from './player.js';
+import { playChannel, refreshPlaybackPanel, stepEpisode, cancelUpNext } from './player.js';
 import { escapeHtml, nowNext } from './utils.js';
 import { formatTimeInZone } from './time.js';
 import { focusEl } from './focus.js';
+import { setupBar, skip, togglePlay, nudgeVolume, toggleMute, goLive, barCanSeek, SKIP, SKIP_LONG } from './bar.js';
 
 const IDLE_MS = 3500;
 const PANEL_BEFORE = 12;
 const PANEL_AFTER = 28;
+const VOLUME_STEP = 0.05;
+// Media keys by standard name; Samsung (Tizen) remotes send these codes.
+const MEDIA = {
+    MediaPlayPause: 'toggle', MediaPlay: 'play', MediaPause: 'pause', MediaStop: 'stop', MediaRewind: 'back', MediaFastForward: 'fwd',
+    MediaTrackNext: 'chnext', MediaTrackPrevious: 'chprev',
+    10252: 'toggle', 415: 'play', 19: 'pause', 413: 'stop', 412: 'back', 417: 'fwd', 427: 'chnext', 428: 'chprev',
+};
 
 const $ = (id) => document.getElementById(id);
 
 let current = null; // id of the live channel on screen; null for recordings and movies
+let episode = false; // an episode is on screen, so previous / next step through its series
 let idleTimer = 0;
 let clock = 0;
 
@@ -26,13 +36,13 @@ export const isPlayerOpen = () => !$('video-modal').classList.contains('hidden')
 const channelList = () => guideState.visibleChannels.length ? guideState.visibleChannels : guideState.channels;
 const play = (channel) => playChannel(channel.url, channel.displayName || channel.name, channel.id);
 
-/** Shows the header, card and bottom bars, then hides them after a quiet spell (not while the menu is open or the video is paused). */
+/** Shows the header, card and control bar, then hides them after a quiet spell (not while a panel is open or the video is paused). */
 const wake = () => {
     const modal = $('video-modal');
     modal.classList.remove('osd-idle');
     clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
-        if (!$('player-more-options-menu').classList.contains('hidden') || $('videoElement').paused) wake();
+        if (openLayer() || $('videoElement').paused) wake();
         else modal.classList.add('osd-idle');
     }, IDLE_MS);
 };
@@ -73,17 +83,30 @@ const renderPanel = () => {
     if (hadFocus && row) row.focus({ preventScroll: true });
 };
 
-const panelOpen = () => !$('player-channels').classList.contains('hidden');
+// The two panels share the right edge: the Channels panel and the Playback panel. Each has the button that opens it.
+const LAYERS = [['player-channels', 'player-channels-btn'], ['player-panel', 'pb-panel-btn']];
+const openLayer = () => LAYERS.find(([panel]) => !$(panel).classList.contains('hidden'));
+
+/** Closes whichever panel is open and puts focus back on the button that opened it. */
+const closeLayers = () => {
+    const open = openLayer();
+    LAYERS.forEach(([panel]) => $(panel).classList.add('hidden'));
+    if (open) $(open[1]).focus({ preventScroll: true });
+};
 
 const openPanel = () => {
+    closeLayers();
     renderPanel();
     $('player-channels').classList.remove('hidden');
     focusEl($('player-channels-list').querySelector('.cur'));
 };
 
-const closePanel = () => {
-    $('player-channels').classList.add('hidden');
-    $('player-channels-btn').focus({ preventScroll: true });
+const openPlayback = () => {
+    closeLayers();
+    refreshPlaybackPanel();
+    $('player-panel').classList.remove('hidden');
+    const rows = Array.from($('player-panel').querySelectorAll('.pc-list button, .pc-list select')).filter(el => el.offsetParent && !el.disabled);
+    focusEl(rows.find(el => el.classList.contains('on')) || rows[0]);
 };
 
 const zap = (dir) => {
@@ -92,9 +115,17 @@ const zap = (dir) => {
     const target = channels[(at + dir + channels.length) % channels.length];
     if (target) play(target);
 };
+// Previous / next means channel for live TV and episode for a series.
+const step = (dir) => (current ? zap(dir) : stepEpisode(dir));
+const showSteps = (on, what) => {
+    ['pb-prev', 'pb-next'].forEach(id => $(id).classList.toggle('hidden', !on));
+    $('pb-prev').title = `Previous ${what} (Page Up)`;
+    $('pb-next').title = `Next ${what} (Page Down)`;
+};
 
 export function setupOsd() {
     const modal = $('video-modal');
+    setupBar();
     ['mousemove', 'touchstart', 'touchmove', 'click', 'focusin'].forEach(type => modal.addEventListener(type, wake, { passive: true }));
 
     let wasOpen = false;
@@ -110,20 +141,28 @@ export function setupOsd() {
         current = e.detail;
         renderOsd();
         $('player-channels-btn').classList.remove('hidden');
-        if (panelOpen()) renderPanel();
+        showSteps(true, 'channel');
+        if (openLayer()?.[0] === 'player-channels') renderPanel();
         clearInterval(clock);
         clock = setInterval(renderOsd, 30000);
     });
+    document.addEventListener('playepisode', () => { episode = true; showSteps(true, 'episode'); });
     document.addEventListener('playerstop', () => {
         current = null;
+        episode = false;
         clearInterval(clock);
         $('player-osd').classList.add('hidden');
-        $('player-channels').classList.add('hidden');
+        LAYERS.forEach(([panel]) => $(panel).classList.add('hidden'));
         $('player-channels-btn').classList.add('hidden');
+        showSteps(false, 'channel');
     });
 
-    $('player-channels-btn').addEventListener('click', () => (panelOpen() ? closePanel() : openPanel()));
-    $('player-channels-close').addEventListener('click', closePanel);
+    $('player-channels-btn').addEventListener('click', () => (openLayer()?.[0] === 'player-channels' ? closeLayers() : openPanel()));
+    $('pb-panel-btn').addEventListener('click', () => (openLayer()?.[0] === 'player-panel' ? closeLayers() : openPlayback()));
+    $('player-channels-close').addEventListener('click', closeLayers);
+    $('player-panel-close').addEventListener('click', closeLayers);
+    $('pb-prev').addEventListener('click', () => step(-1));
+    $('pb-next').addEventListener('click', () => step(1));
     $('player-channels-list').addEventListener('click', (e) => {
         const channel = guideState.channels.find(c => c.id === e.target.closest('.pc-row')?.dataset.id);
         if (channel) play(channel);
@@ -134,22 +173,59 @@ export function setupOsd() {
         if (!isPlayerOpen()) return;
         wake();
         const isBack = e.key === 'Escape' || e.key === 'BrowserBack' || e.key === 'GoBack' || e.keyCode === 10009;
-        // Back closes an open menu first, so one press never closes both the menu and the player.
-        const menu = isBack && document.querySelector('#player-more-options-menu:not(.hidden), #audio-track-menu:not(.hidden), #subtitle-track-menu:not(.hidden)');
-        if (menu) {
-            menu.classList.add('hidden');
-            $('player-more-options-btn').focus({ preventScroll: true });
+        // Back closes an open panel first, so one press never closes both the panel and the player.
+        if (isBack && openLayer()) {
+            closeLayers();
             e.preventDefault();
             e.stopPropagation();
             return;
         }
-        if (!current || e.target.matches('input,select,textarea')) return;
-        const dir = e.key === 'PageDown' || e.keyCode === 427 ? 1 : e.key === 'PageUp' || e.keyCode === 428 ? -1 : 0;
-        const tvArrow = document.documentElement.classList.contains('tv') && e.key.indexOf('Arrow') === 0 && (e.target === document.body || e.target.tagName === 'VIDEO');
-        if (isBack && panelOpen()) closePanel();
-        else if (dir) zap(dir);
-        else if (tvArrow) focusEl($('player-channels-btn')); // arrows on a TV bring up the controls instead of nudging the video
-        else return;
+        if (isBack && !$('player-upnext').classList.contains('hidden')) {
+            cancelUpNext();
+            e.preventDefault();
+            e.stopPropagation();
+            return;
+        }
+        if (e.ctrlKey || e.metaKey || e.altKey || document.querySelector('#confirm-modal:not(.hidden), #shortcuts-modal:not(.hidden)')) return;
+        const t = e.target;
+        if (t.matches('input,select,textarea') && t.id !== 'pb-seek') return;
+        const tv = document.documentElement.classList.contains('tv');
+        const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+        const nothing = t === document.body || t.tagName === 'VIDEO'; // no control has focus, so the key is ours
+        const lr = k === 'ArrowLeft' || k === 'ArrowRight';
+        const ud = k === 'ArrowUp' || k === 'ArrowDown';
+        const media = MEDIA[e.key] || MEDIA[e.keyCode];
+        let act = '';
+        if (media) act = media;
+        else if (e.key === 'PageDown') act = 'chnext';
+        else if (e.key === 'PageUp') act = 'chprev';
+        else if (k === 'k' || (nothing || t.id === 'pb-seek') && (k === ' ' || k === 'Enter')) act = 'toggle';
+        else if (k === 'm') act = 'mute';
+        else if (k === 'f') act = 'fs';
+        else if (k === 'c') act = 'cc';
+        else if (k === 'l') act = 'live';
+        else if (lr && (nothing || t.id === 'pb-seek') && (barCanSeek() || tv)) act = e.key === 'ArrowLeft' ? 'back' : 'fwd';
+        else if (ud && (nothing || t.id === 'pb-seek' && !tv)) act = tv ? 'bar' : e.key === 'ArrowUp' ? 'volup' : 'voldown';
+        if ((act === 'chnext' || act === 'chprev') && !current && !episode) act = '';
+        if (!act) return;
+
+        const long = e.shiftKey ? SKIP_LONG : SKIP;
+        const bar = $('player-bar');
+        const run = {
+            toggle: () => togglePlay(), play: () => togglePlay(true), pause: () => togglePlay(false),
+            stop: () => $('close-modal').click(),
+            // On a TV a stream that cannot seek uses the arrow to bring up the bar instead.
+            back: () => (barCanSeek() ? skip(-long) : focusEl($('pb-play'))),
+            fwd: () => (barCanSeek() ? skip(long) : focusEl($('pb-play'))),
+            volup: () => nudgeVolume(VOLUME_STEP), voldown: () => nudgeVolume(-VOLUME_STEP),
+            mute: toggleMute,
+            fs: () => $('player-fullscreen-btn').click(),
+            cc: () => $('pb-cc').classList.contains('hidden') || $('pb-cc').click(),
+            live: () => bar.classList.contains('is-live') && goLive(),
+            bar: () => focusEl($('pb-play')),
+            chnext: () => step(1), chprev: () => step(-1),
+        };
+        run[act]();
         e.preventDefault();
         e.stopPropagation();
     }, true);

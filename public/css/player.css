@@ -92,11 +92,10 @@
     gap: .5em;
 }
 
-/* Header, card and the rewind and movie bars fade out together when nothing has moved (see osd.js). */
+/* Header, card and the control bar fade out together when nothing has moved (see osd.js). */
 #video-modal.osd-idle #video-modal-header,
 #video-modal.osd-idle #player-osd,
-#video-modal.osd-idle #timeshift-controls-overlay,
-#video-modal.osd-idle #vod-controls-overlay {
+#video-modal.osd-idle #player-bar {
     opacity: 0;
     pointer-events: none;
 }
@@ -133,22 +132,260 @@
     box-shadow: inset 0 0 0 1px var(--rd);
 }
 
-/* Menu rows that repeat a header button on phones (see player.js). */
-@media (min-width: 768px) {
-    .pm-phone {
-        display: none !important;
-    }
+/* ---------- The one control bar ---------- */
+#player-bar {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 30;
+    padding: 2.6em 1.25em .9em;
+    background: linear-gradient(transparent, rgba(0, 0, 0, .85) 60%);
+    color: #fff;
+    transition: opacity .25s;
+    -webkit-user-select: none;
+    user-select: none;
 }
 
-#video-modal:not(.is-live) .pm-live {
+#player-bar.hidden {
     display: none;
+}
+
+.pb-scrub,
+.pb-row,
+.pb-grp {
+    display: flex;
+    align-items: center;
+}
+
+.pb-scrub {
+    gap: .8em;
+}
+
+.pb-row {
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: .4em .8em;
+    margin-top: .35em;
+}
+
+.pb-grp {
+    gap: .5em;
+}
+
+.pb-grp:last-child {
+    margin-left: auto;
+}
+
+.pb-break,
+.pb-hints {
+    display: none;
+}
+
+.pb-t {
+    flex: none;
+    min-width: 3.4em;
+    color: rgba(255, 255, 255, .85);
+    font: 600 .88em var(--f-mono);
+    font-variant-numeric: tabular-nums;
+}
+
+#pb-total {
+    color: rgba(255, 255, 255, .55);
+    text-align: right;
+}
+
+/* What a stream cannot do leaves the bar (see bar.js): no scrubber on plain live, no Live pill on a movie. */
+#player-bar:not(.is-seekable) #pb-time,
+#player-bar:not(.is-seekable) #pb-seek,
+#player-bar:not(.is-seekable) #pb-total,
+#player-bar:not(.is-seekable) .pb-skip,
+#player-bar:not(.is-live) #pb-live {
+    display: none;
+}
+
+#player-bar:not(.is-seekable) .pb-scrub {
+    justify-content: flex-end;
+}
+
+#pb-live {
+    flex: none;
+    height: 2em;
+    padding: 0 .9em;
+    border: 0;
+    background: rgba(255, 255, 255, .2);
+    color: #fff;
+    font-size: .8em;
+    cursor: pointer;
+}
+
+#pb-live.pill-live {
+    background: var(--pk);
+    color: var(--on-pk);
+}
+
+.pb-skip {
+    font: 700 .85em var(--f-ui);
+}
+
+/* The round buttons are dark glass in the header; on the bar's dark gradient they need a lighter fill to show. */
+#player-bar .pbtn {
+    background: rgba(255, 255, 255, .14);
+}
+
+#player-bar .pbtn:hover {
+    background: rgba(255, 255, 255, .26);
+}
+
+#player-bar .pbtn.pb-main {
+    width: 3.2em;
+    height: 3.2em;
+    background: var(--cy);
+    color: var(--on);
+}
+
+#player-bar .pbtn.pb-main:hover {
+    background: var(--cy);
+    filter: brightness(1.12);
+}
+
+.pbtn:disabled {
+    opacity: .4;
+    cursor: default;
+}
+
+.pb-chip {
+    display: none;
+    flex: none;
+    align-items: center;
+    height: 2.2em;
+    padding: 0 .9em;
+    border: 1px solid rgba(255, 255, 255, .24);
+    border-radius: 999px;
+    background: rgba(0, 0, 0, .5);
+    color: #fff;
+    font: 700 .85em var(--f-ui);
+    cursor: pointer;
+    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
+}
+
+.pb-chip.on {
+    border-color: var(--cy);
+    background: var(--tint-cy);
+    color: var(--cy);
+}
+
+#player-bar.is-seekable:not(.is-live) #pb-speed,
+#pb-sleep:not(.hidden) {
+    display: inline-flex;
+}
+
+/* ---------- Up next: the offer when an episode ends ---------- */
+#player-upnext {
+    position: absolute;
+    right: 1.5em;
+    bottom: 9em;
+    z-index: 31;
+    display: grid;
+    gap: .6em;
+    box-sizing: border-box;
+    max-width: min(22em, calc(100% - 3em));
+    padding: 1em 1.2em;
+    border-radius: 1em;
+    background: rgba(10, 12, 19, .88);
+    -webkit-backdrop-filter: blur(14px);
+    backdrop-filter: blur(14px);
+    color: #fff;
+}
+
+#player-upnext.hidden {
+    display: none;
+}
+
+.un-label {
+    color: var(--tx2);
+    font: 600 .8em var(--f-ui);
+}
+
+#un-title {
+    font: 700 1.1em/1.3 var(--f-ui);
+    overflow-wrap: anywhere;
+}
+
+.un-actions {
+    display: flex;
+    gap: .6em;
+}
+
+html.tv #player-upnext {
+    right: 3.5vw;
+}
+
+#player-bar input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 1.8em;
+    margin: 0;
+    padding: 0;
+    background: transparent;
+    cursor: pointer;
+}
+
+#player-bar input[type="range"]:disabled {
+    opacity: .4;
+    cursor: default;
+}
+
+#player-bar input[type="range"]::-webkit-slider-runnable-track {
+    height: .38em;
+    border-radius: 1em;
+    background: linear-gradient(to right, var(--cy) var(--p, 0%), rgba(255, 255, 255, .28) var(--p, 0%));
+}
+
+#player-bar input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 1.05em;
+    height: 1.05em;
+    margin-top: -.335em;
+    border: 0;
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 0 0 .2em rgba(0, 0, 0, .25);
+}
+
+#player-bar input[type="range"]::-moz-range-track {
+    height: .38em;
+    border-radius: 1em;
+    background: rgba(255, 255, 255, .28);
+}
+
+#player-bar input[type="range"]::-moz-range-progress {
+    height: .38em;
+    border-radius: 1em;
+    background: var(--cy);
+}
+
+#player-bar input[type="range"]::-moz-range-thumb {
+    width: 1.05em;
+    height: 1.05em;
+    border: 0;
+    border-radius: 50%;
+    background: #fff;
+}
+
+#pb-volume {
+    flex: none !important;
+    width: 6em;
 }
 
 /* ---------- Now/next card ---------- */
 #player-osd {
     position: absolute;
     left: 1.5em;
-    bottom: 5em;
+    bottom: 9em;
     z-index: 30;
     display: flex;
     align-items: center;
@@ -241,8 +478,9 @@
     white-space: nowrap;
 }
 
-/* ---------- Channels panel ---------- */
-#player-channels {
+/* ---------- Channels panel and Playback panel ---------- */
+#player-channels,
+#player-panel {
     position: absolute;
     top: 0;
     right: 0;
@@ -259,7 +497,8 @@
     color: #fff;
 }
 
-#player-channels.hidden {
+#player-channels.hidden,
+#player-panel.hidden {
     display: none;
 }
 
@@ -338,6 +577,113 @@
     font: 600 .85em var(--f-mono);
 }
 
+/* Rows of the Playback panel: a button row with its value, or a field with a choice under its label. */
+.pp-row {
+    display: flex;
+    align-items: center;
+    gap: .8em;
+    width: 100%;
+    padding: .6em .7em;
+    border: 0;
+    border-radius: .8em;
+    background: transparent;
+    color: #fff;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.pp-row:hover {
+    background: var(--s3);
+}
+
+.pp-row .ic {
+    display: grid;
+    flex: none;
+    place-items: center;
+    width: 2.4em;
+    height: 2.4em;
+    border-radius: .7em;
+    background: var(--s4);
+}
+
+.pp-row .t {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-weight: 650;
+    line-height: 1.2;
+}
+
+.pp-row small,
+.pp-field small {
+    display: block;
+    margin-top: .2em;
+    color: var(--tx3);
+    font-weight: 500;
+}
+
+.pp-row .v {
+    flex: none;
+    color: var(--cy);
+    font-size: .85em;
+    font-weight: 700;
+}
+
+.pp-field {
+    padding: .55em .7em;
+}
+
+.pp-field>label {
+    display: block;
+    margin-bottom: .45em;
+    color: var(--tx3);
+    font: 700 .75em var(--f-ui);
+    letter-spacing: .08em;
+    text-transform: uppercase;
+}
+
+.pp-field .seg {
+    display: flex;
+}
+
+.pp-field .seg>button {
+    flex: 1 1 0;
+    padding: 0 .2em;
+}
+
+.pp-field .seg>button.on {
+    background: var(--tint-cy);
+    color: var(--cy);
+    box-shadow: inset 0 0 0 1px var(--cy);
+}
+
+.pp-field select {
+    width: 100%;
+    min-height: 2.6em;
+    padding: 0 .8em;
+    border: 1px solid var(--line);
+    border-radius: .7em;
+    background: var(--s2);
+    color: #fff;
+    font: inherit;
+}
+
+.pp-field select:disabled {
+    opacity: .5;
+}
+
+.pp-row.hidden,
+.pp-field.hidden,
+.pp-row .v.hidden {
+    display: none;
+}
+
+.pp-sep {
+    height: 1px;
+    margin: .4em .5em;
+    background: var(--line);
+}
+
 /* ---------- TV: keep controls inside the safe area ---------- */
 html.tv #video-modal {
     font-size: 1rem;
@@ -352,17 +698,129 @@ html.tv #player-osd {
     left: 3.5vw;
 }
 
-/* A TV has no picture-in-picture. */
-html.tv #pip-btn {
+html.tv #player-bar {
+    padding-right: 3.5vw;
+    padding-left: 3.5vw;
+}
+
+/* What the remote does inside the player; it fades with the bar. */
+html.tv .pb-hints {
+    display: flex;
+    justify-content: center;
+    gap: 2.4em;
+    margin-top: .5em;
+    color: rgba(255, 255, 255, .72);
+    font: 600 .8rem var(--f-ui);
+}
+
+html.tv .pb-hints span {
+    display: inline-flex;
+    align-items: center;
+    gap: .6em;
+}
+
+html.tv .pb-hints kbd {
+    height: 2.1em;
+    min-width: 2.1em;
+}
+
+html.tv #player-bar:not(.is-seekable) .pb-hint-seek {
+    display: none;
+}
+
+/* The scrubber keeps its own height; the page-wide TV rule would make every input a slab. */
+html.tv #player-bar input[type="range"] {
+    min-height: 0;
+}
+
+/* A TV has no picture-in-picture, casting out, touch lock or saving to disk, and is already full screen. */
+html.tv #pip-btn,
+html.tv #cast-btn,
+html.tv #player-lock-btn,
+html.tv #pp-download-btn,
+html.tv #player-fullscreen-btn {
     display: none;
 }
 
 /* ---------- Phone ---------- */
 @media (max-width: 767.98px) {
-    #player-osd {
+    #player-osd,
+    #player-upnext {
         right: 1em;
         left: 1em;
-        bottom: 4.6em;
+        bottom: 15em;
+        max-width: none;
+    }
+
+    #player-bar {
+        padding-right: .9em;
+        padding-left: .9em;
+    }
+
+    /* Thumb-sized targets: the transport sits centred on its own line, the small controls on the line below. */
+    #player-bar .pb-row {
+        justify-content: center;
+        gap: .5rem 1rem;
+        margin-top: .2rem;
+    }
+
+    #player-bar .pb-grp {
+        display: contents;
+    }
+
+    .pb-break {
+        display: block;
+        flex-basis: 100%;
+        height: 0;
+    }
+
+    #player-bar .pbtn {
+        width: 2.9rem;
+        height: 2.9rem;
+    }
+
+    #player-bar .pbtn.pb-main {
+        width: 3.6rem;
+        height: 3.6rem;
+    }
+
+    #player-bar .pb-skip {
+        font-size: .9rem;
+    }
+
+    #player-bar .pb-chip {
+        height: 2.75rem;
+        font-size: .9rem;
+    }
+
+    #player-bar input[type="range"] {
+        height: 2.75rem;
+    }
+
+    #video-modal video {
+        touch-action: manipulation;
+    }
+
+    #video-modal-header .pbtn {
+        width: 2.75rem;
+        height: 2.75rem;
+    }
+
+    #player-panel {
+        top: auto;
+        width: auto;
+        max-width: none;
+        max-height: 80%;
+        left: 0;
+        border-top: 1px solid var(--line);
+        border-left: 0;
+        border-radius: 1.2em 1.2em 0 0;
+    }
+
+    /* Phones have hardware volume keys. */
+    #pb-mute,
+    #pb-volume {
+        display: none;
     }
 
     #video-modal #video-modal-header {
@@ -371,13 +829,6 @@ html.tv #pip-btn {
 
     #video-modal #video-title {
         font-size: 1.05em !important;
-    }
-
-    /* Eight header buttons pushed Close off a 360px screen; these three move into the menu. */
-    #refresh-stream-btn,
-    #pip-btn,
-    #player-live-edge-btn {
-        display: none;
     }
 
     /* The word stays for screen readers; the colour carries the state. */
