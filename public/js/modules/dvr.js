@@ -163,7 +163,6 @@ async function loadStorageInfo() {
  * @param {object} job - The DVR job object that is currently recording.
  */
 let timeshiftUpdateInterval = null;
-let timeshiftHideTimeout = null;
 let isUserSeeking = false;
 
 function formatTimeshiftTime(seconds) {
@@ -229,7 +228,6 @@ async function playTimeshiftStream(job, startTime = 0) {
     const overlay = document.getElementById('timeshift-controls-overlay') || UIElements.timeshiftControlsOverlay;
     if (overlay) {
         overlay.classList.remove('hidden');
-        overlay.style.opacity = '1';
     }
 
     const progressBar = document.getElementById('timeshift-progress-bar') || UIElements.timeshiftProgressBar;
@@ -390,26 +388,6 @@ async function playTimeshiftStream(job, startTime = 0) {
                 };
             }
 
-            // Auto-hide controls overlay during active playback
-            const container = UIElements.videoModalContainer || document.getElementById('video-modal-container');
-            const showControls = () => {
-                if (overlay) overlay.style.opacity = '1';
-                if (timeshiftHideTimeout) clearTimeout(timeshiftHideTimeout);
-                timeshiftHideTimeout = setTimeout(() => {
-                    if (!videoElement.paused && !isUserSeeking && overlay && appState.activeTimeshiftJobId) {
-                        overlay.style.opacity = '0';
-                    }
-                }, 3500);
-            };
-            if (container) {
-                container.onmousemove = showControls;
-                container.onmouseleave = () => {
-                    if (!videoElement.paused && !isUserSeeking && overlay && appState.activeTimeshiftJobId) {
-                        overlay.style.opacity = '0';
-                    }
-                };
-            }
-
         } catch (err) {
             console.error('[HLS_TIMESHIFT] Setup error:', err);
             showNotification('Could not start timeshift stream.', true);
@@ -422,10 +400,7 @@ async function playTimeshiftStream(job, startTime = 0) {
             contentId: String(job.id),
             title: job.programTitle
         });
-        if (overlay) {
-            overlay.classList.add('hidden');
-            overlay.style.opacity = '0';
-        }
+        if (overlay) overlay.classList.add('hidden');
         videoElement.controls = true;
         videoElement.src = streamUrl;
         openModal(playerModal);

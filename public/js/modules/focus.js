@@ -157,12 +157,12 @@ function onKeyDown(e) {
             settle(target);
             return;
         }
-    } else if (typing(target)) return;
+    } else if (typing(target) && !(isTv() && target.type === 'range' && (e.key === 'ArrowUp' || e.key === 'ArrowDown'))) return; // a remote leaves a slider with Up or Down
 
     if (ARROWS[e.key]) {
         root.classList.add('kb');
         const cur = document.activeElement;
-        const usable = cur && cur !== document.body && cur.matches?.(FOCUSABLE) && !cur.matches('video,input[type="range"]');
+        const usable = cur && cur !== document.body && cur.matches?.(FOCUSABLE) && !cur.matches(isTv() ? 'video' : 'video,input[type="range"]');
         if (!usable) {
             // Nothing focused yet: the first arrow press lands in the open dialog, or on the rail on a TV.
             // (A focused video keeps its own arrow keys, which seek.)

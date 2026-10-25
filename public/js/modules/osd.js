@@ -26,13 +26,13 @@ export const isPlayerOpen = () => !$('video-modal').classList.contains('hidden')
 const channelList = () => guideState.visibleChannels.length ? guideState.visibleChannels : guideState.channels;
 const play = (channel) => playChannel(channel.url, channel.displayName || channel.name, channel.id);
 
-/** Shows the header and card, then hides them again after a quiet spell (not while the menu is open). */
+/** Shows the header, card and bottom bars, then hides them after a quiet spell (not while the menu is open or the video is paused). */
 const wake = () => {
     const modal = $('video-modal');
     modal.classList.remove('osd-idle');
     clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
-        if (!$('player-more-options-menu').classList.contains('hidden')) wake();
+        if (!$('player-more-options-menu').classList.contains('hidden') || $('videoElement').paused) wake();
         else modal.classList.add('osd-idle');
     }, IDLE_MS);
 };
@@ -95,7 +95,7 @@ const zap = (dir) => {
 
 export function setupOsd() {
     const modal = $('video-modal');
-    ['mousemove', 'touchstart', 'click', 'focusin'].forEach(type => modal.addEventListener(type, wake, { passive: true }));
+    ['mousemove', 'touchstart', 'touchmove', 'click', 'focusin'].forEach(type => modal.addEventListener(type, wake, { passive: true }));
 
     let wasOpen = false;
     new MutationObserver(() => {
@@ -133,8 +133,17 @@ export function setupOsd() {
     document.addEventListener('keydown', (e) => {
         if (!isPlayerOpen()) return;
         wake();
-        if (!current || e.target.matches('input,select,textarea')) return;
         const isBack = e.key === 'Escape' || e.key === 'BrowserBack' || e.key === 'GoBack' || e.keyCode === 10009;
+        // Back closes an open menu first, so one press never closes both the menu and the player.
+        const menu = isBack && document.querySelector('#player-more-options-menu:not(.hidden), #audio-track-menu:not(.hidden), #subtitle-track-menu:not(.hidden)');
+        if (menu) {
+            menu.classList.add('hidden');
+            $('player-more-options-btn').focus({ preventScroll: true });
+            e.preventDefault();
+            e.stopPropagation();
+            return;
+        }
+        if (!current || e.target.matches('input,select,textarea')) return;
         const dir = e.key === 'PageDown' || e.keyCode === 427 ? 1 : e.key === 'PageUp' || e.keyCode === 428 ? -1 : 0;
         const tvArrow = document.documentElement.classList.contains('tv') && e.key.indexOf('Arrow') === 0 && (e.target === document.body || e.target.tagName === 'VIDEO');
         if (isBack && panelOpen()) closePanel();

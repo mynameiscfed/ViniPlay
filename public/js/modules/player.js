@@ -38,7 +38,6 @@ let retryTimeout = null;
 
 // --- Player extras ---
 let liveRewindUpdateInterval = null;
-let liveRewindHideTimeout = null;
 let sleepTimer = null;
 let currentRecordJob = null;
 let playerFallbackUsed = false;
@@ -734,10 +733,6 @@ export const stopAndCleanupPlayer = async () => { // MODIFIED: Made function asy
         clearInterval(liveRewindUpdateInterval);
         liveRewindUpdateInterval = null;
     }
-    if (liveRewindHideTimeout) {
-        clearTimeout(liveRewindHideTimeout);
-        liveRewindHideTimeout = null;
-    }
     if (sleepTimer) {
         clearTimeout(sleepTimer);
         sleepTimer = null;
@@ -805,15 +800,10 @@ export const stopAndCleanupPlayer = async () => { // MODIFIED: Made function asy
     const vodOverlay = document.getElementById('vod-controls-overlay');
     if (vodOverlay) {
         vodOverlay.classList.add('hidden');
-        vodOverlay.style.opacity = '0';
     }
     if (vodTimeUpdateInterval) {
         clearInterval(vodTimeUpdateInterval);
         vodTimeUpdateInterval = null;
-    }
-    if (vodHideControlsTimeout) {
-        clearTimeout(vodHideControlsTimeout);
-        vodHideControlsTimeout = null;
     }
     if (seekDebounceTimeout) {
         clearTimeout(seekDebounceTimeout);
@@ -925,15 +915,20 @@ function updateStreamInfo() {
 function hidePlayerOverlays() {
     document.getElementById('timeshift-controls-overlay')?.classList.add('hidden');
     const vodOverlay = document.getElementById('vod-controls-overlay');
-    if (vodOverlay) {
-        vodOverlay.classList.add('hidden');
-        vodOverlay.style.opacity = '0';
-    }
+    if (vodOverlay) vodOverlay.classList.add('hidden');
 }
 
 function updateLiveButtons() {
     const liveBtn = document.getElementById('player-live-edge-btn');
     if (liveBtn) liveBtn.classList.toggle('hidden', !currentChannelInfo?.channelId);
+}
+
+const REC_STATES = { idle: ['Record', 'Record current programme'], scheduled: ['Scheduled', 'Cancel scheduled recording'], recording: ['REC', 'Stop recording'] };
+
+function setRecordState(btn, state) {
+    btn.dataset.rec = state;
+    btn.title = REC_STATES[state][1];
+    btn.querySelector('[data-rec-state]').textContent = REC_STATES[state][0];
 }
 
 export async function refreshPlayerRecordState() {
@@ -945,9 +940,8 @@ export async function refreshPlayerRecordState() {
         currentRecordJob = null;
         return;
     }
-    btn.classList.remove('hidden', 'text-red-500');
-    btn.classList.add('text-gray-400');
-    btn.title = 'Record current programme';
+    btn.classList.remove('hidden');
+    setRecordState(btn, 'idle');
     currentRecordJob = null;
     try {
         const res = await apiFetch('/api/dvr/jobs');
@@ -965,11 +959,7 @@ export async function refreshPlayerRecordState() {
         return;
     }
     const recording = currentRecordJob && (currentRecordJob.status === 'recording' || currentRecordJob.status === 'reconnecting');
-    btn.classList.toggle('text-red-500', !!recording);
-    btn.classList.toggle('text-gray-400', !recording);
-    btn.title = recording ? 'Stop recording' : currentRecordJob ? 'Recording scheduled' : 'Record current programme';
-    const dot = btn.querySelector('[data-rec-state]');
-    if (dot) dot.textContent = recording ? 'REC' : currentRecordJob ? 'SCHED' : '';
+    setRecordState(btn, recording ? 'recording' : currentRecordJob ? 'scheduled' : 'idle');
 }
 
 async function scheduleCurrentChannel() {
@@ -1005,13 +995,14 @@ async function scheduleCurrentChannel() {
 
 async function toggleCurrentRecording() {
     if (!currentRecordJob) return scheduleCurrentChannel();
-    showConfirm('Stop Recording?', 'Stop this recording and keep what has been captured so far?', async () => {
-        const endpoint = currentRecordJob.status === 'scheduled'
+    const scheduled = currentRecordJob.status === 'scheduled';
+    showConfirm(scheduled ? 'Cancel Recording?' : 'Stop Recording?', scheduled ? 'This recording has not started yet. Remove it from the schedule?' : 'Stop this recording and keep what has been captured so far?', async () => {
+        const endpoint = scheduled
             ? `/api/dvr/jobs/${currentRecordJob.id}`
             : `/api/dvr/jobs/${currentRecordJob.id}/stop`;
-        const method = currentRecordJob.status === 'scheduled' ? 'DELETE' : 'POST';
+        const method = scheduled ? 'DELETE' : 'POST';
         if (await apiFetch(endpoint, { method })) {
-            showNotification('Recording stopped.');
+            showNotification(scheduled ? 'Recording cancelled.' : 'Recording stopped.');
             refreshPlayerRecordState();
         }
     });
@@ -1037,7 +1028,6 @@ function setupLiveRewindControls() {
     const overlay = document.getElementById('timeshift-controls-overlay');
     if (!overlay) return;
     overlay.classList.remove('hidden');
-    overlay.style.opacity = '1';
 
     const video = UIElements.videoElement;
     const progressBar = document.getElementById('timeshift-progress-bar');
@@ -1048,7 +1038,6 @@ function setupLiveRewindControls() {
     const playPauseBtn = document.getElementById('timeshift-play-pause-btn');
     const rewind15Btn = document.getElementById('timeshift-rewind-15-btn');
     const forward15Btn = document.getElementById('timeshift-forward-15-btn');
-    const container = UIElements.videoModalContainer || document.getElementById('video-modal-container');
     let seeking = false;
 
     const total = () => {
@@ -1058,14 +1047,6 @@ function setupLiveRewindControls() {
             return 0;
         }
     };
-    const showControls = () => {
-        overlay.style.opacity = '1';
-        if (liveRewindHideTimeout) clearTimeout(liveRewindHideTimeout);
-        liveRewindHideTimeout = setTimeout(() => {
-            if (!video.paused && !seeking) overlay.style.opacity = '0';
-        }, 3500);
-    };
-
     if (progressBar) {
         progressBar.oninput = (e) => {
             seeking = true;
@@ -1080,11 +1061,6 @@ function setupLiveRewindControls() {
     if (rewind15Btn) rewind15Btn.onclick = () => { video.currentTime = Math.max(0, video.currentTime - 15); };
     if (forward15Btn) forward15Btn.onclick = () => { video.currentTime = Math.min(total(), video.currentTime + 15); };
     if (playPauseBtn) playPauseBtn.onclick = () => { video.paused ? video.play().catch(() => {}) : video.pause(); };
-    if (container) {
-        container.onmousemove = showControls;
-        container.ontouchstart = showControls;
-    }
-    showControls();
 
     if (liveRewindUpdateInterval) clearInterval(liveRewindUpdateInterval);
     liveRewindUpdateInterval = setInterval(() => {
@@ -1468,7 +1444,6 @@ export const playRecordingOrDirectVideo = async (url, title, logo = '', isVod = 
 // State tracking for transcoded VOD seeking via -ss on /stream
 let currentVodTranscodeSession = null;
 let vodTimeUpdateInterval = null;
-let vodHideControlsTimeout = null;
 let isVodSeeking = false;
 let pendingSeekTarget = null;
 let seekDebounceTimeout = null;
@@ -1569,7 +1544,6 @@ function setupVodControlsOverlay(profileName) {
     if (!overlay) return;
 
     overlay.classList.remove('hidden');
-    overlay.style.opacity = '1';
 
     const progressBar = document.getElementById('vod-progress-bar');
     const currentTimeEl = document.getElementById('vod-current-time');
@@ -1651,25 +1625,6 @@ function setupVodControlsOverlay(profileName) {
         };
     }
 
-    // Auto-hide controls overlay during active playback
-    const container = UIElements.videoModalContainer || document.getElementById('video-modal-container');
-    const showControls = () => {
-        if (overlay) overlay.style.opacity = '1';
-        if (vodHideControlsTimeout) clearTimeout(vodHideControlsTimeout);
-        vodHideControlsTimeout = setTimeout(() => {
-            const video = UIElements.videoElement;
-            if (video && !video.paused && !isVodSeeking && pendingSeekTarget === null) {
-                if (overlay) overlay.style.opacity = '0';
-            }
-        }, 3500);
-    };
-
-    if (container) {
-        container.onmousemove = showControls;
-        container.ontouchstart = showControls;
-    }
-    showControls();
-
     // Start interval
     if (vodTimeUpdateInterval) clearInterval(vodTimeUpdateInterval);
     vodTimeUpdateInterval = setInterval(updateVodControlsUI, 500);
@@ -1732,10 +1687,7 @@ export const playVOD = async (url, title, logo = '', startTime = 0, knownDuratio
     // always use native HTML5 <video> playback. Never pass direct MKV/MP4 files into mpegts.js.
     if (useDirectPlay || !profile || profile.command === 'redirect') {
         currentVodTranscodeSession = null;
-        if (vodOverlay) {
-            vodOverlay.classList.add('hidden');
-            vodOverlay.style.opacity = '0';
-        }
+        if (vodOverlay) vodOverlay.classList.add('hidden');
         await playRecordingOrDirectVideo(url, title, logo, true, startTime, mediaInfo);
         return;
     }
@@ -2143,6 +2095,7 @@ export function cycleSleepTimer() {
 }
 
 function setPrimaryPlayerButtons(isLive) {
+    UIElements.videoModal?.classList.toggle('is-live', isLive);
     const liveBtn = document.getElementById('player-live-edge-btn');
     if (liveBtn) liveBtn.classList.toggle('hidden', !isLive);
     const speedBtn = document.getElementById('player-speed-btn');
@@ -2225,6 +2178,14 @@ export function setupPlayerEventListeners() {
         setPrimaryPlayerButtons(false);
     });
 
+    // On phones the header drops Refresh, PiP and Jump to live; their menu rows press the same buttons.
+    [['menu-pip-btn', 'pip-btn'], ['menu-refresh-btn', 'refresh-stream-btn'], ['menu-live-btn', 'player-live-edge-btn']].forEach(([row, button]) => {
+        bindTap(document.getElementById(row), () => {
+            document.getElementById('player-more-options-menu')?.classList.add('hidden');
+            document.getElementById(button)?.click();
+        });
+    });
+
     bindTap(UIElements.pipBtn, () => {
         if (document.pictureInPictureEnabled && UIElements.videoElement && (UIElements.videoElement.readyState >= 1 || !UIElements.videoElement.paused)) {
             requestScreenWakeLock();
@@ -2248,13 +2209,8 @@ export function setupPlayerEventListeners() {
             }
         });
 
-        // Close on Escape key or seek transcoded VOD on ArrowLeft/Right
+        // Seek transcoded VOD on ArrowLeft/Right (osd.js closes the menu on Back)
         document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape' && !moreOptionsMenu.classList.contains('hidden')) {
-                moreOptionsMenu.classList.add('hidden');
-                return;
-            }
-
             // Keyboard seeking for transcoded VOD streams via -ss
             if (currentVodTranscodeSession && UIElements.videoModal && !UIElements.videoModal.classList.contains('hidden')) {
                 // Ignore if typing in an input (except if it's the vod-progress-bar)
