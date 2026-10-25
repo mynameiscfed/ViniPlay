@@ -225,6 +225,7 @@ async function handleHardwareDetection() {
         hardwareChecked = true; // Mark as checked to prevent re-running
         const hardware = await res.json();
         detectedHardwareInfo = hardware;
+        guideState.hardware = hardware;
         let infoText = 'None';
 
         if (hardware.nvidia) {
@@ -820,6 +821,11 @@ export const updateUIFromSettings = async () => {
     settings.dvr.postBufferMinutes = settings.dvr.postBufferMinutes ?? 2;
     settings.dvr.maxConcurrentRecordings = settings.dvr.maxConcurrentRecordings ?? 1;
     settings.dvr.autoDeleteDays = settings.dvr.autoDeleteDays ?? 0;
+    settings.dvr.minFreeDiskMb = settings.dvr.minFreeDiskMb ?? 5120;
+    settings.dvr.maxRecordingHours = settings.dvr.maxRecordingHours ?? 0;
+    settings.dvr.retainNewestGb = settings.dvr.retainNewestGb ?? 0;
+    settings.downloads = settings.downloads || { enabled: true, maxConcurrent: 2 };
+    settings.liveRewind = settings.liveRewind || { enabled: false, minutes: 15, diskCapMb: 4096 };
 
     // Update dropdowns and inputs
     UIElements.timezoneOffsetSelect.value = settings.timezoneOffset;
@@ -838,6 +844,24 @@ export const updateUIFromSettings = async () => {
     if (UIElements.dvrPostBufferInput) UIElements.dvrPostBufferInput.value = settings.dvr.postBufferMinutes;
     if (UIElements.dvrMaxStreamsInput) UIElements.dvrMaxStreamsInput.value = settings.dvr.maxConcurrentRecordings;
     if (UIElements.dvrStorageDeleteDays) UIElements.dvrStorageDeleteDays.value = settings.dvr.autoDeleteDays;
+    const minFreeDisk = document.getElementById('dvr-min-free-disk-input');
+    if (minFreeDisk) minFreeDisk.value = settings.dvr.minFreeDiskMb;
+    const maxHours = document.getElementById('dvr-max-hours-input');
+    if (maxHours) maxHours.value = settings.dvr.maxRecordingHours;
+    const retainGb = document.getElementById('dvr-retain-gb-input');
+    if (retainGb) retainGb.value = settings.dvr.retainNewestGb;
+    const downloadsEnabled = document.getElementById('downloads-enabled-toggle');
+    if (downloadsEnabled) downloadsEnabled.checked = settings.downloads.enabled;
+    const downloadsMax = document.getElementById('downloads-max-concurrent');
+    if (downloadsMax) downloadsMax.value = settings.downloads.maxConcurrent;
+    const rewindEnabled = document.getElementById('live-rewind-enabled-toggle');
+    if (rewindEnabled) rewindEnabled.checked = settings.liveRewind.enabled;
+    const rewindMinutes = document.getElementById('live-rewind-minutes');
+    if (rewindMinutes) rewindMinutes.value = String(settings.liveRewind.minutes);
+    const rewindCap = document.getElementById('live-rewind-disk-cap');
+    if (rewindCap) rewindCap.value = settings.liveRewind.diskCapMb;
+    const qualitySwitch = document.getElementById('allow-quality-switch-toggle');
+    if (qualitySwitch) qualitySwitch.checked = settings.allowUserQualitySwitch === true;
 
     // Update Log Management inputs
     settings.logs = settings.logs || { maxFiles: 5, maxFileSizeBytes: 5 * 1024 * 1024, autoDeleteDays: 7 };
@@ -949,6 +973,18 @@ export const updateUIFromSettings = async () => {
     });
 
     populateSelect('castProfileSelect', filteredCastProfiles, settings.activeCastProfileId);
+
+    const fallbackSelect = document.getElementById('player-fallback-profile-select');
+    if (fallbackSelect) {
+        fallbackSelect.innerHTML = '<option value="">None</option>';
+        allProfiles.filter(profile => !profile.id.includes('fmp4')).forEach(profile => {
+            const option = document.createElement('option');
+            option.value = profile.id;
+            option.textContent = profile.name;
+            fallbackSelect.appendChild(option);
+        });
+        fallbackSelect.value = settings.playerFallbackProfileId || '';
+    }
 
     // Update button states based on selection
     const selectedProfile = (settings.streamProfiles || []).find(p => p.id === UIElements.streamProfileSelect.value);
@@ -1587,6 +1623,67 @@ export function setupSettingsEventListeners() {
     }
     if (UIElements.dvrStorageDeleteDays) {
         UIElements.dvrStorageDeleteDays.addEventListener('change', (e) => handleDvrSettingChange('autoDeleteDays', parseInt(e.target.value, 10)));
+    }
+    const minFreeDiskInput = document.getElementById('dvr-min-free-disk-input');
+    if (minFreeDiskInput) minFreeDiskInput.addEventListener('change', (e) => handleDvrSettingChange('minFreeDiskMb', parseInt(e.target.value, 10)));
+    const maxHoursInput = document.getElementById('dvr-max-hours-input');
+    if (maxHoursInput) maxHoursInput.addEventListener('change', (e) => handleDvrSettingChange('maxRecordingHours', parseInt(e.target.value, 10)));
+    const retainGbInput = document.getElementById('dvr-retain-gb-input');
+    if (retainGbInput) retainGbInput.addEventListener('change', (e) => handleDvrSettingChange('retainNewestGb', parseInt(e.target.value, 10)));
+    const fallbackProfileSelect = document.getElementById('player-fallback-profile-select');
+    if (fallbackProfileSelect) {
+        fallbackProfileSelect.addEventListener('change', (e) => {
+            const value = e.target.value || null;
+            guideState.settings.playerFallbackProfileId = value;
+            saveSettingAndNotify(saveGlobalSetting, { playerFallbackProfileId: value });
+        });
+    }
+    const qualitySwitchToggle = document.getElementById('allow-quality-switch-toggle');
+    if (qualitySwitchToggle) {
+        qualitySwitchToggle.addEventListener('change', (e) => {
+            guideState.settings.allowUserQualitySwitch = e.target.checked;
+            saveSettingAndNotify(saveGlobalSetting, { allowUserQualitySwitch: e.target.checked });
+        });
+    }
+    const downloadsEnabledToggle = document.getElementById('downloads-enabled-toggle');
+    if (downloadsEnabledToggle) {
+        downloadsEnabledToggle.addEventListener('change', (e) => {
+            const downloads = { ...guideState.settings.downloads, enabled: e.target.checked };
+            guideState.settings.downloads = downloads;
+            saveSettingAndNotify(saveGlobalSetting, { downloads });
+        });
+    }
+    const downloadsMaxInput = document.getElementById('downloads-max-concurrent');
+    if (downloadsMaxInput) {
+        downloadsMaxInput.addEventListener('change', (e) => {
+            const downloads = { ...guideState.settings.downloads, maxConcurrent: parseInt(e.target.value, 10) };
+            guideState.settings.downloads = downloads;
+            saveSettingAndNotify(saveGlobalSetting, { downloads });
+        });
+    }
+    const rewindEnabledToggle = document.getElementById('live-rewind-enabled-toggle');
+    if (rewindEnabledToggle) {
+        rewindEnabledToggle.addEventListener('change', (e) => {
+            const liveRewind = { ...guideState.settings.liveRewind, enabled: e.target.checked };
+            guideState.settings.liveRewind = liveRewind;
+            saveSettingAndNotify(saveGlobalSetting, { liveRewind });
+        });
+    }
+    const rewindMinutes = document.getElementById('live-rewind-minutes');
+    if (rewindMinutes) {
+        rewindMinutes.addEventListener('change', (e) => {
+            const liveRewind = { ...guideState.settings.liveRewind, minutes: parseInt(e.target.value, 10) };
+            guideState.settings.liveRewind = liveRewind;
+            saveSettingAndNotify(saveGlobalSetting, { liveRewind });
+        });
+    }
+    const rewindCap = document.getElementById('live-rewind-disk-cap');
+    if (rewindCap) {
+        rewindCap.addEventListener('change', (e) => {
+            const liveRewind = { ...guideState.settings.liveRewind, diskCapMb: parseInt(e.target.value, 10) };
+            guideState.settings.liveRewind = liveRewind;
+            saveSettingAndNotify(saveGlobalSetting, { liveRewind });
+        });
     }
     UIElements.dvrRecordingProfileSelect.addEventListener('change', (e) => handleDvrSettingChange('activeRecordingProfileId', e.target.value));
 

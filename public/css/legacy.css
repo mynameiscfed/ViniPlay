@@ -817,6 +817,31 @@
             fill: currentColor;
         }
 
+        .episode-item-download-btn {
+            color: rgb(var(--g-400));
+            width: 1.75rem;
+            height: 1.75rem;
+            border-radius: 9999px;
+            background-color: rgb(var(--g-700) / 0.6);
+            border: 1px solid rgb(var(--g-600));
+            flex-shrink: 0;
+            margin-left: 0.35rem;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.15s ease-in-out;
+        }
+
+        .episode-item-download-btn:hover {
+            color: var(--tx);
+            background-color: rgb(var(--g-600));
+        }
+
+        .episode-item-download-btn svg {
+            width: 0.875rem;
+            height: 0.875rem;
+        }
+
         /* --- NEW: Immersive Mode Styles --- */
         #app-container.multiview-immersive #main-header,
         #app-container.multiview-immersive #multiview-header {

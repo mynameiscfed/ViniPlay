@@ -143,12 +143,16 @@ function handleSessionStateChange(event) {
                     console.log('[CAST] Stopping local player before casting.');
                     appState.player.destroy();
                     appState.player = null;
-                    // Clear the video element
-                    if (UIElements.videoElement) {
-                        UIElements.videoElement.src = "";
-                        UIElements.videoElement.removeAttribute('src');
-                        UIElements.videoElement.load();
-                    }
+                }
+                if (appState.hlsPlayer) {
+                    console.log('[CAST] Stopping local HLS player before casting.');
+                    try { appState.hlsPlayer.destroy(); } catch (e) { }
+                    appState.hlsPlayer = null;
+                }
+                if (UIElements.videoElement) {
+                    UIElements.videoElement.src = "";
+                    UIElements.videoElement.removeAttribute('src');
+                    UIElements.videoElement.load();
                 }
 
                 const { streamUrl, name, logo } = castState.localPlayerState;

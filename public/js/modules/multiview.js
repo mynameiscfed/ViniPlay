@@ -710,7 +710,7 @@ async function playChannelInWidget(widgetId, channel, gridstackItemContentEl) {
 
     if (isVOD) {
         // For VOD files, auto-select fMP4 profile (same as Direct Player)
-        const hasNVIDIA = settings.hasNvidiaGpu;
+        const hasNVIDIA = guideState.hardware?.nvidia;
         profileIdToUse = hasNVIDIA ? 'ffmpeg-fmp4-nvidia' : 'ffmpeg-fmp4';
         console.log(`[MultiView] Auto-selected ${hasNVIDIA ? 'NVIDIA' : 'CPU'} fMP4 profile for VOD`);
 
@@ -778,7 +778,9 @@ async function playChannelInWidget(widgetId, channel, gridstackItemContentEl) {
             const mpegtsConfig = {
                 enableStashBuffer: true,
                 stashInitialSize: 4096,
-                liveBufferLatency: 2.0,
+                liveBufferLatencyChasing: true,
+                liveBufferLatencyMaxLatency: 5.0,
+                liveBufferLatencyMinRemain: 1.0,
             };
 
             const player = mpegts.createPlayer({

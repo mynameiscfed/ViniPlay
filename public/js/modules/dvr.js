@@ -43,10 +43,12 @@ export async function initDvrPage() {
 
     if (hasDvrPermission) {
         promises.push(loadScheduledJobs());
+        promises.push(loadSeriesRules());
     } else {
         // Explicitly hide these elements if user has no DVR permission
         if (UIElements.noDvrJobsMessage) UIElements.noDvrJobsMessage.classList.add('hidden');
         if (UIElements.dvrJobsTableContainer) UIElements.dvrJobsTableContainer.classList.add('hidden');
+        document.getElementById('dvr-series-container')?.classList.add('hidden');
     }
 
     await Promise.all(promises);
@@ -65,6 +67,67 @@ async function loadScheduledJobs() {
     } else {
         showNotification('Could not load scheduled recordings.', true);
     }
+}
+
+/**
+ * Fetches recurring series rules for the current user/admin.
+ */
+export async function loadSeriesRules() {
+    const res = await apiFetch('/api/dvr/series');
+    if (res && res.ok) {
+        dvrState.seriesRules = await res.json();
+        renderSeriesRules();
+    } else {
+        dvrState.seriesRules = [];
+        renderSeriesRules();
+    }
+}
+
+function renderSeriesRules() {
+    const container = document.getElementById('dvr-series-container');
+    const list = document.getElementById('dvr-series-list');
+    if (!container || !list) return;
+    const rules = dvrState.seriesRules || [];
+    container.classList.toggle('hidden', rules.length === 0);
+    list.innerHTML = '';
+    rules.forEach(rule => {
+        const row = document.createElement('div');
+        row.className = 'flex items-center justify-between gap-3 bg-gray-900/60 border border-gray-700/60 rounded-lg px-3 py-2';
+        row.innerHTML = `
+            <div class="min-w-0">
+                <p class="text-sm font-medium text-white truncate" title="${escapeHtml(rule.programTitle)}">${escapeHtml(rule.programTitle)}</p>
+                <p class="text-xs text-gray-400 truncate">${escapeHtml(rule.channelName || rule.channelId)}</p>
+            </div>
+            <button class="delete-series-rule-btn text-gray-400 hover:text-red-400 p-1.5 flex-shrink-0" data-rule-id="${escapeHtml(rule.id)}" title="Delete Series Recording">
+                ${ICONS.trash}
+            </button>`;
+        list.appendChild(row);
+    });
+}
+
+export function findSeriesRuleForProgram(program) {
+    return (dvrState.seriesRules || []).find(rule =>
+        String(rule.channelId) === String(program.channelId) &&
+        String(rule.programTitle).trim() === String(program.title || program.programTitle || '').trim()
+    );
+}
+
+export async function addSeriesRule(programData) {
+    const res = await apiFetch('/api/dvr/series', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            channelId: programData.channelId,
+            programTitle: programData.title || programData.programTitle,
+        }),
+    });
+    if (res) {
+        const data = await res.json().catch(() => ({}));
+        showNotification(data.scheduled ? `Series recording set. ${data.scheduled} episode(s) scheduled.` : 'Series recording set.', false, 3000);
+        await loadSeriesRules();
+        await loadScheduledJobs();
+    }
+    return !!res;
 }
 
 /**
@@ -202,7 +265,7 @@ async function playTimeshiftStream(job, startTime = 0) {
                 startPosition: seekTarget, // Force playback to start from seekTarget (or 00:00)
                 enableWorker: true,
                 lowLatencyMode: false,
-                backBufferLength: Infinity, // Retain past segments in memory for seamless backward scrubbing
+                backBufferLength: 300,
                 maxBufferLength: 60,
                 maxMaxBufferLength: 120,
             });
@@ -353,16 +416,25 @@ async function playTimeshiftStream(job, startTime = 0) {
             await stopAndCleanupPlayer();
         }
     } else if (videoElement.canPlayType('application/vnd.apple.mpegurl')) {
-        // Native HLS fallback (Safari/iOS)
+        // Native HLS fallback (Safari/iOS): use the native controls, which work reliably there.
         setActiveMediaTracking({
             contentType: 'dvr_job',
             contentId: String(job.id),
             title: job.programTitle
         });
+        if (overlay) {
+            overlay.classList.add('hidden');
+            overlay.style.opacity = '0';
+        }
+        videoElement.controls = true;
         videoElement.src = streamUrl;
         openModal(playerModal);
-        videoElement.currentTime = seekTarget;
-        videoElement.play().catch(e => console.warn('[TIMESHIFT] Autoplay prevented:', e));
+        const applySeek = () => {
+            if (seekTarget > 0) videoElement.currentTime = seekTarget;
+            videoElement.play().catch(e => console.warn('[TIMESHIFT] Autoplay prevented:', e));
+        };
+        if (videoElement.readyState >= 1) applySeek();
+        else videoElement.addEventListener('loadedmetadata', applySeek, { once: true });
     } else {
         showNotification('Your browser does not support HLS timeshift playback.', true);
         await stopAndCleanupPlayer();
@@ -779,6 +851,7 @@ function renderScheduledJobs() {
 function renderCompletedRecordings() {
     const recordings = dvrState.completedRecordings || [];
     const isAdmin = appState.currentUser?.isAdmin;
+    const canDownload = guideState.settings.downloads?.enabled !== false;
 
     // Update count badge
     if (UIElements.dvrRecordingsCount) {
@@ -837,6 +910,9 @@ function renderCompletedRecordings() {
                         <button class="action-btn play-recording-btn text-blue-400 hover:text-blue-300" title="Play Recording">
                             ${ICONS.play}
                         </button>
+                        ${canDownload ? `<a class="action-btn download-recording-btn text-gray-400 hover:text-white" href="/dvr/${encodeURIComponent(rec.filename)}" download title="Download Recording">
+                            ${ICONS.export}
+                        </a>` : ''}
                         <button class="action-btn delete-recording-btn text-red-400 hover:text-red-300" title="Delete Recording">
                             ${ICONS.trash}
                         </button>
@@ -878,10 +954,15 @@ function renderCompletedRecordings() {
                 </div>
 
                 <div class="flex items-center justify-between mt-4 pt-3 border-t border-gray-800">
-                    <button class="play-recording-btn bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold py-1.5 px-3 rounded flex items-center gap-1.5 transition-colors shadow">
-                        <svg class="w-3.5 h-3.5 fill-current" viewBox="0 0 20 20"><polygon points="5 3 19 10 5 17 5 3"/></svg>
-                        Play
-                    </button>
+                    <div class="flex items-center gap-1.5">
+                        <button class="play-recording-btn bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold py-1.5 px-3 rounded flex items-center gap-1.5 transition-colors shadow">
+                            <svg class="w-3.5 h-3.5 fill-current" viewBox="0 0 20 20"><polygon points="5 3 19 10 5 17 5 3"/></svg>
+                            Play
+                        </button>
+                        ${canDownload ? `<a class="download-recording-btn text-gray-400 hover:text-white p-1.5 transition-colors" href="/dvr/${encodeURIComponent(rec.filename)}" download title="Download Recording">
+                            ${ICONS.export}
+                        </a>` : ''}
+                    </div>
                     <button class="delete-recording-btn text-gray-400 hover:text-red-400 p-1.5 transition-colors" title="Delete Recording">
                         ${ICONS.trash}
                     </button>
@@ -1185,6 +1266,18 @@ export function setupDvrEventListeners() {
                 }
             });
         }
+    });
+
+    // 8b. Series rules list
+    document.getElementById('dvr-series-list')?.addEventListener('click', async (e) => {
+        const btn = e.target.closest('.delete-series-rule-btn');
+        if (!btn) return;
+        showConfirm('Delete Series Recording?', 'Future episodes from this rule will be cancelled.', async () => {
+            if (await apiFetch(`/api/dvr/series/${btn.dataset.ruleId}`, { method: 'DELETE' })) {
+                showNotification('Series recording removed.');
+                await Promise.all([loadScheduledJobs(), loadSeriesRules()]);
+            }
+        });
     });
 
     // 9. History Table click delegation

@@ -36,12 +36,12 @@
     <link rel="preload" href="/fonts/bricolage-grotesque-latin.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="stylesheet" href="/css/fonts.css?v=1">
     <link rel="stylesheet" href="/css/tokens.css?v=2">
-    <link rel="stylesheet" href="/css/tailwind.css?v=1">
+    <link rel="stylesheet" href="/css/tailwind.css?v=2">
     <link rel="stylesheet" href="/css/base.css?v=2">
     <link rel="stylesheet" href="/css/shell.css?v=3">
     <link rel="stylesheet" href="/css/guide.css?v=1">
     <link rel="stylesheet" href="/css/home.css?v=6">
-    <link rel="stylesheet" href="/css/legacy.css?v=6">
+    <link rel="stylesheet" href="/css/legacy.css?v=7">
     <link rel="stylesheet" href="/css/player.css?v=1">
     <link rel="stylesheet" href="/css/tv.css?v=1">
 
@@ -528,6 +528,14 @@
                                     <tbody id="dvr-jobs-tbody"></tbody>
                                 </table>
                             </div>
+
+                            <div id="dvr-series-container" class="hidden px-4 sm:px-6 pt-6">
+                                <div class="flex items-center justify-between border-t border-gray-700/60 pt-4 mb-2">
+                                    <h3 class="text-sm font-bold text-white">Series Recordings</h3>
+                                    <span class="text-xs text-gray-500">Matches the same programme title on the same channel.</span>
+                                </div>
+                                <div id="dvr-series-list" class="space-y-2"></div>
+                            </div>
                         </div>
 
                         <!-- TAB 3: HISTORY & LOGS -->
@@ -986,6 +994,72 @@
                                 </div>
                             </div>
                         </div>
+
+                        <div class="mt-6 pt-6 border-t border-gray-700/80 grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-5">
+                            <div>
+                                <label for="player-fallback-profile-select" class="block text-sm font-medium text-gray-400 mb-2">Fallback Stream Profile</label>
+                                <p class="text-xs text-gray-500 mb-2">Tried once if the active profile keeps failing. Leave empty to disable.</p>
+                                <select id="player-fallback-profile-select"
+                                    class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-white focus:ring-blue-500 focus:border-blue-500"></select>
+                            </div>
+                            <div class="flex items-center justify-between gap-4">
+                                <div>
+                                    <label for="allow-quality-switch-toggle" class="block text-sm font-medium text-white cursor-pointer">Allow User Quality Switching</label>
+                                    <p class="text-xs text-gray-400 mt-0.5">Shows the profile picker to normal users. Off keeps transcoding admin-controlled.</p>
+                                </div>
+                                <label class="relative inline-flex items-center cursor-pointer flex-shrink-0">
+                                    <input type="checkbox" id="allow-quality-switch-toggle" class="sr-only peer">
+                                    <div class="w-11 h-6 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="bg-gray-800 p-4 sm:p-6 rounded-xl shadow-lg">
+                        <h2 class="text-xl font-bold text-white mb-4 border-b border-gray-700 pb-2">Playback &amp; Downloads</h2>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-6">
+                            <div class="flex items-center justify-between gap-4">
+                                <div>
+                                    <label for="downloads-enabled-toggle" class="block text-sm font-medium text-white cursor-pointer">Allow Downloads</label>
+                                    <p class="text-xs text-gray-400 mt-0.5">Enable recording and VOD downloads for signed-in users.</p>
+                                </div>
+                                <label class="relative inline-flex items-center cursor-pointer flex-shrink-0">
+                                    <input type="checkbox" id="downloads-enabled-toggle" class="sr-only peer">
+                                    <div class="w-11 h-6 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                                </label>
+                            </div>
+                            <div>
+                                <label for="downloads-max-concurrent" class="block text-sm font-medium text-gray-400 mb-2">Maximum Concurrent Downloads</label>
+                                <input type="number" id="downloads-max-concurrent" min="1" max="8" value="2"
+                                    class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-white">
+                            </div>
+                            <div class="flex items-center justify-between gap-4">
+                                <div>
+                                    <label for="live-rewind-enabled-toggle" class="block text-sm font-medium text-white cursor-pointer">Live TV Rewind</label>
+                                    <p class="text-xs text-gray-400 mt-0.5">Keep a rolling buffer so live channels can pause and rewind. Uses one upstream connection and some disk.</p>
+                                </div>
+                                <label class="relative inline-flex items-center cursor-pointer flex-shrink-0">
+                                    <input type="checkbox" id="live-rewind-enabled-toggle" class="sr-only peer">
+                                    <div class="w-11 h-6 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                                </label>
+                            </div>
+                            <div class="grid grid-cols-2 gap-x-4">
+                                <div>
+                                    <label for="live-rewind-minutes" class="block text-sm font-medium text-gray-400 mb-2">Rewind Window</label>
+                                    <select id="live-rewind-minutes" class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-white">
+                                        <option value="5">5 minutes</option>
+                                        <option value="15">15 minutes</option>
+                                        <option value="30">30 minutes</option>
+                                        <option value="60">60 minutes</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label for="live-rewind-disk-cap" class="block text-sm font-medium text-gray-400 mb-2">Disk Cap (MB)</label>
+                                    <input type="number" id="live-rewind-disk-cap" min="256" value="4096"
+                                        class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-white">
+                                </div>
+                            </div>
+                        </div>
                     </div>
 
                     <div id="dvr-settings-section" class="bg-gray-800 p-4 sm:p-6 rounded-xl shadow-lg">
@@ -1022,13 +1096,36 @@
                                         min="0" value="2">
                                 </div>
                             </div>
-                            <div class="md:col-span-2">
+                            <div>
                                 <label for="dvr-max-streams-input"
                                     class="block text-sm font-medium text-gray-400 mb-2">Maximum Simultaneous
                                     Recordings</label>
                                 <input type="number" id="dvr-max-streams-input"
-                                    class="w-full md:w-1/2 bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-white"
-                                    min="1" value="1">
+                                    class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-white"
+                                    min="1" max="16" value="1">
+                            </div>
+                            <div>
+                                <label for="dvr-min-free-disk-input"
+                                    class="block text-sm font-medium text-gray-400 mb-2">Keep Free Disk (MB)</label>
+                                <input type="number" id="dvr-min-free-disk-input"
+                                    class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-white"
+                                    min="0" value="5120">
+                            </div>
+                            <div>
+                                <label for="dvr-max-hours-input"
+                                    class="block text-sm font-medium text-gray-400 mb-2">Maximum Recording Hours</label>
+                                <input type="number" id="dvr-max-hours-input"
+                                    class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-white"
+                                    min="0" max="48" value="0">
+                                <p class="text-xs text-gray-500 mt-1">0 means no limit.</p>
+                            </div>
+                            <div>
+                                <label for="dvr-retain-gb-input"
+                                    class="block text-sm font-medium text-gray-400 mb-2">Keep Newest Recordings (GB)</label>
+                                <input type="number" id="dvr-retain-gb-input"
+                                    class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-white"
+                                    min="0" value="0">
+                                <p class="text-xs text-gray-500 mt-1">0 keeps the age-based cleanup only.</p>
                             </div>
                         </div>
                     </div>
@@ -1362,6 +1459,17 @@
                         title="Refresh Stream">
                         <span data-icon="refresh"></span>
                     </button>
+                    <!-- Record current programme -->
+                    <button id="record-current-btn" type="button" class="pbtn hidden text-gray-400"
+                        title="Record current programme">
+                        <span data-icon="rec"></span>
+                        <span data-rec-state class="sr-only"></span>
+                    </button>
+                    <!-- Jump back to the live edge -->
+                    <button id="player-live-edge-btn" type="button" class="pbtn hidden"
+                        title="Jump to live">
+                        <span data-icon="bolt"></span>
+                    </button>
                     <!-- 2. Picture-in-Picture -->
                     <button id="pip-btn" type="button" class="pbtn"
                         title="Picture-in-Picture">
@@ -1424,6 +1532,54 @@
                                 </div>
                                 <span id="aspect-ratio-status" class="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-400 border border-blue-500/30">16:9 Locked</span>
                             </button>
+
+                            <div class="my-1 border-t border-gray-800/80"></div>
+
+                            <!-- Playback speed (VOD and recordings) -->
+                            <button id="player-speed-btn"
+                                class="hidden w-full flex items-center gap-3 px-3 py-2.5 text-left text-gray-300 hover:text-white hover:bg-gray-800/80 transition-colors rounded-lg group cursor-pointer"
+                                title="Playback speed">
+                                <span class="p-1.5 rounded-md bg-gray-800/80 group-hover:bg-blue-600/30 text-gray-400 group-hover:text-blue-400 transition-colors flex-shrink-0">
+                                    <span data-icon="bolt"></span>
+                                </span>
+                                <div class="flex flex-col flex-1 min-w-0">
+                                    <span class="text-sm font-medium leading-snug">Playback Speed</span>
+                                    <span class="text-xs text-gray-400 leading-tight">Cycle 1x, 1.25x, 1.5x, 2x</span>
+                                </div>
+                            </button>
+
+                            <!-- Sleep timer -->
+                            <button id="player-sleep-btn"
+                                class="w-full flex items-center gap-3 px-3 py-2.5 text-left text-gray-300 hover:text-white hover:bg-gray-800/80 transition-colors rounded-lg group cursor-pointer"
+                                title="Sleep timer">
+                                <span class="p-1.5 rounded-md bg-gray-800/80 group-hover:bg-blue-600/30 text-gray-400 group-hover:text-blue-400 transition-colors flex-shrink-0">
+                                    <span data-icon="clock"></span>
+                                </span>
+                                <div class="flex flex-col flex-1 min-w-0">
+                                    <span class="text-sm font-medium leading-snug">Sleep Timer</span>
+                                    <span class="text-xs text-gray-400 leading-tight">Cycle off, 15, 30, 60, 90 min</span>
+                                </div>
+                            </button>
+
+                            <!-- Autoplay next episode -->
+                            <button id="player-autoplay-btn"
+                                class="hidden w-full items-center gap-3 px-3 py-2.5 text-left text-gray-300 hover:text-white hover:bg-gray-800/80 transition-colors rounded-lg group cursor-pointer"
+                                title="Autoplay next episode">
+                                <span class="p-1.5 rounded-md bg-gray-800/80 group-hover:bg-blue-600/30 text-gray-400 group-hover:text-blue-400 transition-colors flex-shrink-0">
+                                    <span data-icon="next"></span>
+                                </span>
+                                <div class="flex flex-col flex-1 min-w-0">
+                                    <span class="text-sm font-medium leading-snug">Autoplay Next Episode</span>
+                                    <span class="text-xs text-gray-400 leading-tight">Start the next episode when this one ends</span>
+                                </div>
+                                <span id="player-autoplay-badge" class="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-400 border border-blue-500/30">On</span>
+                            </button>
+
+                            <!-- Quality/profile switch -->
+                            <div id="player-quality-row" class="hidden px-3 py-2.5">
+                                <label for="player-quality-select" class="block text-xs font-medium text-gray-400 mb-1.5">Live Quality</label>
+                                <select id="player-quality-select" class="w-full bg-gray-800 border border-gray-600 rounded-md px-3 py-2 text-sm text-white"></select>
+                            </div>
 
                             <div class="my-1 border-t border-gray-800/80"></div>
 
@@ -1721,6 +1877,8 @@
                     Channel</button>
                 <button id="details-record-btn"
                     class="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-md hidden">Record</button>
+                <button id="details-series-btn"
+                    class="bg-purple-600 hover:bg-purple-700 text-white font-bold py-2 px-4 rounded-md hidden">Record Series</button>
                 <button id="program-details-notify-btn"
                     class="bg-yellow-600 hover:bg-yellow-700 text-white font-bold py-2 px-4 rounded-md hidden">Notify
                     Me</button>
@@ -2315,10 +2473,14 @@
                                 id="vod-details-cast"></span></p>
                         <p id="vod-details-desc" class="text-base text-gray-300 mb-6"></p>
 
-                        <div id="vod-details-movie-actions" class="hidden">
+                        <div id="vod-details-movie-actions" class="hidden flex flex-wrap items-center gap-3">
                             <button id="vod-play-movie-btn"
                                 class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-md text-lg flex items-center gap-2">
                                 <span data-icon="play"></span> Play Movie
+                            </button>
+                            <button id="vod-download-movie-btn"
+                                class="bg-gray-700 hover:bg-gray-600 text-white font-bold py-3 px-5 rounded-md text-lg flex items-center gap-2">
+                                <span data-icon="export"></span> Download
                             </button>
                         </div>
                     </div>
@@ -2328,6 +2490,10 @@
                     <div class="flex items-center gap-3 mb-3">
                         <h3 class="text-lg sm:text-xl font-bold text-white">Episodes</h3>
                         <span id="vod-episodes-count-badge" class="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-blue-900/60 text-blue-300 border border-blue-500/30">0</span>
+                        <button id="vod-download-season-btn" type="button"
+                            class="ml-auto bg-gray-700 hover:bg-gray-600 text-white text-xs font-bold py-1.5 px-3 rounded-md flex items-center gap-1.5 transition-colors">
+                            <span data-icon="export"></span> Download Season
+                        </button>
                     </div>
 
                     <!-- Backward compatibility placeholder for cached client scripts -->
@@ -2357,7 +2523,7 @@
     </div>
 
 
-    <script type="module" src="/js/main.js?v=25"></script>
+    <script type="module" src="/js/main.js?v=26"></script>
 
     <div id="processing-status-modal"
         class="hidden fixed inset-0 bg-black/80 flex items-center justify-center z-[70] p-4">

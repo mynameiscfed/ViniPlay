@@ -19,6 +19,8 @@ const vodState = {
     filteredLibrary: [],
     // Simple debounce timer for search
     searchDebounce: null,
+    currentSeriesData: null,
+    currentSeason: null,
     // --- NEW: Pagination State ---
     pagination: {
         currentPage: 1,
@@ -27,6 +29,27 @@ const vodState = {
         totalPages: 1,
     },
 };
+
+function triggerDownload(url, silent = false) {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = '';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    if (!silent) showNotification('Download started.', false, 2000);
+}
+
+function downloadCurrentSeason() {
+    const series = vodState.currentSeriesData;
+    const season = vodState.currentSeason;
+    const episodes = series?.seasons?.[season] || [];
+    if (!episodes.length || guideState.settings.downloads?.enabled === false) return;
+    episodes.forEach((ep, index) => {
+        setTimeout(() => triggerDownload(`/api/vod/download/episode/${encodeURIComponent(ep.id)}`, true), index * 2000);
+    });
+    showNotification(`Queued ${episodes.length} episode(s) for download.`, false, 3000);
+}
 
 /**
  * Formats episode duration in seconds or time string into a clean "Xm Ys" or "Xm" string.
@@ -303,6 +326,12 @@ async function openVodDetails(item) { // Make the function async
         const movieUrl = item.url;
         const movieName = item.name;
         const movieLogo = item.logo; // Get the logo
+        const downloadBtn = document.getElementById('vod-download-movie-btn');
+        if (downloadBtn) {
+            const canDownload = guideState.settings.downloads?.enabled !== false;
+            downloadBtn.classList.toggle('hidden', !canDownload);
+            downloadBtn.onclick = () => triggerDownload(`/api/vod/download/movie/${encodeURIComponent(item.id)}`);
+        }
         UIElements.vodPlayMovieBtn.onclick = null;
         UIElements.vodPlayMovieBtn.onclick = async () => {
             const movieMediaInfo = {
@@ -343,6 +372,9 @@ async function openVodDetails(item) { // Make the function async
         // Fetch full series details including episodes
         const fullSeriesData = await fetchSeriesDetails(item.id);
         console.log(`[VOD] Fetched full series data for ID ${item.id}:`, fullSeriesData);
+        vodState.currentSeriesData = fullSeriesData;
+        const seasonDownloadBtn = document.getElementById('vod-download-season-btn');
+        if (seasonDownloadBtn) seasonDownloadBtn.classList.toggle('hidden', !fullSeriesData?.seasons || guideState.settings.downloads?.enabled === false);
 
         if (fullSeriesData) {
             if (fullSeriesData.director) {
@@ -418,6 +450,7 @@ async function openVodDetails(item) { // Make the function async
 
         // Render episodes for the first season by default
         if (sortedSeasonKeys.length > 0) {
+            vodState.currentSeason = sortedSeasonKeys[0];
             renderEpisodeList(fullSeriesData, sortedSeasonKeys[0]);
         }
     }
@@ -430,6 +463,7 @@ async function openVodDetails(item) { // Make the function async
  */
 function renderEpisodeList(series, seasonNum) {
     const episodeListEl = UIElements.vodEpisodeList;
+    vodState.currentSeason = seasonNum;
     const episodes = series.seasons[seasonNum];
     console.log(`[VOD] Rendering episodes for Series ID ${series.id}, Season ${seasonNum}:`, episodes);
 
@@ -438,6 +472,7 @@ function renderEpisodeList(series, seasonNum) {
         return;
     }
 
+    const canDownload = guideState.settings.downloads?.enabled !== false;
     episodeListEl.innerHTML = episodes.map((ep, index) => {
         let epName = ep.name.split(' - ').pop();
         if (epName.length < 5) epName = ep.name;
@@ -448,7 +483,7 @@ function renderEpisodeList(series, seasonNum) {
         const dateText = formatEpisodeDate(ep.air_date);
 
         return `
-            <div class="episode-item" tabindex="-1" role="button" data-id="${escapeHtml(ep.id || ep.url)}" data-url="${escapeHtml(ep.url)}" data-title="${escapeHtml(originalTitle)}">
+            <div class="episode-item" tabindex="-1" role="button" data-id="${escapeHtml(ep.id || ep.url)}" data-url="${escapeHtml(ep.url)}" data-title="${escapeHtml(originalTitle)}" data-series-id="${escapeHtml(series.id)}" data-season="${escapeHtml(ep.season)}" data-episode="${escapeHtml(ep.episode)}" data-series-logo="${escapeHtml(series.logo || '')}" data-series-name="${escapeHtml(series.name || '')}">
                 <div class="episode-item-epnum">${escapeHtml(epNum)}</div>
                 <div class="episode-item-title" title="${escapeHtml(originalTitle)}">${escapeHtml(epName)}</div>
                 <div class="episode-item-duration">${escapeHtml(durationText)}</div>
@@ -456,6 +491,9 @@ function renderEpisodeList(series, seasonNum) {
                 <button class="episode-item-play-btn" title="Play Episode" aria-label="Play Episode">
                     ${ICONS.play}
                 </button>
+                ${canDownload ? `<button class="episode-item-download-btn" title="Download Episode" aria-label="Download Episode" data-id="${escapeHtml(ep.id)}">
+                    ${ICONS.export}
+                </button>` : ''}
             </div>
         `;
     }).join('');
@@ -503,6 +541,8 @@ function setupVodEventListeners() {
             renderVodGrid();
         }, 300);
     });
+
+    document.getElementById('vod-download-season-btn')?.addEventListener('click', downloadCurrentSeason);
 
     UIElements.vodDirectPlayCheckbox.addEventListener('change', () => {
         const isEnabled = UIElements.vodDirectPlayCheckbox.checked;
@@ -556,8 +596,15 @@ function setupVodEventListeners() {
         UIElements.vodDetailsBackdropImg.src = '';
     });
 
-    // Episode play click (Event Delegation)
+    // Episode play/download click (Event Delegation)
     UIElements.vodEpisodeList.addEventListener('click', async (e) => {
+        const downloadBtn = e.target.closest('.episode-item-download-btn');
+        if (downloadBtn) {
+            e.preventDefault();
+            e.stopPropagation();
+            triggerDownload(`/api/vod/download/episode/${encodeURIComponent(downloadBtn.dataset.id)}`);
+            return;
+        }
         const episodeItem = e.target.closest('.episode-item');
         if (episodeItem) {
             const url = episodeItem.dataset.url;
@@ -568,7 +615,12 @@ function setupVodEventListeners() {
             const epMediaInfo = {
                 contentType: 'vod_episode',
                 contentId: String(episodeId),
-                title: title
+                title: title,
+                seriesId: episodeItem.dataset.seriesId,
+                season: episodeItem.dataset.season,
+                episode: episodeItem.dataset.episode,
+                seriesTitle: episodeItem.dataset.seriesName,
+                logo: episodeItem.dataset.seriesLogo,
             };
 
             closeModal(UIElements.vodDetailsModal);
