@@ -39,7 +39,7 @@
     <link rel="stylesheet" href="/css/tailwind.css?v=2">
     <link rel="stylesheet" href="/css/base.css?v=2">
     <link rel="stylesheet" href="/css/shell.css?v=3">
-    <link rel="stylesheet" href="/css/guide.css?v=1">
+    <link rel="stylesheet" href="/css/guide.css?v=5">
     <link rel="stylesheet" href="/css/home.css?v=6">
     <link rel="stylesheet" href="/css/legacy.css?v=7">
     <link rel="stylesheet" href="/css/player.css?v=1">
@@ -185,13 +185,22 @@
             <!-- TV Guide Page -->
             <div id="page-guide" class="flex flex-grow flex-col overflow-hidden">
                 <div id="unified-guide-header" class="guide-bar">
-                    <select id="source-filter" aria-label="Playlist" class="chip"></select>
+                    <select id="source-filter" aria-label="Playlist" class="chip dd"></select>
+                    <div class="menu-wrap">
+                        <button id="group-filter" type="button" class="chip dd" aria-haspopup="true" aria-expanded="false"><span id="group-filter-label">Groups</span></button>
+                        <div id="group-menu" class="menu gm hidden">
+                            <div class="gm-head">
+                                <input id="group-menu-search" type="search" placeholder="Find a group" aria-label="Find a group" autocomplete="off">
+                                <button id="group-menu-clear" type="button" class="btn btn-ghost btn-sm">Clear</button>
+                            </div>
+                            <div id="group-menu-list" class="gm-list" role="menu" aria-label="Groups"></div>
+                        </div>
+                    </div>
                     <div id="group-chips" class="chips" role="group" aria-label="Quick filters">
                         <button type="button" class="chip" data-group="all">All</button>
                         <button type="button" class="chip" data-group="favorites"><span data-icon="star"></span>Favorites</button>
                         <button type="button" class="chip" data-group="recents">Recents</button>
                     </div>
-                    <select id="group-filter" aria-label="Group" class="chip"></select>
                     <div class="guide-tools">
                         <div class="seg" role="group" aria-label="View">
                             <button id="guide-view-list" type="button" aria-label="List view"><span data-icon="list"></span></button>
