@@ -38,7 +38,8 @@ let retryTimeout = null;
 
 // --- Player extras ---
 let sleepTimer = null;
-const closePlaybackPanel = () => document.getElementById('player-panel')?.classList.add('hidden');
+const $ = (id) => document.getElementById(id);
+const closePlaybackPanel = () => $('player-panel')?.classList.add('hidden');
 let currentRecordJob = null;
 let playerFallbackUsed = false;
 let currentEpisodeContext = null;
@@ -196,6 +197,7 @@ export function setActiveMediaTracking(mediaInfo) {
         logo: mediaInfo.logo || ''
     } : null;
     lastSavedProgressSec = -1;
+    if (currentEpisodeContext) document.dispatchEvent(new CustomEvent('playepisode')); // the bar gets previous / next buttons
 
     if (progressSaveInterval) clearInterval(progressSaveInterval);
     // Auto-save every 10 seconds during active playback
@@ -732,7 +734,9 @@ export const stopAndCleanupPlayer = async ({ keepSleepTimer = false } = {}) => {
     if (sleepTimer && !keepSleepTimer) {
         clearTimeout(sleepTimer);
         sleepTimer = null;
+        appState.sleep = null;
     }
+    cancelUpNext();
     const recordBtn = document.getElementById('record-current-btn');
     if (recordBtn) recordBtn.classList.add('hidden');
     hideBar();
@@ -1698,33 +1702,76 @@ export function cycleSubtitles() {
     if (tracks.length) selectSubtitleTrack(next < tracks.length ? next : -1);
 }
 
+let seriesCache = null; // the episodes of the series on screen, so prev/next and Up next ask the server once
+let upNext = null; // { timer, go } while the Up next card is counting down
+
+async function neighbourEpisode(delta, context = currentEpisodeContext) {
+    if (!context?.seriesId) return null;
+    if (seriesCache?.id !== context.seriesId) {
+        const series = await fetchSeriesDetails(context.seriesId);
+        if (!series?.seasons) return null;
+        seriesCache = {
+            id: context.seriesId,
+            name: series.name,
+            episodes: Object.values(series.seasons).flat().sort((a, b) => (a.season - b.season) || (a.episode - b.episode)),
+        };
+    }
+    const { episodes } = seriesCache;
+    const at = episodes.findIndex(ep => Number(ep.season) === Number(context.season) && Number(ep.episode) === Number(context.episode));
+    return at >= 0 ? episodes[at + delta] || null : null;
+}
+
+function playEpisode(ep, context) {
+    playVOD(ep.url, ep.name, context.logo, 0, ep.duration_secs || null, {
+        contentType: 'vod_episode',
+        contentId: String(ep.id),
+        title: ep.name,
+        duration: ep.duration_secs || 0,
+        seriesId: context.seriesId,
+        season: ep.season,
+        episode: ep.episode,
+        seriesTitle: seriesCache?.name || context.seriesTitle,
+        logo: context.logo,
+    });
+}
+
+/** The bar's previous / next episode buttons. */
+export async function stepEpisode(delta) {
+    const context = currentEpisodeContext;
+    if (!context) return;
+    try {
+        const ep = await neighbourEpisode(delta, context);
+        if (ep) playEpisode(ep, context);
+        else showNotification(delta > 0 ? 'No next episode' : 'No previous episode', false, 1500);
+    } catch (e) {
+        showNotification('Could not load the episode list', true);
+    }
+}
+
+export function cancelUpNext() {
+    if (!upNext) return;
+    clearInterval(upNext.timer);
+    upNext = null;
+    $('player-upnext').classList.add('hidden');
+}
+
+/** When an episode ends the next one is offered for ten seconds, then plays unless cancelled. */
 async function maybePlayNextEpisode() {
     const context = currentEpisodeContext;
     if (!context?.seriesId || localStorage.getItem('iptvAutoplayNext') === 'off') return;
-    currentEpisodeContext = null;
     try {
-        const series = await fetchSeriesDetails(context.seriesId);
-        if (!series?.seasons) return;
-        const episodes = Object.values(series.seasons).flat()
-            .sort((a, b) => (a.season - b.season) || (a.episode - b.episode));
-        const index = episodes.findIndex(ep => Number(ep.season) === Number(context.season) && Number(ep.episode) === Number(context.episode));
-        const next = index >= 0 ? episodes[index + 1] : null;
-        if (!next) return;
-        const nextMedia = {
-            contentType: 'vod_episode',
-            contentId: String(next.id),
-            title: next.name,
-            duration: next.duration_secs || 0,
-            seriesId: context.seriesId,
-            season: next.season,
-            episode: next.episode,
-            seriesTitle: series.name,
-            logo: context.logo,
-        };
-        showNotification(`Playing next: ${next.name}`, false, 2500);
-        playVOD(next.url, next.name, context.logo, 0, next.duration_secs || null, nextMedia);
+        const next = await neighbourEpisode(1, context);
+        if (!next || context !== currentEpisodeContext) return; // no next one, or the viewer already moved on
+        let left = 10;
+        const count = $('un-count');
+        $('un-title').textContent = next.name;
+        count.textContent = left;
+        const go = () => { cancelUpNext(); playEpisode(next, context); };
+        upNext = { go, timer: setInterval(() => { count.textContent = --left; if (left <= 0) go(); }, 1000) };
+        $('player-upnext').classList.remove('hidden');
+        $('un-play').focus({ preventScroll: true });
     } catch (e) {
-        console.warn('[PLAYER] Could not autoplay next episode:', e);
+        console.warn('[PLAYER] Could not offer the next episode:', e);
     }
 }
 
@@ -1741,12 +1788,12 @@ export function cyclePlaybackSpeed() {
     setPlaybackSpeed(SPEEDS[(SPEEDS.indexOf(Number(video.playbackRate) || 1) + 1) % SPEEDS.length] || 1);
 }
 
-export const sleepMinutes = () => Number(sessionStorage.getItem('iptvSleepMinutes') || 0);
+export const sleepMinutes = () => appState.sleep?.min || 0;
 
 export function setSleepTimer(minutes) {
-    sessionStorage.setItem('iptvSleepMinutes', String(minutes));
     clearTimeout(sleepTimer);
     sleepTimer = null;
+    appState.sleep = minutes > 0 ? { min: minutes, ends: Date.now() + minutes * 60000 } : null; // the bar shows the time left
     if (minutes > 0) {
         sleepTimer = setTimeout(() => {
             showNotification('Sleep timer ended. Stopping playback.', false, 3000);
@@ -1804,7 +1851,6 @@ const markOn = (group, isOn) => Array.from(group.children).forEach(button => but
 
 /** Brings every row of the Playback panel up to date with what is playing; called when it opens. */
 export function refreshPlaybackPanel() {
-    const $ = (id) => document.getElementById(id);
     const video = UIElements.videoElement;
     const channelId = currentChannelInfo?.channelId;
     const rewind = !!channelId && !!appState.hlsPlayer;
@@ -1990,6 +2036,9 @@ export function setupPlayerEventListeners() {
             isUserInitiatedPause = true;
         }
     });
+    $('un-play').addEventListener('click', () => upNext?.go());
+    $('un-cancel').addEventListener('click', cancelUpNext);
+    UIElements.videoElement.addEventListener('playing', cancelUpNext); // replaying or scrubbing back cancels the offer
     UIElements.videoElement.addEventListener('ended', () => {
         if (currentActiveMedia) {
             saveWatchProgressApi(currentActiveMedia.contentType, currentActiveMedia.contentId, 0, currentActiveMedia.duration || 0);

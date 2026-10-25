@@ -42,7 +42,7 @@
     <link rel="stylesheet" href="/css/guide.css?v=5">
     <link rel="stylesheet" href="/css/home.css?v=6">
     <link rel="stylesheet" href="/css/legacy.css?v=7">
-    <link rel="stylesheet" href="/css/player.css?v=4">
+    <link rel="stylesheet" href="/css/player.css?v=5">
     <link rel="stylesheet" href="/css/tv.css?v=1">
 
     <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.8.2/dist/mpegts.js" integrity="sha384-sQp+4cJv0jChNCYvgy6W0RSfQZB/w6d3ZTDoIBlY4Uorfw4PLS56T2yM2z47bSkl" crossorigin="anonymous"></script>
@@ -1643,12 +1643,22 @@
                             <button id="pb-speed" type="button" class="pb-chip hidden" title="Playback speed"></button>
                         </div>
                         <div class="pb-grp">
+                            <button id="pb-sleep" type="button" class="pb-chip hidden" title="Sleep timer"></button>
                             <button id="pb-mute" type="button" class="pbtn" title="Mute (M)"></button>
                             <input type="range" id="pb-volume" min="0" max="1" step="0.05" value="1" aria-label="Volume">
                             <button id="pb-cc" type="button" class="pbtn hidden" title="Subtitles (C)"><span data-icon="subtitles"></span></button>
                             <button id="pb-panel-btn" type="button" class="pbtn" title="Playback options" aria-haspopup="dialog"><span data-icon="more"></span></button>
                             <button id="player-fullscreen-btn" type="button" class="pbtn" title="Fullscreen (F)"><span data-icon="fullscreen"></span></button>
                         </div>
+                    </div>
+                </div>
+
+                <div id="player-upnext" class="hidden" role="alertdialog" aria-label="Up next">
+                    <div class="un-label">Up next in <span id="un-count">10</span>s</div>
+                    <div id="un-title"></div>
+                    <div class="un-actions">
+                        <button id="un-play" type="button" class="btn btn-primary">Play now</button>
+                        <button id="un-cancel" type="button" class="btn">Cancel</button>
                     </div>
                 </div>
 

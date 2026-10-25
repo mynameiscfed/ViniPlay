@@ -7,7 +7,7 @@
  */
 
 import { guideState } from './state.js';
-import { playChannel, refreshPlaybackPanel } from './player.js';
+import { playChannel, refreshPlaybackPanel, stepEpisode, cancelUpNext } from './player.js';
 import { escapeHtml, nowNext } from './utils.js';
 import { formatTimeInZone } from './time.js';
 import { focusEl } from './focus.js';
@@ -27,6 +27,7 @@ const MEDIA = {
 const $ = (id) => document.getElementById(id);
 
 let current = null; // id of the live channel on screen; null for recordings and movies
+let episode = false; // an episode is on screen, so previous / next step through its series
 let idleTimer = 0;
 let clock = 0;
 
@@ -114,6 +115,13 @@ const zap = (dir) => {
     const target = channels[(at + dir + channels.length) % channels.length];
     if (target) play(target);
 };
+// Previous / next means channel for live TV and episode for a series.
+const step = (dir) => (current ? zap(dir) : stepEpisode(dir));
+const showSteps = (on, what) => {
+    ['pb-prev', 'pb-next'].forEach(id => $(id).classList.toggle('hidden', !on));
+    $('pb-prev').title = `Previous ${what} (Page Up)`;
+    $('pb-next').title = `Next ${what} (Page Down)`;
+};
 
 export function setupOsd() {
     const modal = $('video-modal');
@@ -133,26 +141,28 @@ export function setupOsd() {
         current = e.detail;
         renderOsd();
         $('player-channels-btn').classList.remove('hidden');
-        ['pb-prev', 'pb-next'].forEach(id => $(id).classList.remove('hidden'));
+        showSteps(true, 'channel');
         if (openLayer()?.[0] === 'player-channels') renderPanel();
         clearInterval(clock);
         clock = setInterval(renderOsd, 30000);
     });
+    document.addEventListener('playepisode', () => { episode = true; showSteps(true, 'episode'); });
     document.addEventListener('playerstop', () => {
         current = null;
+        episode = false;
         clearInterval(clock);
         $('player-osd').classList.add('hidden');
         LAYERS.forEach(([panel]) => $(panel).classList.add('hidden'));
         $('player-channels-btn').classList.add('hidden');
-        ['pb-prev', 'pb-next'].forEach(id => $(id).classList.add('hidden'));
+        showSteps(false, 'channel');
     });
 
     $('player-channels-btn').addEventListener('click', () => (openLayer()?.[0] === 'player-channels' ? closeLayers() : openPanel()));
     $('pb-panel-btn').addEventListener('click', () => (openLayer()?.[0] === 'player-panel' ? closeLayers() : openPlayback()));
     $('player-channels-close').addEventListener('click', closeLayers);
     $('player-panel-close').addEventListener('click', closeLayers);
-    $('pb-prev').addEventListener('click', () => zap(-1));
-    $('pb-next').addEventListener('click', () => zap(1));
+    $('pb-prev').addEventListener('click', () => step(-1));
+    $('pb-next').addEventListener('click', () => step(1));
     $('player-channels-list').addEventListener('click', (e) => {
         const channel = guideState.channels.find(c => c.id === e.target.closest('.pc-row')?.dataset.id);
         if (channel) play(channel);
@@ -166,6 +176,12 @@ export function setupOsd() {
         // Back closes an open panel first, so one press never closes both the panel and the player.
         if (isBack && openLayer()) {
             closeLayers();
+            e.preventDefault();
+            e.stopPropagation();
+            return;
+        }
+        if (isBack && !$('player-upnext').classList.contains('hidden')) {
+            cancelUpNext();
             e.preventDefault();
             e.stopPropagation();
             return;
@@ -190,7 +206,7 @@ export function setupOsd() {
         else if (k === 'l') act = 'live';
         else if (lr && (nothing || t.id === 'pb-seek') && (barCanSeek() || tv)) act = e.key === 'ArrowLeft' ? 'back' : 'fwd';
         else if (ud && (nothing || t.id === 'pb-seek' && !tv)) act = tv ? 'bar' : e.key === 'ArrowUp' ? 'volup' : 'voldown';
-        if ((act === 'chnext' || act === 'chprev') && !current) act = '';
+        if ((act === 'chnext' || act === 'chprev') && !current && !episode) act = '';
         if (!act) return;
 
         const long = e.shiftKey ? SKIP_LONG : SKIP;
@@ -207,7 +223,7 @@ export function setupOsd() {
             cc: () => $('pb-cc').classList.contains('hidden') || $('pb-cc').click(),
             live: () => bar.classList.contains('is-live') && goLive(),
             bar: () => focusEl($('pb-play')),
-            chnext: () => zap(1), chprev: () => zap(-1),
+            chnext: () => step(1), chprev: () => step(-1),
         };
         run[act]();
         e.preventDefault();

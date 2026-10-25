@@ -12,6 +12,7 @@
  */
 
 import { ICONS } from './icons.js';
+import { appState } from './state.js';
 
 const $ = (id) => document.getElementById(id);
 const SKIP = 15;
@@ -123,6 +124,11 @@ function tick() {
     const atLive = src.seekable ? end - pos < 8 : true;
     $('pb-live').classList.toggle('pill-live', atLive);
 
+    const sleep = $('pb-sleep');
+    const left = appState.sleep ? Math.max(1, Math.ceil((appState.sleep.ends - Date.now()) / 60000)) : 0;
+    sleep.classList.toggle('hidden', !left);
+    sleep.textContent = `Sleep ${left}m`;
+
     const speed = $('pb-speed');
     speed.textContent = `${v.playbackRate || 1}×`;
     speed.classList.toggle('on', (v.playbackRate || 1) !== 1);
@@ -165,6 +171,7 @@ export function setupBar() {
     $('pb-fwd').addEventListener('click', () => skip(SKIP));
     $('pb-live').addEventListener('click', goLive);
     $('pb-mute').addEventListener('click', toggleMute);
+    $('pb-sleep').addEventListener('click', () => $('pb-panel-btn').click());
     $('pb-volume').addEventListener('input', (e) => setVolume(+e.target.value));
 
     // A mouse click leaves focus on the button, which would make Space press it again.
