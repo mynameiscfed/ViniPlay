@@ -954,3 +954,23 @@ body.modal-open {
 #epg-map-tbody tr[data-id] {
     height: 4rem;
 }
+
+/* Fixed columns so the list fits its card instead of scrolling sideways; long names end in "…". */
+#epg-map-scroll table {
+    table-layout: fixed;
+}
+
+#epg-map-scroll th:nth-child(1) { width: 3rem; }
+#epg-map-scroll th:nth-child(3) { width: 9.5rem; }
+#epg-map-scroll th:nth-child(5) { width: 9.5rem; }
+
+#epg-map-tbody td,
+#epg-map-tbody td > div {
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+#epg-map-scroll tr > :first-child {
+    padding-right: 0;
+    text-overflow: clip;
+}

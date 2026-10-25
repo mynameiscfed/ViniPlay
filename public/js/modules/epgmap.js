@@ -68,9 +68,9 @@ const rowHTML = (ch) => {
     const s = suggestions.get(ch.id);
     return `<tr data-id="${escapeHtml(ch.id)}">
         <td><input type="checkbox" data-act="select" aria-label="Select ${escapeHtml(ch.displayName)}"${selected.has(ch.id) ? ' checked' : ''}></td>
-        <td>${escapeHtml(ch.displayName)}<div class="text-xs text-gray-500">${escapeHtml(ch.group)} · ${escapeHtml(ch.source)}</div></td>
+        <td title="${escapeHtml(ch.displayName)}">${escapeHtml(ch.displayName)}<div class="text-xs text-gray-500">${escapeHtml(ch.group)} · ${escapeHtml(ch.source)}</div></td>
         <td>${guideCell(ch)}</td>
-        <td>${suggestionCell(s)}</td>
+        <td title="${s ? escapeHtml(s.names[0] || s.epgId) : ''}">${suggestionCell(s)}</td>
         <td class="text-right"><div class="flex items-center justify-end gap-3">
             ${s ? `<button class="action-btn" data-act="accept" title="Accept suggestion" aria-label="Accept suggestion">${ICONS.check}</button>
                    <button class="action-btn" data-act="reject" title="Dismiss suggestion" aria-label="Dismiss suggestion">${ICONS.close}</button>` : ''}
