@@ -8,7 +8,7 @@
 
 import { appState, guideState, UIElements, dvrState } from './state.js';
 import { saveUserSetting, getDeviceSetting, saveDeviceSetting } from './api.js';
-import { parseM3U, formatTimeWithOffset } from './utils.js';
+import { parseM3U, formatTimeWithOffset, escapeHtml } from './utils.js';
 import { playChannel } from './player.js';
 import { showNotification, openModal, closeModal } from './ui.js';
 import { addOrRemoveNotification, findNotificationForProgram } from './notification.js';
@@ -23,7 +23,6 @@ const SEARCH_DEBOUNCE_MS = 250; // Delay between the last keystroke and re-filte
 // Program IDs that matched the current search, highlighted in the timeline.
 let searchMatchedProgramIds = new Set();
 
-const escapeAttr = (value) => String(value ?? '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
 
 /**
  * Returns the UTC instant that corresponds to local midnight of the selected guide date,
@@ -481,21 +480,21 @@ const renderGuide = (channelsToRender, resetScroll = false, shouldCenter = false
                     colorIndex++;
                 }
                 const sourceBadgeColor = sourceColorMap.get(channel.source);
-                const sourceBadgeHTML = guideState.channelSources.size > 1 ? `<span class="source-badge ${sourceBadgeColor} text-white">${channel.source}</span>` : '';
-                const chnoBadgeHTML = channel.chno ? `<span class="chno-badge">${channel.chno}</span>` : '';
+                const sourceBadgeHTML = guideState.channelSources.size > 1 ? `<span class="source-badge ${sourceBadgeColor} text-white">${escapeHtml(channel.source)}</span>` : '';
+                const chnoBadgeHTML = channel.chno ? `<span class="chno-badge">${escapeHtml(channel.chno)}</span>` : '';
 
                 // MODIFIED: Replaced hardcoded SVG with icon from the library
                 const starIconHTML = ICONS.star.replace(
                     'class="w-5 h-5"',
-                    `data-channel-id="${channel.id}" class="w-6 h-6 text-gray-500 hover:text-yellow-400 favorite-star cursor-pointer ${channel.isFavorite ? 'favorited' : ''}"`
+                    `data-channel-id="${escapeHtml(channel.id)}" class="w-6 h-6 text-gray-500 hover:text-yellow-400 favorite-star cursor-pointer ${channel.isFavorite ? 'favorited' : ''}"`
                 );
 
                 const channelInfoHTML = `
-                    <div class="channel-info p-1.5 md:p-2 flex items-center justify-between cursor-pointer" data-url="${channel.url}" data-name="${channelName}" data-id="${channel.id}" data-channel-index="${i}" title="${escapeAttr(channelName)}">
+                    <div class="channel-info p-1.5 md:p-2 flex items-center justify-between cursor-pointer" data-url="${escapeHtml(channel.url)}" data-name="${escapeHtml(channelName)}" data-id="${escapeHtml(channel.id)}" data-channel-index="${i}" title="${escapeHtml(channelName)}">
                         <div class="flex items-center overflow-hidden flex-grow min-w-0">
-                            <img src="${channel.logo}" onerror="this.onerror=null; this.src='https://placehold.co/48x48/1f2937/d1d5db?text=?';" class="w-8 h-8 md:w-12 md:h-12 object-contain mr-2 md:mr-3 flex-shrink-0 rounded-md bg-gray-700">
+                            <img src="${escapeHtml(channel.logo)}" onerror="this.onerror=null; this.src='https://placehold.co/48x48/1f2937/d1d5db?text=?';" class="w-8 h-8 md:w-12 md:h-12 object-contain mr-2 md:mr-3 flex-shrink-0 rounded-md bg-gray-700">
                             <div class="flex-grow min-w-0 channel-details">
-                                <span class="channel-name font-semibold">${channelName}</span>
+                                <span class="channel-name font-semibold">${escapeHtml(channelName)}</span>
                                 <div class="flex items-center flex-wrap gap-1 md:gap-2 mt-1">
                                     ${chnoBadgeHTML}
                                     ${sourceBadgeHTML}
@@ -536,7 +535,7 @@ const renderGuide = (channelsToRender, resetScroll = false, shouldCenter = false
                     const isLive = now >= progStart && now < progStop;
                     const progressWidth = isLive ? ((now - progStart) / durationMs) * 100 : 0;
 
-                    const uniqueProgramId = `${channel.id}-${progStart.toISOString()}-${progStop.toISOString()}`;
+                    const uniqueProgramId = `${escapeHtml(channel.id)}-${progStart.toISOString()}-${progStop.toISOString()}`;
 
                     const hasNotification = findNotificationForProgram({ ...prog, programId: uniqueProgramId }, channel.id);
                     const notificationClass = hasNotification ? 'has-notification' : '';
@@ -547,7 +546,7 @@ const renderGuide = (channelsToRender, resetScroll = false, shouldCenter = false
 
                     const offset = guideState.settings.timezoneOffset || 0;
 
-                    programsHTML += `<div class="programme-item absolute top-1 bottom-1 bg-gray-800 rounded-md p-2 overflow-hidden flex flex-col justify-center z-5 ${isLive ? 'live' : ''} ${progStop < now ? 'past' : ''} ${notificationClass} ${recordingClass} ${searchMatchClass}" style="left:${left}px; width:${Math.max(0, width - 2)}px" data-channel-url="${channel.url}" data-channel-id="${channel.id}" data-channel-name="${channelName}" data-prog-title="${prog.title}" data-prog-desc="${prog.desc}" data-prog-start="${progStart.toISOString()}" data-prog-stop="${progStop.toISOString()}" data-prog-id="${uniqueProgramId}"><div class="programme-progress" style="width:${progressWidth}%"></div><p class="prog-title text-white font-semibold truncate relative z-10">${prog.title}</p><p class="prog-time text-gray-400 truncate relative z-10">${formatTimeWithOffset(progStart, offset)} - ${formatTimeWithOffset(progStop, offset)}</p></div>`;
+                    programsHTML += `<div class="programme-item absolute top-1 bottom-1 bg-gray-800 rounded-md p-2 overflow-hidden flex flex-col justify-center z-5 ${isLive ? 'live' : ''} ${progStop < now ? 'past' : ''} ${notificationClass} ${recordingClass} ${searchMatchClass}" style="left:${left}px; width:${Math.max(0, width - 2)}px" data-channel-url="${escapeHtml(channel.url)}" data-channel-id="${escapeHtml(channel.id)}" data-channel-name="${escapeHtml(channelName)}" data-prog-title="${escapeHtml(prog.title)}" data-prog-desc="${escapeHtml(prog.desc)}" data-prog-start="${progStart.toISOString()}" data-prog-stop="${progStop.toISOString()}" data-prog-id="${escapeHtml(uniqueProgramId)}"><div class="programme-progress" style="width:${progressWidth}%"></div><p class="prog-title text-white font-semibold truncate relative z-10">${escapeHtml(prog.title)}</p><p class="prog-time text-gray-400 truncate relative z-10">${formatTimeWithOffset(progStart, offset)} - ${formatTimeWithOffset(progStop, offset)}</p></div>`;
                 });
                 const timelineRowHTML = `<div class="timeline-row" style="width: ${timelineWidth}px;">${programsHTML}</div>`;
 
