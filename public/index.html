@@ -41,6 +41,7 @@
     <link rel="stylesheet" href="/css/shell.css?v=2">
     <link rel="stylesheet" href="/css/guide.css?v=1">
     <link rel="stylesheet" href="/css/legacy.css?v=2">
+    <link rel="stylesheet" href="/css/player.css?v=1">
     <link rel="stylesheet" href="/css/tv.css?v=1">
 
     <script src="https://cdn.jsdelivr.net/npm/mpegts.js/dist/mpegts.js"></script>
@@ -1319,34 +1320,34 @@
     </div>
 
     <!-- Modals -->
-    <div id="video-modal" class="hidden fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
-        <div id="video-modal-container" class="bg-gray-900 rounded-lg shadow-xl max-h-[90vh] flex flex-col w-full md:w-[896px] md:h-[504px]">
-            <div id="video-modal-header" class="relative flex justify-between items-center p-2 sm:p-3 border-b border-gray-700 flex-shrink-0 gap-2 rounded-t-lg">
-                <h3 id="video-title" class="text-xs sm:text-base md:text-lg font-semibold text-white truncate min-w-0 flex-1"></h3>
+    <div id="video-modal" class="hidden fixed inset-0 flex items-center justify-center z-50 scope-dark">
+        <div id="video-modal-container" class="flex flex-col">
+            <div id="video-modal-header" class="flex justify-between items-center gap-2">
+                <h3 id="video-title" class="truncate min-w-0 flex-1"></h3>
                 <div class="flex items-center gap-1 sm:gap-2 flex-shrink-0">
+                    <!-- Channels panel (live TV only) -->
+                    <button id="player-channels-btn" type="button" class="pbtn hidden" title="Channels">
+                        <span data-icon="channelList"></span>
+                    </button>
                     <!-- 1. Refresh Stream -->
-                    <button id="refresh-stream-btn"
-                        class="text-gray-400 hover:text-white p-1.5 sm:p-2 rounded-md hover:bg-gray-700 flex-shrink-0 transition-colors"
+                    <button id="refresh-stream-btn" type="button" class="pbtn"
                         title="Refresh Stream">
                         <span data-icon="refresh"></span>
                     </button>
                     <!-- 2. Picture-in-Picture -->
-                    <button id="pip-btn"
-                        class="text-gray-400 hover:text-white p-1.5 sm:p-2 rounded-md hover:bg-gray-700 flex-shrink-0 transition-colors"
+                    <button id="pip-btn" type="button" class="pbtn"
                         title="Picture-in-Picture">
                         <span data-icon="pip"></span>
                     </button>
                     <!-- 3. Container Fullscreen Button -->
-                    <button id="player-fullscreen-btn"
-                        class="text-gray-400 hover:text-white p-1.5 sm:p-2 rounded-md hover:bg-gray-700 flex-shrink-0 transition-colors"
+                    <button id="player-fullscreen-btn" type="button" class="pbtn"
                         title="Toggle Fullscreen">
                         <span data-icon="fullscreen"></span>
                     </button>
 
                     <!-- 4. More Options Dropdown Trigger -->
                     <div class="relative flex-shrink-0">
-                        <button id="player-more-options-btn"
-                            class="text-gray-400 hover:text-white p-1.5 sm:p-2 rounded-md hover:bg-gray-700 flex-shrink-0 transition-colors"
+                        <button id="player-more-options-btn" type="button" class="pbtn"
                             title="More Options">
                             <span data-icon="more"></span>
                         </button>
@@ -1453,9 +1454,7 @@
                     </div>
 
                     <!-- 5. Close Modal -->
-                    <button id="close-modal"
-                        class="text-gray-400 hover:text-white text-xl sm:text-2xl leading-none font-bold p-1 sm:p-1.5 rounded-md hover:bg-gray-700 flex-shrink-0 transition-colors ml-1 cursor-pointer"
-                        title="Close">&times;</button>
+                    <button id="close-modal" type="button" class="pbtn" title="Close"><span data-icon="close"></span></button>
                 </div>
             </div>
 
@@ -1476,6 +1475,23 @@
                 <video id="videoElement" controls autoplay playsinline webkit-playsinline class="w-full h-full"></video>
                 <!-- Dedicated Audio Element for uninterrupted mobile lock-screen playback -->
                 <audio id="audioElement" playsinline class="hidden"></audio>
+
+                <!-- Now/next card for live channels -->
+                <div id="player-osd" class="hidden">
+                    <img id="osd-logo" src="" alt="">
+                    <div class="osd-main">
+                        <div class="osd-top"><span id="osd-chno" class="mono"></span><span id="osd-channel"></span><span class="pill pill-live">Live</span></div>
+                        <div id="osd-now"></div>
+                        <div class="osd-bar"><i><b id="osd-bar-fill"></b></i><span id="osd-left"></span></div>
+                        <div id="osd-next"></div>
+                    </div>
+                </div>
+
+                <!-- Channels panel -->
+                <div id="player-channels" class="hidden" role="dialog" aria-label="Channels">
+                    <div class="pc-head"><span>Channels</span><button id="player-channels-close" type="button" class="pbtn" aria-label="Close channels"><span data-icon="close"></span></button></div>
+                    <div id="player-channels-list" class="pc-list" data-scroll-owner></div>
+                </div>
 
                 <!-- NEW: Audio-Only Overlay -->
                 <div id="audio-only-overlay"

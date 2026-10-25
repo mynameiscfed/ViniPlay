@@ -8,13 +8,14 @@
 
 import { appState, guideState, UIElements, dvrState } from './state.js';
 import { saveUserSetting, getDeviceSetting, saveDeviceSetting } from './api.js';
-import { parseM3U, formatTimeWithOffset, escapeHtml } from './utils.js';
+import { parseM3U, formatTimeWithOffset, escapeHtml, nowNext } from './utils.js';
 import { playChannel } from './player.js';
 import { showNotification, openModal, closeModal } from './ui.js';
 import { addOrRemoveNotification, findNotificationForProgram } from './notification.js';
 import { addOrRemoveDvrJob, findDvrJobForProgram } from './dvr.js';
 import { ICONS } from './icons.js'; // MODIFIED: Import the new icon library
 import { setDigitHandler, focusEl } from './focus.js';
+import { isPlayerOpen } from './osd.js';
 
 // --- Virtualization Constants ---
 let rowHeight = 64; // Pixel height of one channel row. Measured from --row-h in guide.css on every render.
@@ -53,14 +54,6 @@ export const progData = (channel, prog) => {
         progTitle: prog.title, progDesc: prog.desc, progStart: start.toISOString(), progStop: stop.toISOString(),
         progId: progId(channel.id, start, stop),
     };
-};
-
-/** The programme on now and the one after it for a channel. */
-export const nowNext = (channelId, nowMs = Date.now()) => {
-    const list = guideState.programs[channelId] || [];
-    const i = list.findIndex(p => new Date(p.stop) > nowMs);
-    if (i < 0) return {};
-    return new Date(list[i].start) <= nowMs ? { now: list[i], next: list[i + 1] } : { next: list[i] };
 };
 
 /** Flips a channel's favourite flag everywhere it is shown. */
@@ -985,16 +978,20 @@ export const scrollToChannel = (channelId) => {
 // --- Event Listeners ---
 
 /**
- * Moves focus to the channel with this number (typed on the remote).
+ * A channel number typed on the remote: zaps to it while watching, else moves focus to it in the guide.
  */
 const goToChannel = async (digits) => {
-    if (!UIElements.pageGuide.classList.contains('flex')) return;
-    const channel = guideState.visibleChannels.find(c => c.chno && Number(c.chno) === Number(digits));
+    const watching = isPlayerOpen();
+    if (!watching && !UIElements.pageGuide.classList.contains('flex')) return;
+    const hasNumber = (c) => c.chno && Number(c.chno) === Number(digits);
+    const channel = guideState.visibleChannels.find(hasNumber) || (watching && guideState.channels.find(hasNumber));
     if (!channel) {
         showNotification(`No channel ${Number(digits)} in this list.`, true);
-        return;
+    } else if (watching) {
+        playChannel(channel.url, channel.displayName || channel.name, channel.id);
+    } else if (await scrollToChannel(channel.id)) {
+        focusEl(UIElements.guideGrid.querySelector(`.channel-info[data-id="${CSS.escape(channel.id)}"]`));
     }
-    if (await scrollToChannel(channel.id)) focusEl(UIElements.guideGrid.querySelector(`.channel-info[data-id="${CSS.escape(channel.id)}"]`));
 };
 
 /** CH+/CH- (or Page Down/Up): jump a cell about one hour along the focused row. */

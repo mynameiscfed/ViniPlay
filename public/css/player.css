@@ -1,0 +1,329 @@
+/*
+ * Player: full-bleed video with an overlay header, a now/next card and a channels panel.
+ * The dialog sits in .scope-dark so its text stays light on video in both themes.
+ * Browser floor Chromium 76: no inset, :is(), :focus-visible or aspect-ratio.
+ */
+
+#video-modal {
+    padding: 0;
+    background: #000;
+    font-size: .9375rem;
+}
+
+#video-modal #video-modal-container {
+    position: relative;
+    width: 100% !important;
+    height: 100% !important;
+    min-width: 0;
+    min-height: 0;
+    max-width: none;
+    max-height: none;
+    border-radius: 0;
+    background: #000;
+    overflow: hidden;
+}
+
+/* Window resizing and the 16:9 lock make no sense full-bleed. */
+#video-resize-handle,
+#aspect-ratio-lock-btn {
+    display: none !important;
+}
+
+#video-modal #video-content {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    padding: 0;
+    border-radius: 0;
+}
+
+#videoElement {
+    object-fit: contain;
+}
+
+/* ---------- Header over the video ---------- */
+#video-modal #video-modal-header {
+    position: absolute;
+    top: 0;
+    right: 0;
+    left: 0;
+    z-index: 35;
+    padding: 1em 1.25em 2.4em !important;
+    border: 0;
+    border-radius: 0;
+    background: linear-gradient(rgba(0, 0, 0, .78), transparent);
+    transition: opacity .25s;
+}
+
+#video-modal #video-title {
+    color: #fff;
+    font: 700 1.3em/1.2 var(--f-disp);
+    letter-spacing: -.01em;
+}
+
+.pbtn {
+    display: grid;
+    place-items: center;
+    flex: none;
+    width: 2.7em;
+    height: 2.7em;
+    padding: 0 !important;
+    border: 0;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, .5);
+    color: #fff;
+    cursor: pointer;
+    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
+    transition: background-color .15s;
+}
+
+.pbtn:hover {
+    background: rgba(255, 255, 255, .24);
+}
+
+.pbtn.hidden {
+    display: none;
+}
+
+#video-modal #video-modal-header>div:last-child {
+    gap: .5em;
+}
+
+/* Header and card fade out when nothing has moved for a few seconds (see osd.js). */
+#video-modal.osd-idle #video-modal-header,
+#video-modal.osd-idle #player-osd {
+    opacity: 0;
+    pointer-events: none;
+}
+
+#video-modal.osd-idle {
+    cursor: none;
+}
+
+/* ---------- Now/next card ---------- */
+#player-osd {
+    position: absolute;
+    left: 1.5em;
+    bottom: 5em;
+    z-index: 30;
+    display: flex;
+    align-items: center;
+    gap: 1em;
+    box-sizing: border-box;
+    max-width: min(36em, calc(100% - 3em));
+    padding: .9em 1.2em .9em .9em;
+    border-radius: 1em;
+    background: rgba(10, 12, 19, .78);
+    -webkit-backdrop-filter: blur(14px);
+    backdrop-filter: blur(14px);
+    color: #fff;
+    transition: opacity .25s;
+}
+
+#player-osd.hidden {
+    display: none;
+}
+
+#osd-logo {
+    flex: none;
+    width: 3.6em;
+    height: 3.6em;
+    padding: .25em;
+    box-sizing: border-box;
+    border-radius: .8em;
+    background: rgba(255, 255, 255, .12);
+    object-fit: contain;
+}
+
+.osd-main {
+    min-width: 0;
+}
+
+.osd-top {
+    display: flex;
+    align-items: center;
+    gap: .6em;
+    color: rgba(255, 255, 255, .75);
+    font-weight: 650;
+}
+
+.osd-top .mono {
+    font-size: .88em;
+    color: rgba(255, 255, 255, .55);
+}
+
+#osd-now {
+    overflow: hidden;
+    margin: .15em 0 .35em;
+    font: 700 1.3em/1.2 var(--f-disp);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.osd-bar {
+    display: flex;
+    align-items: center;
+    gap: .7em;
+    color: rgba(255, 255, 255, .75);
+    font-size: .88em;
+    font-weight: 650;
+    font-variant-numeric: tabular-nums;
+}
+
+.osd-bar i {
+    position: relative;
+    flex: 1 1 auto;
+    min-width: 6em;
+    height: .32em;
+    border-radius: 1em;
+    background: rgba(255, 255, 255, .22);
+    overflow: hidden;
+}
+
+.osd-bar i b {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    background: var(--pk);
+}
+
+#osd-next {
+    overflow: hidden;
+    margin-top: .3em;
+    color: rgba(255, 255, 255, .6);
+    font-size: .88em;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* ---------- Channels panel ---------- */
+#player-channels {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 38;
+    display: flex;
+    flex-direction: column;
+    width: 24em;
+    max-width: 88%;
+    border-left: 1px solid var(--line);
+    background: rgba(10, 12, 19, .94);
+    -webkit-backdrop-filter: blur(16px);
+    backdrop-filter: blur(16px);
+    color: #fff;
+}
+
+#player-channels.hidden {
+    display: none;
+}
+
+.pc-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: .8em .9em .8em 1.2em;
+    border-bottom: 1px solid var(--line);
+    font: 700 1.1em var(--f-disp);
+}
+
+.pc-list {
+    flex: 1 1 auto;
+    padding: .4em;
+    overflow-y: auto;
+}
+
+.pc-row {
+    display: flex;
+    align-items: center;
+    gap: .8em;
+    width: 100%;
+    padding: .55em .7em;
+    border: 0;
+    border-radius: .8em;
+    background: transparent;
+    color: #fff;
+    text-align: left;
+    cursor: pointer;
+}
+
+.pc-row:hover {
+    background: var(--s3);
+}
+
+.pc-row.cur {
+    background: var(--tint-cy);
+    box-shadow: inset 0 0 0 1px var(--cy);
+}
+
+.pc-row img {
+    flex: none;
+    width: 2.6em;
+    height: 2.6em;
+    padding: .2em;
+    box-sizing: border-box;
+    border-radius: .6em;
+    background: var(--s4);
+    object-fit: contain;
+}
+
+.pc-row .t {
+    min-width: 0;
+    flex: 1 1 auto;
+    font-weight: 650;
+    line-height: 1.2;
+}
+
+.pc-row .t span,
+.pc-row .t small {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.pc-row .t small {
+    color: var(--tx3);
+    font-weight: 500;
+}
+
+.pc-row .no {
+    flex: none;
+    color: var(--tx3);
+    font: 600 .85em var(--f-mono);
+}
+
+/* ---------- TV: keep controls inside the safe area ---------- */
+html.tv #video-modal {
+    font-size: 1rem;
+}
+
+html.tv #video-modal #video-modal-header {
+    padding-right: 3.5vw !important;
+    padding-left: 3.5vw !important;
+}
+
+html.tv #player-osd {
+    left: 3.5vw;
+}
+
+/* ---------- Phone ---------- */
+@media (max-width: 767.98px) {
+    #player-osd {
+        right: 1em;
+        left: 1em;
+        bottom: 4.6em;
+    }
+
+    #video-modal #video-modal-header {
+        padding: .8em .8em 2em !important;
+    }
+
+    #video-modal #video-title {
+        font-size: 1.05em !important;
+    }
+}

@@ -139,9 +139,14 @@ function onKeyDown(e) {
         const cur = document.activeElement;
         const usable = cur && cur !== document.body && cur.matches?.(FOCUSABLE) && !cur.matches('video,input[type="range"]');
         if (!usable) {
-            // Nothing focused yet: the first arrow press lands on the page, or the rail on a TV.
-            const start = isTv() ? (UIElements.appRail?.querySelector('.ni.active') || UIElements.appRail?.querySelector('.ni')) : null;
-            if (start && getComputedStyle(UIElements.appRail).display !== 'none') { focusEl(start); e.preventDefault(); }
+            // Nothing focused yet: the first arrow press lands in the open dialog, or on the rail on a TV.
+            // (A focused video keeps its own arrow keys, which seek.)
+            const dialog = scope();
+            const rail = UIElements.appRail;
+            const start = cur?.matches?.('video') ? null
+                : dialog !== document ? [...dialog.querySelectorAll(FOCUSABLE)].find(visible)
+                : isTv() && rail && getComputedStyle(rail).display !== 'none' ? (rail.querySelector('.ni.active') || rail.querySelector('.ni')) : null;
+            if (start) { focusEl(start); e.preventDefault(); }
             return;
         }
         const next = pickNeighbour(cur, ARROWS[e.key]);
@@ -153,7 +158,7 @@ function onKeyDown(e) {
     if (e.key === 'Tab') { root.classList.add('kb'); return; }
 
     // Digits: the page that registered a handler decides what a typed number means (a channel).
-    if (digitHandler && /^\d$/.test(e.key) && scope() === document) {
+    if (digitHandler && /^\d$/.test(e.key) && (scope() === document || scope().id === 'video-modal')) {
         e.preventDefault();
         root.classList.add('kb');
         pushDigit(e.key);

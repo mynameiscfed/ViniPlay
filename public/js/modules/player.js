@@ -697,6 +697,7 @@ export const stopAndCleanupPlayer = async () => { // MODIFIED: Made function asy
     }
     retryCount = 0;
     currentChannelInfo = null;
+    document.dispatchEvent(new CustomEvent('playerstop'));
 
 
     // Explicitly tell the server to stop the stream process.
@@ -893,6 +894,7 @@ export const playChannel = (url, name, channelId) => {
 
     // Store current channel info for potential retries and overlays
     currentChannelInfo = { url, name, channelId, logo };
+    document.dispatchEvent(new CustomEvent('playchannel', { detail: channelId })); // osd.js shows the now/next card
     sendTelemetry('PLAYER_PLAY_CHANNEL', `playChannel initiated for "${name}" (${channelId})`, {
         url,
         profileId: guideState.settings.activeStreamProfileId

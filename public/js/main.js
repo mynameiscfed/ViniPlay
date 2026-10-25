@@ -27,6 +27,7 @@ import { initTelemetry } from './modules/telemetry.js';
 import { refreshHome } from './modules/home.js';
 import { initFocus } from './modules/focus.js';
 import { setupPalette } from './modules/palette.js';
+import { setupOsd } from './modules/osd.js';
 
 // The initializeCastApi function is no longer called directly from here,
 // but the cast.js module will handle its own initialization via the window callback.
@@ -646,8 +647,13 @@ function setupCoreEventListeners() {
 // --- App Start ---
 document.addEventListener('DOMContentLoaded', () => {
     initTelemetry();
-    initFocus();
-    setupPalette();
+    // main.js is evaluated twice (index.html loads it with ?v=, auth.js without), so wire the UI layer once.
+    if (!window.uiReady) {
+        window.uiReady = true;
+        initFocus();
+        setupPalette();
+        setupOsd();
+    }
     // NEW: Check for notification deep link parameters on initial load.
     const urlParams = new URLSearchParams(window.location.search);
     const channelId = urlParams.get('channelId');
