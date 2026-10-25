@@ -476,35 +476,19 @@ export async function stopRedirectStream(historyId, useKeepalive = false) {
 }
 
 /**
- * Fetches the structured VOD library (movies and series) from the server.
- * @returns {Promise<object|null>} An object like { movies: [], series: [] } or null on failure.
+ * One page of the VOD catalog. The server searches, filters and sorts, so the browser never holds the whole catalog.
+ * @param {{type?: string, group?: string, q?: string, page?: number, limit?: number}} params
+ * @returns {Promise<{items: object[], total: number}|null>} null on failure.
  */
-export async function fetchVodLibrary() {
-    console.log('[API] Fetching VOD library from /api/vod/library.');
-    // Add timestamp to prevent caching
-    const response = await apiFetch(`/api/vod/library?t=${Date.now()}`);
-    if (!response) {
-        console.error('[API] Failed to fetch VOD library: No response from apiFetch.');
-        return null;
-    }
+export async function fetchVodPage(params) {
+    const response = await apiFetch(`/api/vod/library?${new URLSearchParams(params)}`);
+    return response ? response.json() : null;
+}
 
-    try {
-        const library = await response.json();
-        console.log('[API] VOD library fetched successfully.');
-
-        // We expect the server to send { movies: [...], series: [...], categories: [...] }
-        if (library.movies && library.series && library.categories) {
-            return library;
-        } else {
-            console.error('[API] VOD library format is incorrect. Expected { movies: [], series: [], categories: [] }');
-            showNotification('Failed to parse VOD library from server.', true);
-            return null;
-        }
-    } catch (e) {
-        console.error('[API] Error parsing VOD library JSON:', e);
-        showNotification('Failed to parse VOD library.', true);
-        return null;
-    }
+/** The categories that have titles, as { movies: string[], series: string[] }. */
+export async function fetchVodGroups() {
+    const response = await apiFetch('/api/vod/groups');
+    return response ? response.json() : { movies: [], series: [] };
 }
 
 /**
@@ -514,8 +498,7 @@ export async function fetchVodLibrary() {
  */
 export async function fetchSeriesDetails(seriesId) {
     console.log(`[API] Fetching details for Series ID: ${seriesId} from /api/vod/series/${seriesId}.`);
-    // Add timestamp to prevent caching
-    const response = await apiFetch(`/api/vod/series/${seriesId}?t=${Date.now()}`);
+    const response = await apiFetch(`/api/vod/series/${seriesId}`);
     if (!response) {
         console.error(`[API] Failed to fetch details for Series ID ${seriesId}: No response from apiFetch.`);
         showNotification('Could not load series details.', true); // Use showNotification

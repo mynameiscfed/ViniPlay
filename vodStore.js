@@ -47,6 +47,11 @@ function createVodStore({ db, dbRun, dbAll, dbGet }) {
             }
         }
 
+        // Set once a series' episodes came from the provider, so a series without durations is not fetched on every open.
+        await run('ALTER TABLE series ADD COLUMN episodes_fetched_at TEXT').catch((e) => {
+            if (!e.message.includes('duplicate column name')) throw e;
+        });
+
         if (!(await dbGet(db, "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'ux_episodes_key'"))) {
             // Nothing made (series_id, season_num, episode_num) unique, so two requests for the same
             // uncached series could each insert every episode. Keep the lowest id per episode, point
@@ -185,9 +190,76 @@ function createVodStore({ db, dbRun, dbAll, dbGet }) {
                 ON CONFLICT(provider_id, episode_id) DO UPDATE SET
                     provider_stream_id = excluded.provider_stream_id, container_extension = excluded.container_extension, last_seen = excluded.last_seen`,
             (chunk) => chunk.flatMap((e) => [String(providerId), ids.get(`${e.season}:${e.episode}`), String(e.streamId), e.containerExtension || 'mp4', seenAt]));
+        await run('UPDATE series SET episodes_fetched_at = ? WHERE id = ?', [seenAt, seriesId]);
     }
 
-    return { ready, upsertCategories, upsertMovies, upsertSeries, removeStale, removeProvider, saveEpisodes };
+    // True once a provider has titles stored: a restart then has no reason to download the catalog again.
+    async function hasTitles(providerId) {
+        return !!(await dbGet(db, `SELECT 1 FROM provider_movie_relations WHERE provider_id = ?1 UNION ALL
+            SELECT 1 FROM provider_series_relations WHERE provider_id = ?1 LIMIT 1`, [String(providerId)]));
+    }
+
+    const KINDS = {
+        movie: { table: 'movies', rel: 'provider_movie_relations', key: 'movie_id', extra: 'r.stream_id, r.container_extension' },
+        series: { table: 'series', rel: 'provider_series_relations', key: 'series_id', extra: 'NULL AS stream_id, NULL AS container_extension' },
+    };
+    const kindsOf = (type) => (type === 'movies' ? ['movie'] : type === 'series' ? ['series'] : ['movie', 'series']);
+
+    // providers: [{ id, groups }]; groups is null for "every category", else the only categories this user may see.
+    function titleFilter(providers, group, q) {
+        const params = [];
+        const parts = providers.map(({ id, groups }) => {
+            params.push(String(id));
+            if (!groups) return 'r.provider_id = ?';
+            params.push(...groups);
+            return `(r.provider_id = ? AND t.category_name IN (${groups.map(() => '?').join(',')}))`;
+        });
+        let where = `(${parts.join(' OR ')})`;
+        if (group) { where += ' AND t.category_name = ?'; params.push(group); }
+        // shortcut: LIKE folds case for ASCII only, so "élève" will not match "Élève"; move to a normalized column or FTS5 if that matters.
+        if (q) { where += " AND t.name LIKE ? ESCAPE '\\'"; params.push(`%${q.replace(/[\\%_]/g, '\\$&')}%`); }
+        return { where, params };
+    }
+
+    /**
+     * One page of the catalog, movies and series merged and sorted by name, filtered in SQL so the
+     * browser never has to hold (or sort) 200k titles. Resolves to { rows, total }.
+     * The page is picked from ids and names only (CROSS JOIN makes SQLite walk the name index and stop
+     * early); the wide columns are read for the 50 rows that made it, not for every row skipped.
+     */
+    async function listTitles({ providers, type = 'all', group, q, page = 1, limit = 50 }) {
+        if (providers.length === 0) return { rows: [], total: 0 };
+        limit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 100);
+        const offset = (Math.max(parseInt(page, 10) || 1, 1) - 1) * limit;
+        const { where, params } = titleFilter(providers, group, q);
+        const kinds = kindsOf(type);
+        const all = kinds.flatMap(() => params);
+        const from = (k, join) => `FROM ${KINDS[k].table} t ${join} ${KINDS[k].rel} r ON r.${KINDS[k].key} = t.id WHERE ${where}`;
+        const ids = (k) => `SELECT * FROM (SELECT '${k}' AS type, t.id, t.name ${from(k, 'CROSS JOIN')} ORDER BY t.name COLLATE NOCASE, t.id LIMIT ${offset + limit})`;
+        const picked = await dbAll(db, `SELECT type, id FROM (${kinds.map(ids).join(' UNION ALL ')}) ORDER BY name COLLATE NOCASE, type, id LIMIT ${limit} OFFSET ${offset}`, all);
+        const details = await Promise.all(kinds.map((k) => {
+            const keys = picked.filter((row) => row.type === k).map((row) => row.id);
+            return keys.length === 0 ? [] : dbAll(db, `SELECT '${k}' AS type, t.id, t.provider_unique_id, t.name, t.year, t.description, t.logo, t.category_name, r.provider_id, ${KINDS[k].extra}
+                FROM ${KINDS[k].table} t JOIN ${KINDS[k].rel} r ON r.${KINDS[k].key} = t.id WHERE t.id IN (${keys.map(() => '?').join(',')})`, keys);
+        }));
+        const byKey = new Map(details.flat().map((row) => [`${row.type}:${row.id}`, row]));
+        const { total } = await dbGet(db, `SELECT ${kinds.map((k) => `(SELECT COUNT(*) ${from(k, 'JOIN')})`).join(' + ')} AS total`, all);
+        return { rows: picked.map((row) => byKey.get(`${row.type}:${row.id}`)).filter(Boolean), total };
+    }
+
+    /** The categories that have titles, per kind: { movie: [...], series: [...] }. */
+    async function listGroups(providers) {
+        const groups = { movie: [], series: [] };
+        if (providers.length === 0) return groups;
+        const { where, params } = titleFilter(providers);
+        for (const [kind, k] of Object.entries(KINDS)) {
+            groups[kind] = (await dbAll(db, `SELECT DISTINCT t.category_name AS name FROM ${k.table} t JOIN ${k.rel} r ON r.${k.key} = t.id
+                WHERE ${where} AND t.category_name IS NOT NULL ORDER BY name COLLATE NOCASE`, params)).map((row) => row.name);
+        }
+        return groups;
+    }
+
+    return { ready, upsertCategories, upsertMovies, upsertSeries, removeStale, removeProvider, saveEpisodes, hasTitles, listTitles, listGroups };
 }
 
 module.exports = { createVodStore };
