@@ -145,6 +145,8 @@ export function renderEpgMap() {
     const bulk = [...suggestions.values()].filter((s) => BULK.has(tierOf(s))).length;
     $('epg-map-accept-btn').classList.toggle('hidden', !bulk);
     $('epg-map-accept-btn').textContent = `Accept all (${bulk})`;
+    $('epg-map-reset-btn').classList.toggle('hidden', !suggestions.size);
+    $('epg-map-reset-btn').textContent = `Dismiss all suggestions (${suggestions.size})`;
     renderBulkBar();
 }
 
@@ -327,6 +329,16 @@ export function setupEpgMap() {
         }
     });
     $('epg-map-auto-btn').addEventListener('click', suggest);
+    $('epg-map-reset-btn').addEventListener('click', () => showConfirm('Dismiss all suggestions?',
+        `All ${suggestions.size} suggestions are removed; channels you already assigned keep their guide data. Then tick Also ask AI and press Suggest matches to match every channel again from scratch.`,
+        () => whileBusy(async () => {
+            const res = await apiFetch('/api/epg/suggest', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ all: true }) });
+            if (!res) return;
+            suggestions.clear();
+            selected.clear();
+            showNotification('Suggestions cleared. Ready to match again.');
+            renderEpgMap();
+        })));
     $('epg-map-accept-btn').addEventListener('click', () => {
         const set = {};
         suggestions.forEach((s, id) => { if (BULK.has(tierOf(s))) set[id] = s.epgId; });

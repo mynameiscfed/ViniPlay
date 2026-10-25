@@ -3590,6 +3590,12 @@ app.post('/api/epg/suggest', requireAuth, requireAdmin, async (req, res) => {
 app.get('/api/epg/suggest', requireAuth, requireAdmin, (req, res) => res.json({ suggestions: suggestStore.all() }));
 
 app.delete('/api/epg/suggest', requireAuth, requireAdmin, (req, res) => {
+    // {all: true} starts matching over: a re-run skips channels that still have a suggestion.
+    if (req.body?.all === true) {
+        if (epgMatchState.status === 'running') return res.status(409).json({ error: 'Matching is running. Wait for it to finish.' });
+        suggestStore.remove(suggestStore.all().map((s) => s.channelId));
+        return res.json({ success: true });
+    }
     const { channelIds } = req.body || {};
     if (!Array.isArray(channelIds) || !channelIds.every((v) => typeof v === 'string') || channelIds.length > 10000) {
         return res.status(400).json({ error: 'channelIds must be a list of channel ids.' });
