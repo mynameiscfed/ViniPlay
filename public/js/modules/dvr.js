@@ -11,6 +11,7 @@ import { handleSearchAndFilter } from './guide.js';
 import { navigateToProgramInGuide } from './notification.js';
 import { populateChannelSelector } from './multiview.js';
 import { ICONS } from './icons.js';
+import { escapeHtml } from './utils.js';
 import { stopAndCleanupPlayer, playRecordingOrDirectVideo, setActiveMediaTracking } from './player.js';
 
 /**
@@ -483,15 +484,6 @@ async function playCompletedTsFile(recording) {
 }
 
 
-function escapeHtml(str) {
-    if (!str) return '';
-    return String(str)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#039;');
-}
 
 let liveHeroTicker = null;
 
@@ -693,18 +685,18 @@ function renderScheduledJobs() {
         filteredUpcoming.forEach(job => {
             const startTime = new Date(job.startTime).toLocaleString();
             const endTime = new Date(job.endTime).toLocaleString();
-            const statusHTML = `<span class="status-badge ${job.status}">${job.status}</span>`;
+            const statusHTML = `<span class="status-badge ${escapeHtml(job.status)}">${escapeHtml(job.status)}</span>`;
             const conflictIcon = job.isConflicting ?
                 `<svg class="h-5 w-5 text-yellow-400" fill="currentColor" viewBox="0 0 20 20" title="This recording conflicts with another scheduled recording."><path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.21 3.03-1.742 3.03H4.42c-1.532 0-2.492-1.696-1.742-3.03l5.58-9.92zM10 13a1 1 0 110-2 1 1 0 010 2zm-1.75-5.25a.75.75 0 00-1.5 0v3.5a.75.75 0 001.5 0v-3.5z" clip-rule="evenodd" /></svg>` : '';
-            const userColumn = isAdmin ? `<td>${job.username || 'N/A'}</td>` : '';
+            const userColumn = isAdmin ? `<td>${escapeHtml(job.username || 'N/A')}</td>` : '';
 
             const tr = document.createElement('tr');
             tr.dataset.jobId = job.id;
             tr.innerHTML = `
-                <td class="max-w-xs truncate font-medium text-white" title="${job.programTitle}">${job.programTitle}</td>
+                <td class="max-w-xs truncate font-medium text-white" title="${escapeHtml(job.programTitle)}">${escapeHtml(job.programTitle)}</td>
                 <td class="max-w-xs truncate">
                     <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-gray-700/80 text-gray-200 text-xs font-medium border border-gray-600">
-                        ${job.channelName}
+                        ${escapeHtml(job.channelName)}
                     </span>
                 </td>
                 ${userColumn}
@@ -714,15 +706,15 @@ function renderScheduledJobs() {
                 <td class="text-center">${conflictIcon}</td>
                 <td class="text-right">
                     <div class="flex items-center justify-end gap-2">
-                        <button class="action-btn go-to-guide-btn" title="View in TV Guide" data-channel-id="${job.channelId}" data-program-start="${job.programStart || job.startTime}">
+                        <button class="action-btn go-to-guide-btn" title="View in TV Guide" data-channel-id="${escapeHtml(job.channelId)}" data-program-start="${escapeHtml(job.programStart || job.startTime)}">
                             ${ICONS.goToGuide}
                         </button>
                         ${job.status === 'scheduled' ? `
-                            <button class="action-btn edit-job-btn" title="Edit Schedule" data-job-id="${job.id}">
+                            <button class="action-btn edit-job-btn" title="Edit Schedule" data-job-id="${escapeHtml(job.id)}">
                                 ${ICONS.edit}
                             </button>
                         ` : ''}
-                        <button class="action-btn cancel-job-btn" title="Cancel Recording" data-job-id="${job.id}">
+                        <button class="action-btn cancel-job-btn" title="Cancel Recording" data-job-id="${escapeHtml(job.id)}">
                             ${ICONS.cancel}
                         </button>
                     </div>
@@ -747,17 +739,17 @@ function renderScheduledJobs() {
             const startTime = new Date(job.startTime).toLocaleString();
             const endTime = new Date(job.endTime).toLocaleString();
             const statusHTML = job.status === 'error' && job.errorMessage
-                ? `<button class="status-badge ${job.status} view-error-btn" data-job-id="${job.id}">${job.status}</button>`
-                : `<span class="status-badge ${job.status}">${job.status}</span>`;
-            const userColumn = isAdmin ? `<td>${job.username || 'N/A'}</td>` : '';
+                ? `<button class="status-badge ${escapeHtml(job.status)} view-error-btn" data-job-id="${escapeHtml(job.id)}">${escapeHtml(job.status)}</button>`
+                : `<span class="status-badge ${escapeHtml(job.status)}">${escapeHtml(job.status)}</span>`;
+            const userColumn = isAdmin ? `<td>${escapeHtml(job.username || 'N/A')}</td>` : '';
 
             const tr = document.createElement('tr');
             tr.dataset.jobId = job.id;
             tr.innerHTML = `
-                <td class="max-w-xs truncate font-medium text-white" title="${job.programTitle}">${job.programTitle}</td>
+                <td class="max-w-xs truncate font-medium text-white" title="${escapeHtml(job.programTitle)}">${escapeHtml(job.programTitle)}</td>
                 <td class="max-w-xs truncate">
                     <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-gray-700/80 text-gray-200 text-xs font-medium border border-gray-600">
-                        ${job.channelName}
+                        ${escapeHtml(job.channelName)}
                     </span>
                 </td>
                 ${userColumn}
@@ -766,10 +758,10 @@ function renderScheduledJobs() {
                 <td>${statusHTML}</td>
                 <td class="text-right">
                     <div class="flex items-center justify-end gap-2">
-                        <button class="action-btn go-to-guide-btn" title="View in TV Guide" data-channel-id="${job.channelId}" data-program-start="${job.programStart || job.startTime}">
+                        <button class="action-btn go-to-guide-btn" title="View in TV Guide" data-channel-id="${escapeHtml(job.channelId)}" data-program-start="${escapeHtml(job.programStart || job.startTime)}">
                             ${ICONS.goToGuide}
                         </button>
-                        <button class="action-btn delete-history-btn" title="Remove From History" data-job-id="${job.id}">
+                        <button class="action-btn delete-history-btn" title="Remove From History" data-job-id="${escapeHtml(job.id)}">
                             ${ICONS.cancel}
                         </button>
                     </div>
@@ -817,23 +809,23 @@ function renderCompletedRecordings() {
 
         filteredRecordings.forEach(rec => {
             const recordedOn = new Date(rec.startTime).toLocaleString();
-            const userColumn = isAdmin ? `<td class="max-w-xs truncate" title="${rec.username}">${rec.username || 'N/A'}</td>` : '';
+            const userColumn = isAdmin ? `<td class="max-w-xs truncate" title="${escapeHtml(rec.username)}">${escapeHtml(rec.username || 'N/A')}</td>` : '';
 
             const tr = document.createElement('tr');
             tr.dataset.recordingId = rec.id;
             tr.className = 'hover:bg-gray-700/30 transition-colors';
             tr.innerHTML = `
-                <td class="max-w-xs truncate font-medium text-white" title="${rec.programTitle}">
+                <td class="max-w-xs truncate font-medium text-white" title="${escapeHtml(rec.programTitle)}">
                     <div class="flex items-center gap-3">
                         <button class="play-recording-btn w-7 h-7 rounded-full bg-blue-600 hover:bg-blue-500 text-white flex items-center justify-center transition-colors shadow flex-shrink-0" title="Play Recording">
                             <svg class="w-3.5 h-3.5 fill-current ml-0.5" viewBox="0 0 20 20"><polygon points="5 3 19 10 5 17 5 3"/></svg>
                         </button>
-                        <span class="truncate font-semibold">${rec.programTitle}</span>
+                        <span class="truncate font-semibold">${escapeHtml(rec.programTitle)}</span>
                     </div>
                 </td>
                 <td class="max-w-xs truncate">
                     <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-gray-700/80 text-gray-200 text-xs font-medium border border-gray-600">
-                        ${rec.channelName}
+                        ${escapeHtml(rec.channelName)}
                     </span>
                 </td>
                 ${userColumn}
@@ -867,11 +859,11 @@ function renderCompletedRecordings() {
             card.innerHTML = `
                 <div>
                     <div class="flex items-center justify-between gap-2">
-                        <span class="text-xs bg-gray-800 text-gray-200 px-2 py-0.5 rounded font-medium border border-gray-700 truncate max-w-[150px]">${rec.channelName}</span>
+                        <span class="text-xs bg-gray-800 text-gray-200 px-2 py-0.5 rounded font-medium border border-gray-700 truncate max-w-[150px]">${escapeHtml(rec.channelName)}</span>
                         <span class="text-[11px] font-mono text-gray-400">${formatBytes(rec.fileSizeBytes)}</span>
                     </div>
-                    <h4 class="font-bold text-white text-base mt-2.5 line-clamp-2 group-hover:text-blue-400 transition-colors" title="${rec.programTitle}">
-                        ${rec.programTitle}
+                    <h4 class="font-bold text-white text-base mt-2.5 line-clamp-2 group-hover:text-blue-400 transition-colors" title="${escapeHtml(rec.programTitle)}">
+                        ${escapeHtml(rec.programTitle)}
                     </h4>
                     <p class="text-xs text-gray-400 mt-1.5 flex items-center gap-1.5">
                         <svg class="w-3.5 h-3.5 text-gray-500" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
@@ -1065,7 +1057,7 @@ export function setupDvrEventListeners() {
         if (stopBtn) {
             const jobId = stopBtn.dataset.jobId;
             const job = dvrState.scheduledJobs?.find(j => j.id == jobId);
-            const title = job ? ` "${job.programTitle}"` : '';
+            const title = job ? ` "${escapeHtml(job.programTitle)}"` : '';
             showConfirm('Stop Recording?', `Are you sure you want to stop the live capture${title}?`, async () => {
                 if (await apiFetch(`/api/dvr/jobs/${jobId}/stop`, { method: 'POST' })) {
                     showNotification('Recording stopped.');
@@ -1412,11 +1404,11 @@ function showConflictModal(conflictData) {
     const { newJob, conflictingJobs } = conflictData;
     let conflictList = '';
     conflictingJobs.forEach(job => {
-        conflictList += `<li class="text-sm">- ${job.programTitle} on ${job.channelName}</li>`;
+        conflictList += `<li class="text-sm">- ${escapeHtml(job.programTitle)} on ${escapeHtml(job.channelName)}</li>`;
     });
 
     const message = `
-        Could not schedule "${newJob.programTitle}".
+        Could not schedule "${escapeHtml(newJob.programTitle)}".
         <br><br>
         Your maximum number of simultaneous recordings would be exceeded.
         It conflicts with the following scheduled recording(s):

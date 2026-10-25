@@ -11,6 +11,7 @@ import { showNotification, openModal, closeModal, showConfirm, setButtonLoadingS
 import { handleGuideLoad } from './guide.js';
 import { navigate } from './ui.js';
 import { ICONS } from './icons.js';
+import { escapeHtml } from './utils.js';
 
 let currentSourceTypeForEditor = 'url';
 let hardwareChecked = false; // Flag to prevent re-checking hardware on every UI update
@@ -184,7 +185,7 @@ function populateHardwareInfoModal(hardware) {
         contentHTML += `
             <div class="mt-4 pt-4 border-t border-gray-700">
                 <h4 class="text-lg font-semibold text-white">Intel (VA-API)</h4>
-                <p class="text-xs text-gray-400 mb-2">GPU: ${hardware.intel_vaapi}</p>
+                <p class="text-xs text-gray-400 mb-2">GPU: ${escapeHtml(hardware.intel_vaapi)}</p>
                 <p class="text-sm mb-2">Uses the integrated GPU on Intel processors. A great low-power option for transcoding.</p>
                 <p class="text-sm font-semibold mb-1">Example Stream Command:</p>
                 <pre class="bg-gray-900 p-2 rounded-md text-xs text-gray-300 font-mono"><code>-hwaccel vaapi -hwaccel_output_format vaapi -i "{streamUrl}" -vf "format=nv12|vaapi,hwupload" -c:v h264_vaapi -preset medium -c:a aac -b:a 128k -f mpegts pipe:1</code></pre>
@@ -198,7 +199,7 @@ function populateHardwareInfoModal(hardware) {
         contentHTML += `
             <div class="mt-4 pt-4 border-t border-gray-700">
                 <h4 class="text-lg font-semibold text-white">AMD Radeon (VA-API)</h4>
-                <p class="text-xs text-gray-400 mb-2">GPU: ${hardware.radeon_vaapi}</p>
+                <p class="text-xs text-gray-400 mb-2">GPU: ${escapeHtml(hardware.radeon_vaapi)}</p>
                 <p class="text-sm mb-2">Uses the integrated GPU on Radeon processors. A great low-power option for transcoding.</p>
                 <p class="text-sm font-semibold mb-1">Example Stream Command:</p>
                 <pre class="bg-gray-900 p-2 rounded-md text-xs text-gray-300 font-mono"><code>-vaapi_device /dev/dri/renderD128 -hwaccel vaapi -hwaccel_output_format vaapi -i "{streamUrl}" -c:v h264_vaapi -qp 20 -vf scale_vaapi=format=nv12 -c:a aac -ac 2 -b:a 128k -f mpegts pipe:1</code></pre>
@@ -332,7 +333,7 @@ const renderUserSourceList = (user) => {
             <td class="px-3 py-2 text-center">
                 <input type="checkbox" class="user-source-checkbox h-4 w-4 text-blue-600 bg-gray-700 border-gray-600 rounded focus:ring-blue-500" ${isAllowed ? 'checked' : ''}>
             </td>
-            <td class="px-3 py-2 text-gray-300 font-medium">${source.name}</td>
+            <td class="px-3 py-2 text-gray-300 font-medium">${escapeHtml(source.name)}</td>
             <td class="px-3 py-2 text-right">
                 <button type="button" class="user-group-filter-btn text-xs font-bold py-1 px-3 rounded-full transition-colors ${isAllowed ? 'bg-blue-600 hover:bg-blue-500 text-white' : 'bg-gray-600 text-gray-400 cursor-not-allowed'}" ${isAllowed ? '' : 'disabled'}>
                     ${groupCount > 0 ? `${groupCount} Groups` : 'All Groups'}
@@ -538,8 +539,8 @@ const updateUserGroupFilterList = (type, selectedGroups, searchTerm = '') => {
     }
 
     listEl.innerHTML = filteredGroups.map(group => `
-        <div class="group-filter-item ${currentSelectedSet.has(group) ? 'selected' : ''}" data-group-name="${group.replace(/"/g, '&quot;')}">
-            ${group}
+        <div class="group-filter-item ${currentSelectedSet.has(group) ? 'selected' : ''}" data-group-name="${escapeHtml(group)}">
+            ${escapeHtml(group)}
         </div>
     `).join('');
 };
@@ -592,8 +593,8 @@ const updateGroupFilterList = (type, selectedGroups, searchTerm = '') => {
     }
 
     listEl.innerHTML = filteredGroups.map(group => `
-        <div class="group-filter-item ${currentSelectedSet.has(group) ? 'selected' : ''}" data-group-name="${group.replace(/"/g, '&quot;')}">
-            ${group}
+        <div class="group-filter-item ${currentSelectedSet.has(group) ? 'selected' : ''}" data-group-name="${escapeHtml(group)}">
+            ${escapeHtml(group)}
         </div>
     `).join('');
 };
@@ -652,10 +653,10 @@ const renderSourceTable = (sourceType) => {
         const tr = document.createElement('tr');
         tr.dataset.sourceId = source.id;
         tr.innerHTML = `
-            <td>${source.name}</td>
-            <td><span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${source.type === 'file' ? 'bg-blue-200 text-blue-800' : 'bg-purple-200 text-purple-800'}">${source.type}</span></td>
-            <td class="max-w-xs truncate" title="${pathDisplay}">${pathDisplay}</td>
-            <td><span class="text-xs font-medium text-gray-400">${source.statusMessage || 'N/A'}</span></td>
+            <td>${escapeHtml(source.name)}</td>
+            <td><span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${source.type === 'file' ? 'bg-blue-200 text-blue-800' : 'bg-purple-200 text-purple-800'}">${escapeHtml(source.type)}</span></td>
+            <td class="max-w-xs truncate" title="${escapeHtml(pathDisplay)}">${escapeHtml(pathDisplay)}</td>
+            <td><span class="text-xs font-medium text-gray-400">${escapeHtml(source.statusMessage || 'N/A')}</span></td>
             <td>${lastUpdated}</td>
             <td>${refreshText}</td>
             <td>
@@ -888,8 +889,8 @@ export const refreshUserList = async () => {
         if (!res) return;
         const users = await res.json();
         UIElements.userList.innerHTML = users.map(user => `
-            <tr data-user-id="${user.id}">
-                <td class="px-4 py-3 whitespace-nowrap text-sm text-white">${user.username}</td>
+            <tr data-user-id="${escapeHtml(user.id)}">
+                <td class="px-4 py-3 whitespace-nowrap text-sm text-white">${escapeHtml(user.username)}</td>
                 <td class="px-4 py-3 whitespace-nowrap text-sm">${user.isAdmin ? '<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-200 text-green-800">Admin</span>' : '<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-200 text-gray-800">User</span>'}</td>
                 <td class="px-4 py-3 whitespace-nowrap text-sm">${user.canUseDvr ? '<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-blue-200 text-blue-800">Yes</span>' : '<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-200 text-gray-800">No</span>'}</td>
                 <td class="px-4 py-3 whitespace-nowrap text-right text-sm font-medium">

@@ -6,7 +6,8 @@ require('dotenv').config();
 
 const express = require('express');
 const crypto = require('crypto');
-const { spawn, exec } = require('child_process');
+const { spawn, exec, execFile } = require('child_process');
+const { safeGet, assertSafeUrl, SsrfBlockedError } = require('./ssrfGuard');
 const http = require('http');
 const https = require('https');
 const fs = require('fs');
@@ -50,6 +51,37 @@ let detectedHardware = { nvidia: null, intel_qsv: null, intel_vaapi: null, radeo
 // Used to validate settings.
 const validFFmpegLogLevels = ["debug", "verbose", "info", "warning", "error"];
 
+// Protocols accepted as an FFmpeg input for /stream. Anything else (local paths, file:,
+// concat:, subfile:, pipe:, ...) would let a caller make FFmpeg read files from disk.
+const ALLOWED_STREAM_PROTOCOLS = ['http:', 'https:', 'rtmp:', 'rtmps:', 'rtsp:', 'rtsps:', 'rtp:', 'udp:', 'srt:', 'mms:', 'mmsh:'];
+
+function isAllowedStreamUrl(value) {
+    try {
+        return ALLOWED_STREAM_PROTOCOLS.includes(new URL(value).protocol);
+    } catch (e) {
+        return false;
+    }
+}
+
+/**
+ * Builds an FFmpeg argv array from a profile command template.
+ * The template is split into arguments BEFORE placeholders are substituted, so values
+ * such as a stream URL or user agent always land inside a single argument and can never
+ * inject extra FFmpeg options, however many spaces or quotes they contain.
+ * @param {string} template - Profile command, e.g. '-i "{streamUrl}" -c copy -f mpegts pipe:1'.
+ * @param {Object<string, string>} values - Placeholder name (without braces) to value.
+ * @param {string} logLevel - FFmpeg log level; falls back to 'warning' if not recognised.
+ * @returns {string[]}
+ */
+function buildFfmpegArgs(template, values, logLevel) {
+    const level = validFFmpegLogLevels.includes(logLevel) ? logLevel : 'warning';
+    const tokens = (String(template || '').match(/(?:[^\s"]+|"[^"]*")+/g) || []).map(arg => arg.replace(/^"|"$/g, ''));
+    const substituted = tokens.map(arg => arg.replace(/\{(\w+)\}/g, (match, name) =>
+        Object.prototype.hasOwnProperty.call(values, name) ? String(values[name]) : match
+    ));
+    return ['-v', `level+${level}`, ...substituted];
+}
+
 // --- ENHANCEMENT: For Server-Sent Events (SSE) ---
 // This map will store active client connections for real-time updates.
 const sseClients = new Map();
@@ -77,6 +109,7 @@ const VAPID_KEYS_PATH = path.join(DATA_DIR, 'vapid.json');
 const SOURCES_DIR = path.join(DATA_DIR, 'sources');
 const RAW_CACHE_DIR = path.join(SOURCES_DIR, 'raw_cache');
 const IMAGE_CACHE_DIR = path.join(DATA_DIR, 'image_cache'); // NEW: VOD poster image cache
+const IMAGE_PROXY_MAX_BYTES = 10 * 1024 * 1024; // Largest poster/logo the image proxy will fetch
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const DB_PATH = path.join(DATA_DIR, 'viniplay.db');
 const LIVE_CHANNELS_M3U_PATH = path.join(DATA_DIR, 'live_channels.m3u'); // Renamed
@@ -2530,9 +2563,13 @@ async function getStreamDurationSeconds(streamUrl, userAgentHeader) {
         return vodDurationCache.get(streamUrl);
     }
     return new Promise((resolve) => {
-        const uaFlag = userAgentHeader ? `-user_agent "${userAgentHeader.replace(/"/g, '')}"` : '';
-        const cmd = `ffprobe ${uaFlag} -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${streamUrl}"`;
-        exec(cmd, { timeout: 8000 }, (error, stdout) => {
+        if (!isAllowedStreamUrl(streamUrl)) {
+            return resolve(null);
+        }
+        // Pass arguments as an argv array (no shell) so the URL cannot run shell commands.
+        const args = userAgentHeader ? ['-user_agent', userAgentHeader] : [];
+        args.push('-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', streamUrl);
+        execFile('ffprobe', args, { timeout: 8000 }, (error, stdout) => {
             if (error || !stdout) {
                 return resolve(null);
             }
@@ -3762,6 +3799,10 @@ app.get('/stream', allowLocalOrAuth, async (req, res) => {
 
     console.log(`[STREAM] New request: URL=${streamUrl}, ProfileID=${profileId}, UserAgentID=${userAgentId}`);
     if (!streamUrl) return res.status(400).send('Error: `url` query parameter is required.');
+    if (!isAllowedStreamUrl(streamUrl)) {
+        console.warn(`[STREAM] Rejected stream URL with unsupported protocol: ${streamUrl}`);
+        return res.status(400).send('Error: unsupported stream URL protocol.');
+    }
 
     let settings = getSettings();
     // Check both streamProfiles and castProfiles arrays
@@ -3824,11 +3865,11 @@ app.get('/stream', allowLocalOrAuth, async (req, res) => {
         }
     }
 
-    const commandTemplate = `-v level+${settings.playerLogLevel} ` + profileCommand
-        .replace(/{streamUrl}/g, streamUrl)
-        .replace(/{userAgent}|{clientUserAgent}/g, userAgent.value);
-
-    const args = (commandTemplate.match(/(?:[^\s"]+|"[^"]*")+/g) || []).map(arg => arg.replace(/^"|"$/g, ''));
+    const args = buildFfmpegArgs(profileCommand, {
+        streamUrl,
+        userAgent: userAgent.value,
+        clientUserAgent: userAgent.value
+    }, settings.playerLogLevel);
 
     console.log(`[STREAM] FFmpeg command args: ffmpeg ${args.join(' ')}`);
     const ffmpeg = spawn('ffmpeg', args);
@@ -4615,7 +4656,7 @@ async function checkAndSendNotifications() {
 async function getMediaDurationSeconds(filePath) {
     return new Promise((resolve) => {
         if (!filePath || !fs.existsSync(filePath)) return resolve(null);
-        exec(`ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${filePath}"`, { timeout: 10000 }, (error, stdout) => {
+        execFile('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', filePath], { timeout: 10000 }, (error, stdout) => {
             if (error || !stdout) {
                 return resolve(null);
             }
@@ -4826,18 +4867,11 @@ class DvrSupervisor {
             await new Promise(r => setTimeout(r, 400));
         }
 
-        let commandStr = this.recProfile.command
-            .replace(/{streamUrl}/g, currentUrl)
-            .replace(/{userAgent}/g, this.userAgent.value);
-
-        if (this.isTs) {
-            commandStr = commandStr.replace(/{filePath}/g, 'pipe:1');
-        } else {
-            commandStr = commandStr.replace(/{filePath}/g, this.fullFilePath);
-        }
-
-        const fullCommand = `-v level+${this.settings.dvrLogLevel || 'warning'} ` + commandStr;
-        const args = (fullCommand.match(/(?:[^\s"]+|"[^"]*")+/g) || []).map(arg => arg.replace(/^"|"$/g, ''));
+        const args = buildFfmpegArgs(this.recProfile.command, {
+            streamUrl: currentUrl,
+            userAgent: this.userAgent.value,
+            filePath: this.isTs ? 'pipe:1' : this.fullFilePath
+        }, this.settings.dvrLogLevel);
 
         console.log(`[DVR_SUPERVISOR][${this.job.id}] Spawning FFmpeg (attempt ${this.retryCount + 1}/${this.maxRetries + 1}): ffmpeg ${args.join(' ')}`);
 
@@ -5920,9 +5954,16 @@ app.post('/api/validate-url', requireAuth, requireAdmin, async (req, res) => {
     }
     console.log(`[VALIDATE_URL] Testing URL: ${url}`);
     try {
-        await fetchUrlContent(url);
+        // safeGet blocks non-http(s) schemes and internal/private addresses on every redirect hop.
+        const { response } = await safeGet(url, { timeout: 30000 });
+        response.destroy(); // Only reachability matters; don't download the whole playlist/EPG.
         res.json({ success: true, message: 'URL is reachable and returned a successful response.' });
     } catch (error) {
+        if (error instanceof SsrfBlockedError) {
+            console.warn(`[VALIDATE_URL] Blocked: ${error.message}`);
+            const hint = /address/.test(error.message) ? ' To allow LAN sources, set SSRF_ALLOW_PRIVATE_NETWORKS=true or list the host in SSRF_ALLOWED_HOSTS.' : '';
+            return res.status(400).json({ success: false, error: `${error.message}${hint}` });
+        }
         res.status(400).json({ success: false, error: `URL is not reachable. Error: ${error.message}` });
     }
 });
@@ -5958,11 +5999,12 @@ app.get('/api/image-proxy', allowLocalOrAuth, (req, res) => {
         return res.status(400).send('Missing url parameter');
     }
 
-    // Validate URL
+    // Validate URL scheme and IP-literal hosts up front; hostnames are re-checked at connect time.
     try {
-        new URL(imageUrl);
+        assertSafeUrl(imageUrl);
     } catch (err) {
-        return res.status(400).send('Invalid URL');
+        console.warn(`[IMAGE_PROXY] Blocked URL ${imageUrl}: ${err.message}`);
+        return res.status(400).send('Invalid or disallowed URL');
     }
 
     // Generate a cache filename based on the URL hash
@@ -6004,15 +6046,18 @@ app.get('/api/image-proxy', allowLocalOrAuth, (req, res) => {
 
     console.log(`[IMAGE_PROXY] Fetching and caching image: ${imageUrl}`);
 
-    // Determine protocol (http or https)
-    const protocol = imageUrl.startsWith('https') ? https : http;
-
-    protocol.get(imageUrl, (imageRes) => {
+    safeGet(imageUrl, { timeout: 15000 }).then(({ response: imageRes }) => {
         // Check if response is an image
         const contentType = imageRes.headers['content-type'];
         if (!contentType || !contentType.startsWith('image/')) {
             console.error(`[IMAGE_PROXY] Invalid content type: ${contentType}`);
+            imageRes.destroy();
             return res.status(400).send('URL does not point to an image');
+        }
+        const declaredLength = parseInt(imageRes.headers['content-length'], 10);
+        if (declaredLength > IMAGE_PROXY_MAX_BYTES) {
+            imageRes.destroy();
+            return res.status(413).send('Image too large');
         }
 
         // Set response headers
@@ -6020,8 +6065,31 @@ app.get('/api/image-proxy', allowLocalOrAuth, (req, res) => {
         res.setHeader('Cache-Control', 'public, max-age=2592000'); // 30 days
         res.setHeader('X-Cache', 'MISS');
 
-        // Create write stream to save to cache
-        const fileStream = fs.createWriteStream(cacheFilePath);
+        // Write to a temp file and only move it into the cache once the full image arrived,
+        // so a truncated or oversized download is never served from cache.
+        const tempCachePath = `${cacheFilePath}.${process.pid}.${Date.now()}.tmp`;
+        const fileStream = fs.createWriteStream(tempCachePath);
+        let receivedBytes = 0;
+        let aborted = false;
+
+        const discardTemp = () => fs.unlink(tempCachePath, () => { });
+
+        imageRes.on('data', (chunk) => {
+            receivedBytes += chunk.length;
+            if (receivedBytes > IMAGE_PROXY_MAX_BYTES && !aborted) {
+                aborted = true;
+                console.warn(`[IMAGE_PROXY] Image exceeded ${IMAGE_PROXY_MAX_BYTES} bytes, aborting: ${imageUrl}`);
+                imageRes.destroy();
+                fileStream.destroy();
+                discardTemp();
+                res.destroy();
+            }
+        });
+        imageRes.on('error', () => {
+            aborted = true;
+            fileStream.destroy();
+            discardTemp();
+        });
 
         // Pipe to both cache and response
         imageRes.pipe(fileStream);
@@ -6029,16 +6097,19 @@ app.get('/api/image-proxy', allowLocalOrAuth, (req, res) => {
 
         // Save metadata when done
         fileStream.on('finish', () => {
+            if (aborted) return discardTemp();
             const meta = {
                 url: imageUrl,
                 contentType: contentType,
                 cachedAt: new Date().toISOString()
             };
             try {
+                fs.renameSync(tempCachePath, cacheFilePath);
                 fs.writeFileSync(cacheMetaPath, JSON.stringify(meta, null, 2));
                 console.log(`[IMAGE_PROXY] Cached image: ${urlHash}`);
             } catch (err) {
-                console.error(`[IMAGE_PROXY] Failed to write cache metadata:`, err.message);
+                console.error(`[IMAGE_PROXY] Failed to write cache entry:`, err.message);
+                discardTemp();
             }
         });
 
@@ -6047,9 +6118,13 @@ app.get('/api/image-proxy', allowLocalOrAuth, (req, res) => {
             // Continue serving even if cache write fails
         });
 
-    }).on('error', (err) => {
+    }).catch((err) => {
+        if (err instanceof SsrfBlockedError) {
+            console.warn(`[IMAGE_PROXY] Blocked ${imageUrl}: ${err.message}`);
+            return res.status(400).send('Invalid or disallowed URL');
+        }
         console.error(`[IMAGE_PROXY] Error fetching image from ${imageUrl}:`, err.message);
-        res.status(500).send('Failed to fetch image');
+        res.status(502).send('Failed to fetch image');
     });
 });
 

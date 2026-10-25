@@ -9,6 +9,7 @@ import { UIElements, guideState, appState } from './state.js';
 import { handleSearchAndFilter, scrollToChannel, openProgramDetails } from './guide.js';
 import { getVapidKey, subscribeToPush, addProgramNotification, getProgramNotifications, deleteProgramNotification, unsubscribeFromPush, clearPastNotifications } from './api.js';
 import { ICONS } from './icons.js'; // MODIFIED: Import the new icon library
+import { escapeHtml } from './utils.js';
 
 let isSubscribed = false;
 
@@ -140,7 +141,7 @@ export const addOrRemoveNotification = async (programDetails) => {
     if (existingNotification) {
         showConfirm(
             'Remove Notification?',
-            `Are you sure you want to remove the notification for "${programDetails.programTitle}"?`,
+            `Are you sure you want to remove the notification for "${escapeHtml(programDetails.programTitle)}"?`,
             async () => {
                 if (await deleteProgramNotification(existingNotification.id)) {
                     showNotification(`Notification for "${programDetails.programTitle}" removed.`);
@@ -260,18 +261,18 @@ export const renderNotifications = () => {
         const formattedNotificationTime = notificationTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
 
         return `
-            <div class="flex items-center p-4 border-b border-gray-700/50 hover:bg-gray-800 transition-colors rounded-md" data-notification-id="${notif.id}">
-                <img src="${notif.channelLogo || 'https://placehold.co/48x48/1f2937/d1d5db?text=?;&font=Inter'}" onerror="this.onerror=null; this.src='https://placehold.co/48x48/1f2937/d1d5db?text=?';" class="w-12 h-12 object-contain mr-4 flex-shrink-0 rounded-md bg-gray-700">
+            <div class="flex items-center p-4 border-b border-gray-700/50 hover:bg-gray-800 transition-colors rounded-md" data-notification-id="${escapeHtml(notif.id)}">
+                <img src="${escapeHtml(notif.channelLogo || 'https://placehold.co/48x48/1f2937/d1d5db?text=?;&font=Inter')}" onerror="this.onerror=null; this.src='https://placehold.co/48x48/1f2937/d1d5db?text=?';" class="w-12 h-12 object-contain mr-4 flex-shrink-0 rounded-md bg-gray-700">
                 <div class="flex-grow">
-                    <p class="font-semibold text-white text-md">${notif.programTitle || 'Untitled Program'}</p>
-                    <p class="text-gray-400 text-sm">${notif.channelName || 'Unknown Channel'} • ${formattedProgramTime}</p>
+                    <p class="font-semibold text-white text-md">${escapeHtml(notif.programTitle || 'Untitled Program')}</p>
+                    <p class="text-gray-400 text-sm">${escapeHtml(notif.channelName || 'Unknown Channel')} • ${formattedProgramTime}</p>
                     <p class="text-blue-400 text-xs mt-1">Will be notified at ${formattedNotificationTime} (${leadTimeMinutes} mins before)</p>
                 </div>
                 <div class="flex items-center gap-2 flex-shrink-0 ml-4">
-                    <button class="action-btn view-program-btn p-2 rounded-full hover:bg-gray-700" title="View in TV Guide" data-channel-id="${notif.channelId}" data-program-start="${notif.programStart}" data-program-id="${notif.programId}">
+                    <button class="action-btn view-program-btn p-2 rounded-full hover:bg-gray-700" title="View in TV Guide" data-channel-id="${escapeHtml(notif.channelId)}" data-program-start="${escapeHtml(notif.programStart)}" data-program-id="${escapeHtml(notif.programId)}">
                         ${ICONS.goToGuide}
                     </button>
-                    <button class="action-btn delete-notification-btn p-2 rounded-full hover:bg-red-900" title="Delete Notification" data-notification-id="${notif.id}">
+                    <button class="action-btn delete-notification-btn p-2 rounded-full hover:bg-red-900" title="Delete Notification" data-notification-id="${escapeHtml(notif.id)}">
                         ${ICONS.trash}
                     </button>
                 </div>
@@ -319,18 +320,18 @@ export const renderPastNotifications = () => {
         }
 
         return `
-            <div class="flex items-center p-4 border-b border-gray-700/50 hover:bg-gray-800 transition-colors rounded-md opacity-70" data-notification-id="${notif.id}">
-                <img src="${notif.channelLogo || 'https://placehold.co/48x48/1f2937/d1d5db?text=?;&font=Inter'}" onerror="this.onerror=null; this.src='https://placehold.co/48x48/1f2937/d1d5db?text=?';" class="w-12 h-12 object-contain mr-4 flex-shrink-0 rounded-md bg-gray-700">
+            <div class="flex items-center p-4 border-b border-gray-700/50 hover:bg-gray-800 transition-colors rounded-md opacity-70" data-notification-id="${escapeHtml(notif.id)}">
+                <img src="${escapeHtml(notif.channelLogo || 'https://placehold.co/48x48/1f2937/d1d5db?text=?;&font=Inter')}" onerror="this.onerror=null; this.src='https://placehold.co/48x48/1f2937/d1d5db?text=?';" class="w-12 h-12 object-contain mr-4 flex-shrink-0 rounded-md bg-gray-700">
                 <div class="flex-grow">
-                    <p class="font-semibold text-white text-md">${notif.programTitle || 'Untitled Program'}</p>
-                    <p class="text-gray-400 text-sm">${notif.channelName || 'Unknown Channel'} • ${formattedProgramTime}</p>
+                    <p class="font-semibold text-white text-md">${escapeHtml(notif.programTitle || 'Untitled Program')}</p>
+                    <p class="text-gray-400 text-sm">${escapeHtml(notif.channelName || 'Unknown Channel')} • ${formattedProgramTime}</p>
                     <p class="text-xs mt-1 text-gray-500">${statusText}</p>
                 </div>
                 <div class="flex items-center gap-2 flex-shrink-0 ml-4">
-                    <button class="action-btn view-program-btn p-2 rounded-full hover:bg-gray-700" title="View in TV Guide" data-channel-id="${notif.channelId}" data-program-start="${notif.programStart}" data-program-id="${notif.programId}">
+                    <button class="action-btn view-program-btn p-2 rounded-full hover:bg-gray-700" title="View in TV Guide" data-channel-id="${escapeHtml(notif.channelId)}" data-program-start="${escapeHtml(notif.programStart)}" data-program-id="${escapeHtml(notif.programId)}">
                         ${ICONS.goToGuide}
                     </button>
-                    <button class="action-btn delete-notification-btn p-2 rounded-full hover:bg-red-900" title="Delete Notification" data-notification-id="${notif.id}">
+                    <button class="action-btn delete-notification-btn p-2 rounded-full hover:bg-red-900" title="Delete Notification" data-notification-id="${escapeHtml(notif.id)}">
                         ${ICONS.trash}
                     </button>
                 </div>
@@ -350,7 +351,7 @@ const setupNotificationListEventListeners = () => {
             if (notification) {
                 showConfirm(
                     'Delete Notification?',
-                    `Are you sure you want to delete the notification for "${notification.programTitle}"?`,
+                    `Are you sure you want to delete the notification for "${escapeHtml(notification.programTitle)}"?`,
                     async () => {
                         if (await deleteProgramNotification(notificationId)) {
                             notificationChannel.postMessage({ type: 'refresh-notifications' });

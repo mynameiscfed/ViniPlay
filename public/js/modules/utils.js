@@ -3,6 +3,20 @@
  * * Contains generic helper and utility functions, like parsers.
  */
 
+const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+
+/**
+ * Escapes a value for safe insertion into HTML text or a quoted attribute.
+ * Use for every provider-supplied string (channel names, logos, programme titles,
+ * descriptions, URLs) that ends up in an innerHTML template.
+ * @param {*} value - Any value; null/undefined become an empty string.
+ * @returns {string}
+ */
+export function escapeHtml(value) {
+    if (value === null || value === undefined) return '';
+    return String(value).replace(/[&<>"']/g, ch => HTML_ESCAPES[ch]);
+}
+
 /**
  * Parses M3U playlist data into a structured array of channel objects.
  * @param {string} data - The raw M3U content as a string.

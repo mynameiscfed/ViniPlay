@@ -107,6 +107,19 @@ ViniPlay is designed for easy deployment using Docker.
     
     ```
 
+### Running as a non-root user
+
+The container drops root privileges at startup and runs ViniPlay (and every FFmpeg process it starts) as an unprivileged `viniplay` user, UID/GID `1000` by default. On startup it hands ownership of `/data` and `/dvr` to that user, so existing installs that were written as root keep working.
+
+To match the owner of your host folders, set `PUID` and `PGID` in your `.env` file (for example `PUID=1001` and `PGID=1001`). If you map `/dev/dri` for Intel QSV / VA-API, the user is added to the group that owns the render device automatically. Setting `PUID=0` restores the old run-as-root behaviour, which is not recommended.
+
+### Fetching images and validating URLs from your LAN
+
+The image proxy (VOD posters) and the "test URL" button refuse to fetch internal addresses (loopback, link-local/cloud metadata, and private LAN ranges such as `192.168.x.x`) and only follow `http`/`https` redirects that pass the same checks. If your posters or sources live on your own network, add one of these to `.env`:
+
+-   `SSRF_ALLOW_PRIVATE_NETWORKS=true` allows private LAN ranges (loopback and metadata addresses stay blocked).
+-   `SSRF_ALLOWED_HOSTS=dispatcharr.lan,192.168.1.20` exempts specific hosts.
+
 ### Method 2: Using `docker`
 
 1.  **Build the Image:**
