@@ -171,16 +171,19 @@
 }
 
 .chc-meta {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--sp-2);
     color: var(--tx3);
     font-size: var(--t-small);
     font-variant-numeric: tabular-nums;
+}
+
+.chc-meta-t {
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-}
-
-.chc-meta:empty {
-    display: none;
 }
 
 .chc-now {

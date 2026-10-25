@@ -364,7 +364,7 @@
   /* Layout: gutters grow with the viewport; prose and forms get a reading measure, pages do not. */
   --gutter: 1rem;
   --measure: 46rem;
-  --card-min: 15rem;
+  --card-min: 18rem;
 
   /* Layout metrics the shell and pages share. */
   --rail-w: 5.9em;

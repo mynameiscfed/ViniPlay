@@ -417,16 +417,17 @@ export const channelCardHTML = (channel) => {
     const name = channel.displayName || channel.name;
     const { now } = nowNext(channel.id);
     const meta = [channel.chno, channel.group].filter(Boolean).map(escapeHtml).join(' · ');
+    let left = '';
     let nowHTML = '<div class="chc-none">No guide</div>';
     if (now) {
         const start = new Date(now.start), stop = new Date(now.stop);
         const pct = Math.min(100, Math.max(0, ((Date.now() - start) / (stop - start)) * 100));
-        const left = Math.max(1, Math.round((stop - Date.now()) / 60000));
-        nowHTML = `<div class="chc-now"><span class="chc-prog">${escapeHtml(now.title)}</span><span class="chc-left">${left} min left</span></div><div class="chc-bar" aria-hidden="true"><i style="width:${pct}%"></i></div>`;
+        left = `<span class="chc-left">${Math.max(1, Math.round((stop - Date.now()) / 60000))} min left</span>`;
+        nowHTML = `<div class="chc-now"><span class="chc-prog">${escapeHtml(now.title)}</span></div><div class="chc-bar" aria-hidden="true"><i style="width:${pct}%"></i></div>`;
     }
     const logo = channel.logo ? `<img src="${escapeHtml(channel.logo)}" alt="" loading="lazy" onerror="this.onerror=null;this.remove()">` : '';
     const fav = channel.isFavorite;
-    return `<div class="chc"><button type="button" class="chc-main" data-longpress data-url="${escapeHtml(channel.url)}" data-name="${escapeHtml(name)}" data-id="${escapeHtml(channel.id)}" title="${escapeHtml(name)}"><span class="chc-logo" aria-hidden="true"><b>${escapeHtml(monogram(name))}</b>${logo}</span><span class="chc-text"><span class="chc-name">${escapeHtml(name)}</span><span class="chc-meta">${meta}</span>${nowHTML}</span></button><button type="button" class="favorite-star chc-fav ${fav ? 'favorited' : ''}" data-channel-id="${escapeHtml(channel.id)}" aria-pressed="${fav}" aria-label="${fav ? 'Remove' : 'Add'} ${escapeHtml(name)} ${fav ? 'from' : 'to'} favorites">${ICONS.star}</button></div>`;
+    return `<div class="chc"><button type="button" class="chc-main" data-longpress data-url="${escapeHtml(channel.url)}" data-name="${escapeHtml(name)}" data-id="${escapeHtml(channel.id)}" title="${escapeHtml(name)}"><span class="chc-logo" aria-hidden="true"><b>${escapeHtml(monogram(name))}</b>${logo}</span><span class="chc-text"><span class="chc-name">${escapeHtml(name)}</span><span class="chc-meta"><span class="chc-meta-t">${meta}</span>${left}</span>${nowHTML}</span></button><button type="button" class="favorite-star chc-fav ${fav ? 'favorited' : ''}" data-channel-id="${escapeHtml(channel.id)}" aria-pressed="${fav}" aria-label="${fav ? 'Remove' : 'Add'} ${escapeHtml(name)} ${fav ? 'from' : 'to'} favorites">${ICONS.star}</button></div>`;
 };
 
 /** Programme cells of one channel row. */

@@ -528,7 +528,12 @@
 
 /* Past: dimmed. Now: filled up to the current time. Selected: cyan edge. */
 .programme-item.past {
-    opacity: .5;
+    background: var(--s1);
+}
+
+.programme-item.past .prog-title,
+.programme-item.past .prog-time {
+    color: var(--tx3);
 }
 
 .programme-item.live {
