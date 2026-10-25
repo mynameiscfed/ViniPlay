@@ -431,10 +431,15 @@ function restoreDimensions() {
     }
 
     // 3. Channel column width
-    const defaultChannelWidth = window.innerWidth < 768 ? 64 : 180;
+    const isMobile = window.innerWidth < 768;
+    const defaultChannelWidth = isMobile ? 120 : 240;
     const channelWidth = getDeviceSetting('channelColumnWidth', guideState.settings?.channelColumnWidth || defaultChannelWidth);
     if (UIElements.guideGrid) {
-        const safeWidth = Math.min(window.innerWidth - 80, Math.max(50, channelWidth));
+        // On mobile the column can't be resized, so enforce a width that still fits a wrapped channel name
+        // (older saved values of 64px only had room for the logo) without eating more than ~40% of the screen.
+        const safeWidth = isMobile
+            ? Math.min(Math.max(110, Math.round(window.innerWidth * 0.4)), Math.max(110, channelWidth))
+            : Math.min(window.innerWidth - 80, Math.max(50, channelWidth));
         UIElements.guideGrid.style.setProperty('--channel-col-width', `${safeWidth}px`);
         if (guideState.settings) guideState.settings.channelColumnWidth = safeWidth;
         console.log(`[MAIN] Restored channel column width for this device: ${safeWidth}px`);
