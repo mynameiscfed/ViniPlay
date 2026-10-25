@@ -995,8 +995,9 @@
 @media (min-width: 1024px) {
     #page-settings > div {
         display: grid;
-        grid-template-columns: 13rem minmax(0, 1fr);
+        grid-template-columns: 11rem minmax(0, 1fr);
         gap: 2rem;
+        max-width: none; /* fill the screen, as in the mockup */
         align-items: start;
     }
 

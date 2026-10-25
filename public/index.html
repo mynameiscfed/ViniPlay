@@ -875,11 +875,22 @@
                             <button type="button" data-bulk="clear" class="bg-gray-600 hover:bg-gray-500 disabled:opacity-50 text-white font-bold py-1 px-3 rounded-md"></button>
                             <button type="button" data-bulk="none" class="text-gray-300 hover:text-white py-1 px-2">Clear selection</button>
                         </div>
-                        <div id="epg-map-scroll" class="overflow-auto bg-gray-900/50 rounded-lg" style="max-height:65vh">
+                        <div class="flex flex-wrap items-center justify-between gap-3 mb-2 text-sm text-gray-400">
+                            <label class="flex items-center gap-2">Rows per page
+                                <select id="epg-map-size" class="bg-gray-700 border border-gray-600 rounded-md px-2 py-1 text-white">
+                                    <option>10</option><option>25</option><option>50</option>
+                                </select></label>
+                            <span id="epg-map-range"></span>
+                            <div class="flex items-center gap-2">
+                                <button type="button" id="epg-map-prev" class="bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-white font-bold py-1 px-3 rounded-md">‹ Previous</button>
+                                <button type="button" id="epg-map-next" class="bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-white font-bold py-1 px-3 rounded-md">Next ›</button>
+                            </div>
+                        </div>
+                        <div id="epg-map-scroll" class="bg-gray-900/50 rounded-lg">
                             <table class="min-w-full sources-table">
-                                <thead class="sticky top-0 z-10 bg-gray-800">
+                                <thead>
                                     <tr>
-                                        <th class="w-8"><input type="checkbox" id="epg-map-all" aria-label="Select every channel in this list"></th>
+                                        <th class="w-8"><input type="checkbox" id="epg-map-all" aria-label="Select every channel on this page"></th>
                                         <th>Channel</th>
                                         <th>Guide data</th>
                                         <th>Suggestion</th>
