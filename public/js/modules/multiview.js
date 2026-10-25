@@ -8,6 +8,7 @@ import { appState, guideState, UIElements } from './state.js';
 import { apiFetch, stopStream, startRedirectStream, stopRedirectStream, sendRedirectHeartbeat } from './api.js';
 import { showNotification, openModal, closeModal, showConfirm } from './ui.js';
 import { ICONS } from './icons.js';
+import { escapeHtml } from './utils.js';
 
 let grid;
 const players = new Map();
@@ -922,14 +923,14 @@ export function populateChannelSelector() {
 
     listEl.innerHTML = channelsToDisplay.map(channel => `
         <div class="channel-item flex items-center p-2 rounded-md hover:bg-gray-700 cursor-pointer" 
-             data-id="${channel.id}" 
-             data-name="${channel.displayName || channel.name}" 
-             data-url="${channel.url}"
-             data-logo="${channel.logo}">
-            <img src="${channel.logo}" onerror="this.onerror=null; this.src='https://placehold.co/40x40/1f2937/d1d5db?text=?';" class="w-10 h-10 object-contain mr-3 rounded-md bg-gray-700 flex-shrink-0">
+             data-id="${escapeHtml(channel.id)}" 
+             data-name="${escapeHtml(channel.displayName || channel.name)}" 
+             data-url="${escapeHtml(channel.url)}"
+             data-logo="${escapeHtml(channel.logo)}">
+            <img src="${escapeHtml(channel.logo)}" onerror="this.onerror=null; this.src='https://placehold.co/40x40/1f2937/d1d5db?text=?';" class="w-10 h-10 object-contain mr-3 rounded-md bg-gray-700 flex-shrink-0">
             <div class="overflow-hidden">
-                <p class="font-semibold text-white text-sm truncate">${channel.displayName || channel.name}</p>
-                <p class="text-gray-400 text-xs truncate">${channel.group || 'Uncategorized'}</p>
+                <p class="font-semibold text-white text-sm truncate">${escapeHtml(channel.displayName || channel.name)}</p>
+                <p class="text-gray-400 text-xs truncate">${escapeHtml(channel.group || 'Uncategorized')}</p>
             </div>
         </div>
     `).join('');

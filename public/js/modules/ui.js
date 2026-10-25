@@ -16,6 +16,7 @@ import { fetchConfig, saveUserSetting, saveDeviceSetting } from './api.js';
 import { initActivityPage } from './admin.js';
 import { initVodPage } from './vod.js';
 import { sendTelemetry } from './telemetry.js';
+import { escapeHtml } from './utils.js';
 
 
 let confirmCallback = null;
@@ -891,7 +892,7 @@ export function updateProcessingStatus(message, type = 'info') {
             break;
     }
 
-    logEntry.innerHTML = `<span class="text-gray-500">${timestamp}</span> <span class="${colorClass} font-semibold">${typeIndicator}</span> <span class="${colorClass}">${message}</span>`;
+    logEntry.innerHTML = `<span class="text-gray-500">${timestamp}</span> <span class="${colorClass} font-semibold">${typeIndicator}</span> <span class="${colorClass}">${escapeHtml(message)}</span>`;
     logContainer.appendChild(logEntry);
 
     // Auto-scroll to the bottom

@@ -9,6 +9,7 @@ import { openModal, closeModal, showNotification, showResumePrompt } from './ui.
 import { ICONS } from './icons.js';
 import { saveUserSetting, fetchVodLibrary, fetchSeriesDetails, getWatchProgress, deleteWatchProgress } from './api.js';
 import { playVOD } from './player.js';
+import { escapeHtml } from './utils.js';
 
 // Local state for VOD page
 const vodState = {
@@ -230,16 +231,16 @@ function renderVodGrid() {
             const proxiedLogo = displayLogo.startsWith('http') ? `/api/image-proxy?url=${encodeURIComponent(displayLogo)}` : displayLogo;
 
             return `
-                <div class="vod-item" data-id="${itemIdStr}">
+                <div class="vod-item" data-id="${escapeHtml(itemIdStr)}">
                     <span class="vod-type-badge">${itemType}</span>
                     <div class="vod-item-poster">
-                        <img src="${proxiedLogo}"
-                             alt="${displayName.replace(/"/g, '&quot;')}"
+                        <img src="${escapeHtml(proxiedLogo)}"
+                             alt="${escapeHtml(displayName)}"
                              onerror="this.onerror=null; this.src='${placeholderImageUrl}'; this.style.objectFit='cover';">
                     </div>
                     <div class="vod-item-info">
-                        <p class="vod-item-title" title="${displayName.replace(/"/g, '&quot;')}">${displayName}</p>
-                        <p class="vod-item-type">${displayGroup}</p>
+                        <p class="vod-item-title" title="${escapeHtml(displayName)}">${escapeHtml(displayName)}</p>
+                        <p class="vod-item-type">${escapeHtml(displayGroup)}</p>
                     </div>
                 </div>
             `;
@@ -447,11 +448,11 @@ function renderEpisodeList(series, seasonNum) {
         const dateText = formatEpisodeDate(ep.air_date);
 
         return `
-            <div class="episode-item" data-id="${ep.id || ep.url}" data-url="${ep.url}" data-title="${originalTitle.replace(/"/g, '&quot;')}">
-                <div class="episode-item-epnum">${epNum}</div>
-                <div class="episode-item-title" title="${originalTitle.replace(/"/g, '&quot;')}">${epName}</div>
-                <div class="episode-item-duration">${durationText}</div>
-                <div class="episode-item-date">${dateText}</div>
+            <div class="episode-item" data-id="${escapeHtml(ep.id || ep.url)}" data-url="${escapeHtml(ep.url)}" data-title="${escapeHtml(originalTitle)}">
+                <div class="episode-item-epnum">${escapeHtml(epNum)}</div>
+                <div class="episode-item-title" title="${escapeHtml(originalTitle)}">${escapeHtml(epName)}</div>
+                <div class="episode-item-duration">${escapeHtml(durationText)}</div>
+                <div class="episode-item-date">${escapeHtml(dateText)}</div>
                 <button class="episode-item-play-btn" title="Play Episode" aria-label="Play Episode">
                     ${ICONS.play}
                 </button>
