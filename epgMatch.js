@@ -7,45 +7,124 @@ const MIN_CONFIDENCE = 0.3; // below this a suggestion is noise
 const CONFIDENT = 0.9; // at or above this a suggestion may be accepted in bulk
 
 // Playlist providers decorate names; none of these tell two channels apart.
-const NOISE = new Set(['hd', 'fhd', 'uhd', 'sd', '4k', 'hevc', 'h264', 'h265', 'raw', '50fps', '60fps', 'backup']);
+const NOISE = new Set(['hd', 'fhd', 'uhd', 'sd', '4k', 'hevc', 'h264', 'h265', 'raw', '50fps', '60fps', 'backup', 'tnt', 'ondemand']);
 
-/** "US: ESPN HD [Backup]" -> "espn". Spaces kept, for fuzzy search. */
+// Leading country/provider/category codes, dropped only while a real name still follows. A whitelist, not a
+// rule: stripping any 2-3 letters would mangle names like "BBC - One".
+// shortcut: extends for feeds we see; a pattern heuristic is deliberately avoided here.
+const PREFIXES = new Set([
+    'us', 'uk', 'fr', 'de', 'es', 'it', 'nl', 'pt', 'se', 'no', 'dk', 'fi', 'ro', 'pl', 'tr', 'gr', 'at', 'ch', 'be', 'ru', 'ua', 'cz', 'hu', 'bg', 'rs', 'hr', 'ba', 'mk',
+    'ae', 'sa', 'qa', 'eg', 'egy', 'ma', 'dz', 'tn', 'ly', 'sd', 'iq', 'jo', 'lb', 'sy', 'ye', 'om', 'kw', 'bh', 'so', 'mr', 'ps',
+    'in', 'pk', 'bd', 'lk', 'id', 'my', 'sg', 'th', 'vn', 'ph', 'jp', 'kr', 'cn', 'tw', 'hk', 'af', 'ir',
+    'ca', 'mx', 'br', 'ar', 'cl', 'co', 'pe', 've', 'ec', 'uy', 'py', 'bo', 'cr', 'pa', 'do', 'hn', 'gt', 'sv', 'ni', 'pr', 'cu',
+    'au', 'nz', 'za', 'ng', 'gh', 'ke', 'et', 'tz', 'ug', 'rw', 'sn',
+    'art', 'aff', 'arsp', 'trsp',
+]);
+
+const NUMWORD_RE = /(one|two|three|four|five|six|seven|eight|nine|zero)\b/g;
+const NUMWORDS = { zero: '0', one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9' };
+
+// Latin spellings of the same Arabic name, canonicalized to one. Arabic-script input still needs a full map.
+const ALIASES = { misr: 'masr', arriyadia: 'arryadia', khalijia: 'khaleejia', khaleejiya: 'khaleejia' };
+
+/** A time-shift marker ("+1", "plus 2"): a shifted channel is not the same channel as its base. */
+function shiftOf(s) {
+    const str = String(s ?? '');
+    let m = str.match(/\+\s*(\d+)/);
+    if (m) return +m[1];
+    m = str.match(/\bplus\s*(\d+)\b/i);
+    return m ? +m[1] : null;
+}
+
+/** "AR-SP| MA ARRYADIA TNT" -> "arryadia", "ESPN +1" -> "espn +1" (the shift is kept: +1 and base differ). */
 function normalizeName(s) {
-    return String(s ?? '')
+    let str = String(s ?? '')
         .normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
         .toLowerCase()
         .replace(/[[(].*?[\])]/g, ' ')
-        .replace(/^\s*[a-z]{2,3}\s*(?::|\||\s-\s)\s*/, '') // "US:" "UK |" "FR - " country/provider prefix; not "BBC-One"
         .replace(/&/g, ' and ')
-        .split(/[^a-z0-9]+/).filter((t) => t && !NOISE.has(t)).join(' ');
+        .replace(NUMWORD_RE, (_, w) => NUMWORDS[w]);
+    const shift = shiftOf(str);
+    str = str.replace(/\+\s*\d+|\bplus\s*\d+/gi, ' ');
+    let tokens = str.split(/[^a-z0-9]+/).filter(Boolean);
+    // "AR-SP|" splits to ["ar", "sp"]: rejoin hyphenated category codes so they drop as one prefix.
+    if (/^(ar|tr)$/.test(tokens[0] || '') && tokens[1] === 'sp') tokens = ['arsp', ...tokens.slice(2)];
+    let i = 0;
+    while (i < tokens.length - 1 && PREFIXES.has(tokens[i])) i++;
+    tokens = tokens.slice(i).map((t) => ALIASES[t] || t).filter((t) => !NOISE.has(t));
+    const out = tokens.join(' ');
+    return shift != null ? `${out} +${shift}` : out;
 }
 
 /** Spaces dropped too, so "ESPN 2" equals "ESPN2". */
 const nameKey = (s) => normalizeName(s).replace(/ /g, '');
 
+// Region words that appear in group titles and guide names; used to break "ESPN" into ESPN US / ESPN UK.
+const REGIONS = new Set(['usa', 'uk', 'france', 'germany', 'italy', 'spain', 'portugal', 'poland', 'greece', 'cyprus', 'turkey', 'canada', 'australia', 'brazil', 'mexico', 'argentina', 'india', 'pakistan',
+    'ksa', 'saudi', 'saudia', 'egypt', 'egy', 'uae', 'emirati', 'emirates', 'dubai', 'qatar', 'bahrain', 'kuwait', 'oman', 'lebanon', 'jordan', 'syria', 'iraq', 'yemen', 'palestine',
+    'morocco', 'maghreb', 'algeria', 'tunisia', 'libya', 'sudan']);
+
+/** The one guide channel whose tokens name the group's region, or null when the group names none or several. */
+function pickByGroup(hits, group, epgById) {
+    if (!group) return null;
+    const groupTokens = String(group).toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+    for (const token of groupTokens) {
+        if (!REGIONS.has(token)) continue;
+        const matches = [...hits].filter((id) => {
+            const c = epgById.get(id);
+            return [...(c?.names || []), c?.id || id].join(' ').toLowerCase().split(/[^a-z0-9]+/).includes(token);
+        });
+        if (matches.length === 1) return matches[0];
+        if (matches.length > 1) return null; // the group names more than one candidate: still ambiguous
+    }
+    return null;
+}
+
 /**
- * @param {Map<string,{originalId:string,name:string}>} channels playlist channels by their prefixed id
+ * @param {Map<string,{originalId:string,name:string,tvgName?:string,group?:string}>} channels playlist channels by their prefixed id
  * @param {Object<string,string>} overrides channel id -> XMLTV channel id (manual)
  * @param {{id:string,names:string[]}[]} epgChannels what the guides declare
  * @returns {Map<string,string[]>} XMLTV channel id -> playlist channel ids that take its programmes
  */
 function buildTargets({ channels, overrides = {}, epgChannels }) {
-    const epgIds = new Set(epgChannels.map((c) => c.id));
+    const epgById = new Map(epgChannels.map((c) => [c.id, c]));
+    const epgIds = new Set(epgById.keys());
     const idsByName = new Map();
+    const index = (key, id) => { if (key) idsByName.set(key, (idsByName.get(key) || new Set()).add(id)); };
     for (const { id, names } of epgChannels) {
-        for (const n of names) {
-            const key = nameKey(n);
-            if (key) idsByName.set(key, (idsByName.get(key) || new Set()).add(id));
-        }
+        for (const n of names) index(nameKey(n), id);
+        // The id slug is often cleaner than the display-name ("arryadia.ma" vs "AR-SP| MA ARRYADIA TNT").
+        index(nameKey(id.replace(/\.[a-z]{2,3}$/i, '')), id);
     }
     const targets = new Map();
     const add = (xmltvId, channelId) => targets.set(xmltvId, [...(targets.get(xmltvId) || []), channelId]);
-    for (const [id, { originalId, name }] of channels) {
+
+    /** Exact key, then a base name whose guide names only add region/quality decoration ("Rotana Cinema" vs "… KSA"/"… Egypt"). */
+    const matchByName = (name, group) => {
+        if (!name) return null;
+        const hits = idsByName.get(nameKey(name));
+        if (hits) return hits.size === 1 ? [...hits][0] : pickByGroup(hits, group, epgById);
+        const base = normalizeName(name).split(' ').filter(Boolean);
+        if (!base.length) return null;
+        const cand = new Set();
+        for (const c of epgChannels) {
+            for (const n of [...c.names, c.id.replace(/\.[a-z]{2,3}$/i, '')]) {
+                const t = normalizeName(n).split(' ').filter(Boolean);
+                if (t.length > base.length && base.every((w, j) => t[j] === w) && t.slice(base.length).every((w) => REGIONS.has(w) || NOISE.has(w) || w.startsWith('+'))) {
+                    cand.add(c.id); break;
+                }
+            }
+        }
+        if (cand.size === 1) return [...cand][0];
+        return cand.size > 1 ? pickByGroup(cand, group, epgById) : null;
+    };
+
+    for (const [id, { originalId, name, tvgName, group }] of channels) {
         if (overrides[id]) { add(overrides[id], id); continue; }
         add(originalId, id);
         if (epgIds.has(originalId)) continue;
-        const hits = idsByName.get(nameKey(name));
-        if (hits?.size === 1) add([...hits][0], id); // several candidates: leave it for the user to pick
+        const matched = matchByName(name, group) || matchByName(tvgName, group);
+        if (matched) add(matched, id);
     }
     return targets;
 }
@@ -90,11 +169,21 @@ function createSuggester(epgChannels) {
     };
 }
 
-/** Top suggestion, demoted when the runner-up is nearly as good: bulk "accept all" must not take coin flips. */
+/**
+ * Top suggestion, demoted when the runner-up is nearly as good: bulk "accept all" must not take coin flips.
+ * A time-shifted channel only matches a same-shift guide, and a wrong shift is never "confident".
+ */
 function bestMatch(suggest, name) {
-    const [best, second] = suggest(name, 2);
+    const shift = shiftOf(name);
+    const found = suggest(name, 10);
+    let [best, second] = found;
+    if (shift != null) {
+        const same = found.find((c) => shiftOf(`${c.names[0]} ${c.id}`) === shift);
+        if (same) { best = same; second = undefined; }
+        else best = best ? { ...best, confidence: Math.min(best.confidence, CONFIDENT - 0.01) } : null;
+    }
     if (!best) return null;
     return second && best.confidence - second.confidence < 0.05 ? { ...best, confidence: best.confidence - 0.2 } : best;
 }
 
-module.exports = { normalizeName, nameKey, buildTargets, createSuggester, bestMatch, CONFIDENT };
+module.exports = { normalizeName, nameKey, shiftOf, buildTargets, createSuggester, bestMatch, CONFIDENT };

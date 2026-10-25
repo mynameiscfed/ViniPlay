@@ -58,3 +58,12 @@ test('a stream error rejects instead of hanging', async () => {
     const source = Readable.from((async function* () { yield programme('a', 'One'); throw new Error('boom'); })());
     await assert.rejects(collect(source), /boom/);
 });
+
+test('an empty channel id falls back to a name slug so the channel is still matchable', async () => {
+    const xml = '<tv><channel id=""><display-name>AR-SP| EGY ONTIME SPORTS PLUS</display-name></channel>' +
+        '<channel id=""><display-name>HD</display-name></channel></tv>';
+    const source = Readable.from([Buffer.from(xml)]);
+    const found = [];
+    await forEachChannel(source, (c) => found.push(c));
+    assert.deepStrictEqual(found, [{ id: 'ontimesportsplus', names: ['AR-SP| EGY ONTIME SPORTS PLUS'], synthetic: true }]);
+});
