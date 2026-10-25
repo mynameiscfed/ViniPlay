@@ -268,3 +268,101 @@ test('a failed schema step is reported and retried on the next call', async () =
     }
     await t.close();
 });
+
+// --- Paged library ---
+
+async function libraryFixture() {
+    const { t, store } = await setup();
+    await store.upsertMovies('p1', [
+        movie(1, { name: 'apple', categoryName: 'Action' }), movie(2, { name: 'Cherry', categoryName: 'Drama' }),
+        movie(3, { name: 'Banana 100%', categoryName: 'Action' }), movie(4, { name: 'Date_x', categoryName: 'Drama' }),
+    ], 'scan1');
+    await store.upsertSeries('p1', [series(1, { name: 'Blueberry', categoryName: 'Drama' }), series(2, { name: 'zebra', categoryName: 'Kids' })], 'scan1');
+    await store.upsertMovies('p2', [movie(5, { providerUniqueId: 'movie_p2_5', name: 'Elderberry', categoryName: 'Action' })], 'scan1');
+    return { t, store };
+}
+const names = (page) => page.rows.map((r) => r.name);
+
+test('listTitles merges movies and series by name, ignoring case, and pages through them', async () => {
+    const { t, store } = await libraryFixture();
+    const providers = [{ id: 'p1', groups: null }];
+
+    const first = await store.listTitles({ providers, page: 1, limit: 3 });
+    assert.deepStrictEqual(names(first), ['apple', 'Banana 100%', 'Blueberry']);
+    assert.strictEqual(first.total, 6);
+    assert.deepStrictEqual(names(await store.listTitles({ providers, page: 2, limit: 3 })), ['Cherry', 'Date_x', 'zebra']);
+    assert.deepStrictEqual(names(await store.listTitles({ providers, page: 3, limit: 3 })), []);
+
+    const row = first.rows[0];
+    assert.deepStrictEqual({ type: row.type, id: row.provider_unique_id, stream_id: row.stream_id, ext: row.container_extension, provider: row.provider_id, group: row.category_name },
+        { type: 'movie', id: 'movie_p1_1', stream_id: '1', ext: 'mkv', provider: 'p1', group: 'Action' });
+    assert.strictEqual(first.rows[2].type, 'series');
+    assert.strictEqual(first.rows[2].stream_id, null);
+    await t.close();
+});
+
+test('listTitles filters by type, category and search text, and treats % and _ in the search literally', async () => {
+    const { t, store } = await libraryFixture();
+    const providers = [{ id: 'p1', groups: null }];
+
+    assert.deepStrictEqual(names(await store.listTitles({ providers, type: 'series' })), ['Blueberry', 'zebra']);
+    assert.strictEqual((await store.listTitles({ providers, type: 'movies' })).total, 4);
+    assert.deepStrictEqual(names(await store.listTitles({ providers, group: 'Drama' })), ['Blueberry', 'Cherry', 'Date_x']);
+    assert.deepStrictEqual(names(await store.listTitles({ providers, q: 'BERRY' })), ['Blueberry']);
+    assert.deepStrictEqual(names(await store.listTitles({ providers, q: '100%' })), ['Banana 100%']);
+    assert.deepStrictEqual(names(await store.listTitles({ providers, q: '%' })), ['Banana 100%']);
+    assert.deepStrictEqual(names(await store.listTitles({ providers, q: '_' })), ['Date_x']);
+    assert.deepStrictEqual(names(await store.listTitles({ providers, q: 'a', group: 'Kids', type: 'series' })), ['zebra']);
+    const none = await store.listTitles({ providers, q: 'nothing like this' });
+    assert.deepStrictEqual([none.rows.length, none.total], [0, 0]);
+    await t.close();
+});
+
+test('listTitles only shows the providers and categories it is given', async () => {
+    const { t, store } = await libraryFixture();
+
+    assert.strictEqual((await store.listTitles({ providers: [] })).total, 0);
+    const both = await store.listTitles({ providers: [{ id: 'p1', groups: ['Kids'] }, { id: 'p2', groups: null }] });
+    assert.deepStrictEqual(names(both), ['Elderberry', 'zebra']);
+    assert.strictEqual(both.total, 2);
+    assert.deepStrictEqual(names(await store.listTitles({ providers: [{ id: 'p2', groups: ['Drama'] }] })), []);
+    await t.close();
+});
+
+test('listTitles caps the page size', async () => {
+    const { t, store } = await setup();
+    await store.upsertMovies('p1', Array.from({ length: 150 }, (_, i) => movie(i + 1)), 'scan1');
+    const page = await store.listTitles({ providers: [{ id: 'p1', groups: null }], limit: 5000 });
+    assert.strictEqual(page.rows.length, 100);
+    assert.strictEqual(page.total, 150);
+    await t.close();
+});
+
+test('listGroups lists the categories that have titles, per kind and per scope', async () => {
+    const { t, store } = await libraryFixture();
+
+    assert.deepStrictEqual(await store.listGroups([{ id: 'p1', groups: null }]), { movie: ['Action', 'Drama'], series: ['Drama', 'Kids'] });
+    assert.deepStrictEqual(await store.listGroups([{ id: 'p1', groups: ['Drama'] }, { id: 'p2', groups: null }]), { movie: ['Action', 'Drama'], series: ['Drama'] });
+    assert.deepStrictEqual(await store.listGroups([]), { movie: [], series: [] });
+    await t.close();
+});
+
+test('hasTitles tells whether a provider has anything stored', async () => {
+    const { t, store } = await libraryFixture();
+    assert.strictEqual(await store.hasTitles('p1'), true);
+    await store.upsertSeries('p3', [series(9, { providerUniqueId: 'series_p3_9' })], 'scan1');
+    assert.strictEqual(await store.hasTitles('p3'), true, 'series alone count');
+    assert.strictEqual(await store.hasTitles('p4'), false);
+    await t.close();
+});
+
+test('saving episodes marks the series, so its episodes are only fetched once', async () => {
+    const { t, store } = await setup();
+    await store.upsertSeries('p1', [series(1)], 'scan1');
+    const id = (await t.get("SELECT id FROM series WHERE provider_unique_id = 'series_p1_1'")).id;
+    assert.strictEqual((await t.get('SELECT episodes_fetched_at AS at FROM series WHERE id = ?', [id])).at, null);
+
+    await store.saveEpisodes(id, 'p1', [{ season: 1, episode: 1, name: 'Pilot', streamId: 11 }], '2024-05-01T00:00:00.000Z');
+    assert.strictEqual((await t.get('SELECT episodes_fetched_at AS at FROM series WHERE id = ?', [id])).at, '2024-05-01T00:00:00.000Z');
+    await t.close();
+});

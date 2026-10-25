@@ -296,7 +296,9 @@ const IMAGE_PROXY_MAX_BYTES = 10 * 1024 * 1024; // Largest poster/logo the image
 const IMAGE_PROXY_TYPES = new Set([
     'image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/avif', 'image/bmp', 'image/x-icon', 'image/vnd.microsoft.icon',
 ]);
-const IMAGE_CACHE_MAX_FILES = 2000;
+// Posters are ~30-100 KB, so this holds tens of thousands. Oldest first out; the cache used to hold only 1000 images.
+const IMAGE_CACHE_MAX_BYTES = 1024 * 1024 * 1024;
+const IMAGE_CACHE_CONTROL = 'public, max-age=2592000, immutable'; // 30 days; the /api middleware's no-cache must not apply to posters
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const DB_PATH = path.join(DATA_DIR, 'viniplay.db');
 const LIVE_CHANNELS_M3U_PATH = path.join(DATA_DIR, 'live_channels.m3u'); // Renamed
@@ -1982,14 +1984,14 @@ async function mergeEpg(req, settings, liveChannels, onlyIds, failedSources) {
 
 // Processing writes the merged files, so runs must not overlap (a timer, a manual
 // refresh and the startup pass could otherwise interleave their writes).
-function runSourceProcessing(req, onlyIds) {
-    const run = sourceProcessing.then(() => processAndMergeSources(req, onlyIds));
+function runSourceProcessing(req, onlyIds, keepStoredVod) {
+    const run = sourceProcessing.then(() => processAndMergeSources(req, onlyIds, keepStoredVod));
     sourceProcessing = run.catch(() => { });
     return run;
 }
 
 // onlyIds: refresh just those sources; the others are merged from their cached raw copy (fetched only if it is missing).
-async function processAndMergeSources(req, onlyIds) {
+async function processAndMergeSources(req, onlyIds, keepStoredVod = false) {
     console.log('[PROCESS] Starting to process and merge all active sources.');
     sendProcessingStatus(req, 'Starting to process sources...', 'info');
     const settings = getSettings();
@@ -2245,7 +2247,8 @@ async function processAndMergeSources(req, onlyIds) {
             sendProcessingStatus(req, ` -> Processed ${liveStreamCount} Live channels from "${source.name}".`, 'info');
 
             // --- NEW: Trigger VOD Refresh for XC Sources ---
-            if (source.type === 'xc' && !cached) {
+            // A restart or timezone change has no reason to download the whole VOD catalog again; a refresh does.
+            if (source.type === 'xc' && !cached && !(keepStoredVod && await vodStore.hasTitles(source.id))) {
                 console.log(`[PROCESS] Source "${source.name}" is XC. Triggering VOD refresh.`);
                 sendProcessingStatus(req, ` -> Triggering VOD content refresh for XC source "${source.name}"...`, 'info');
                 // Use setImmediate to run the VOD refresh *after* the current M3U processing finishes
@@ -2903,176 +2906,81 @@ app.get('/api/config', requireAuth, async (req, res) => {
     }
 });
 
-// Builds the /api/vod/library payload from the database. Only runs on a cache miss.
-async function buildVodLibrary(providerMap, allowedSources) {
-    const activeProviderIds = Array.from(providerMap.keys());
-    const providerIdPlaceholders = activeProviderIds.map(() => '?').join(',');
-
-    // 2. Fetch all movies from active providers
-    const movieQuery = `
-        SELECT m.provider_unique_id, m.name, m.year, m.description, m.logo, m.tmdb_id, m.imdb_id, m.category_name, r.stream_id, r.container_extension, r.provider_id
-        FROM movies m
-        JOIN provider_movie_relations r ON m.id = r.movie_id
-        WHERE r.provider_id IN (${providerIdPlaceholders})
-        ORDER BY m.name
-    `;
-    const movies = await dbAll(db, movieQuery, activeProviderIds);
-
-    const processedMovies = movies.map(m => {
-        const provider = providerMap.get(m.provider_id);
-        if (!provider) return null; // Skip if provider is not active
-
-        // PERMISSION CHECK: Filter by category if strict groups are defined
-        if (allowedSources) {
-            const perms = allowedSources[m.provider_id];
-            if (perms && perms.allowed) {
-                const allowedGroups = perms.groups || [];
-                // If whitelist exists (length > 0) AND this category is NOT in it, skip
-                if (allowedGroups.length > 0 && !allowedGroups.includes(m.category_name)) {
-                    return null;
-                }
-            }
-        }
-
-        const ext = m.container_extension || 'mp4';
-        // Build the full playable URL
-        const url = `${provider.baseUrl}/movie/${provider.username}/${provider.password}/${m.stream_id}.${ext}`;
-        return {
-            id: m.provider_unique_id, // Use the stable provider_unique_id
-            name: m.name,
-            year: m.year,
-            description: m.description,
-            logo: m.logo,
-            tmdb_id: m.tmdb_id,
-            imdb_id: m.imdb_id,
-            url: url, // The all-important URL
-            type: 'movie',
-            group: m.category_name
-        };
-    }).filter(Boolean); // Filter out null entries
-    console.log(`[API_VOD] Fetched ${processedMovies.length} movies from DB.`);
-
-    // 3. Fetch all series headers from active providers
-    // Added r.provider_id to SELECT so we can filter permissions
-    const seriesQuery = `
-        SELECT DISTINCT s.provider_unique_id, s.name, s.year, s.description, s.logo, s.tmdb_id, s.imdb_id, s.category_name, r.provider_id
-        FROM series s
-        JOIN provider_series_relations r ON s.id = r.series_id
-        WHERE r.provider_id IN (${providerIdPlaceholders})
-        ORDER BY s.name
-    `;
-    const seriesList = await dbAll(db, seriesQuery, activeProviderIds);
-
-    // Process series headers with permission checks
-    const processedSeries = seriesList.map(series => {
-        // PERMISSION CHECK: Filter by category if strict groups are defined
-        if (allowedSources) {
-            const perms = allowedSources[series.provider_id];
-            if (perms && perms.allowed) {
-                const allowedGroups = perms.groups || [];
-                // If whitelist exists (length > 0) AND this category is NOT in it, skip
-                if (allowedGroups.length > 0 && !allowedGroups.includes(series.category_name)) {
-                    return null;
-                }
-            }
-        }
-
-        return {
-            ...series,
-            type: 'series',
-            id: series.provider_unique_id, // Use the stable provider_unique_id
-            group: series.category_name
-            // seasons property removed as it is lazy loaded
-        };
-    }).filter(Boolean);
-
-    console.log(`[API_VOD] Processed ${processedSeries.length} series headers (filtered). Episodes will be lazy-loaded.`);
-
-    // FIX: Derive categories from the filtered content to ensure we only show relevant groups
-    const uniqueCategories = new Set();
-    processedMovies.forEach(m => {
-        if (m.group) uniqueCategories.add(m.group);
-    });
-    processedSeries.forEach(s => {
-        if (s.group) uniqueCategories.add(s.group);
-    });
-
-    const categoryNames = Array.from(uniqueCategories).sort();
-
-    return { movies: processedMovies, series: processedSeries, categories: categoryNames };
-}
-
-// --- NEW: VOD Library Endpoint (Reads from DB and builds URLs) ---
-app.get('/api/vod/library', requireAuth, async (req, res) => {
-    console.log('[API_VOD] Request received for /api/vod/library (DB Query)');
+// The XC providers this request may see (with the credentials that go into stream URLs) and the category
+// whitelist per provider. Throws if the permission data cannot be read.
+async function vodAccess(req) {
+    let allowedSources = null;
     try {
-        // FETCH USER PERMISSIONS
-        let allowedSources = null;
-        try {
-            const user = await userCache.get(req.session.userId);
-            if (user && user.isAdmin !== 1 && user.allowed_sources) {
-                allowedSources = JSON.parse(user.allowed_sources);
-            } else if (!user) {
-                allowedSources = {};
-            }
-        } catch (dbErr) {
-            console.error("[API_VOD] Error fetching user permissions:", dbErr);
-            // Fail closed: broken permission data must not grant the whole library.
+        const user = await userCache.get(req.session.userId);
+        if (user && user.isAdmin !== 1 && user.allowed_sources) {
+            allowedSources = JSON.parse(user.allowed_sources);
+        } else if (!user) {
             allowedSources = {};
         }
+    } catch (dbErr) {
+        console.error("[API_VOD] Error fetching user permissions:", dbErr);
+        // Fail closed: broken permission data must not grant the whole library.
+        allowedSources = {};
+    }
 
-        // 1. Get active XC providers from settings
-        const settings = getSettings();
-        let activeXcProviders = settings.m3uSources.filter(s => s.isActive && s.type === 'xc');
-
-        // FILTER PROVIDERS
-        if (allowedSources) {
-            activeXcProviders = activeXcProviders.filter(p => {
-                if (allowedSources[p.id]) {
-                    // Check if specifically allowed
-                    if (allowedSources[p.id].allowed) {
-                        return true;
-                    }
-                    return false;
-                }
-                // If allowedSources exists but source not in it, assume blocked (whitelist approach)
-                return false;
-            });
-            console.log(`[API_VOD] Filtered VOD providers for user ${req.session.username}. Allowed: ${activeXcProviders.map(p => p.name).join(', ')}`);
-        }
-
-        const providerMap = new Map();
-        activeXcProviders.forEach(p => {
+    const providerMap = new Map();
+    getSettings().m3uSources
+        .filter(s => s.isActive && s.type === 'xc' && (!allowedSources || allowedSources[s.id]?.allowed))
+        .forEach(p => {
             try {
                 const xcInfo = JSON.parse(p.xc_data);
                 const url = new URL(xcInfo.server);
                 providerMap.set(p.id, {
                     baseUrl: `${url.protocol}//${url.host}`,
                     username: xcInfo.username,
-                    password: xcInfo.password
+                    password: xcInfo.password,
+                    // An empty whitelist means every category.
+                    groups: allowedSources?.[p.id]?.groups?.length ? allowedSources[p.id].groups : null,
                 });
             } catch (e) {
                 console.error(`[API_VOD] Skipping provider ${p.name}, invalid XC data: ${e.message}`);
             }
         });
-        const activeProviderIds = Array.from(providerMap.keys());
-        if (activeProviderIds.length === 0) {
-            console.log('[API_VOD] No active XC providers found. Returning empty library.');
-            return res.json({ movies: [], series: [] });
-        }
+    return { providerMap, scope: Array.from(providerMap, ([id, p]) => ({ id, groups: p.groups })) };
+}
 
-        // Everything the response depends on: the providers and their credentials (they end up in the
-        // stream URLs) and, per provider, the categories this user is allowed to see.
-        const cacheKey = crypto.createHash('sha1').update(JSON.stringify(
-            activeProviderIds.map(id => [id, providerMap.get(id), allowedSources ? [...(allowedSources[id]?.groups || [])].sort() : null])
-        )).digest('hex');
-
-        const library = await vodLibraryCache.get(cacheKey, () => buildVodLibrary(providerMap, allowedSources));
-        await sendJson(req, res, library);
-
+// --- VOD library: one page at a time. Search, type, category and sort run in SQL, so loading the page
+// costs the same whether the catalog holds 2k or 200k titles. ---
+app.get('/api/vod/library', requireAuth, async (req, res) => {
+    try {
+        const { providerMap, scope } = await vodAccess(req);
+        const { type, group, q, page, limit } = req.query;
+        const { rows, total } = await vodStore.listTitles({
+            providers: scope, type, group: group && String(group), q: q && String(q).trim(), page, limit,
+        });
+        const items = rows.map(r => {
+            const item = { id: r.provider_unique_id, type: r.type, name: r.name, year: r.year, description: r.description, logo: r.logo, group: r.category_name };
+            if (r.type === 'movie') {
+                const p = providerMap.get(r.provider_id);
+                item.url = `${p.baseUrl}/movie/${p.username}/${p.password}/${r.stream_id}.${r.container_extension || 'mp4'}`;
+            }
+            return item;
+        });
+        await sendJson(req, res, Buffer.from(JSON.stringify({ items, total })));
     } catch (error) {
         console.error(`[API_VOD] Error fetching VOD library from DB: ${error.message}`, error);
         res.status(500).json({ error: "Could not retrieve VOD library from database." });
+    }
+});
+
+// The category lists for the filter dropdown, { movies: [...], series: [...] }. They only change when the catalog
+// does, so the serialized answer is kept per permission scope until a refresh invalidates it.
+app.get('/api/vod/groups', requireAuth, async (req, res) => {
+    try {
+        const { scope } = await vodAccess(req);
+        const body = await vodLibraryCache.get(JSON.stringify(scope), async () => {
+            const groups = await vodStore.listGroups(scope);
+            return { movies: groups.movie, series: groups.series };
+        });
+        await sendJson(req, res, body);
+    } catch (error) {
+        console.error(`[API_VOD] Error fetching VOD categories from DB: ${error.message}`, error);
+        res.status(500).json({ error: "Could not retrieve VOD categories from database." });
     }
 });
 
@@ -3156,7 +3064,8 @@ app.get('/api/vod/series/:seriesId', requireAuth, async (req, res) => {
         `, [numericSeriesId]);
 
         let episodesToReturn = existingEpisodes;
-        const needsEpisodeFetch = existingEpisodes.length === 0 || existingEpisodes.some(ep => !ep.duration && !ep.duration_secs);
+        // Episodes come from the provider once. A provider that never reports durations would otherwise be asked on every open.
+        const needsEpisodeFetch = existingEpisodes.length === 0 || (!seriesInfo.episodes_fetched_at && existingEpisodes.some(ep => !ep.duration && !ep.duration_secs));
 
         // Permission is checked before anything is returned, cached episodes or not.
         // An empty whitelist means no providers; a missing column keeps legacy full access.
@@ -4082,7 +3991,7 @@ app.post('/api/save/settings', requireAuth, requireAdmin, async (req, res) => {
 
         if (updatedSettings.timezoneOffset !== oldTimezone || updatedSettings.timeZone !== oldTimeZone) {
             console.log("[API] Timezone setting changed, re-processing sources.");
-            const result = await runSourceProcessing(null);
+            const result = await runSourceProcessing(null, undefined, true);
             saveProcessedSettings(result.updatedSettings);
             if (!result.success) console.warn(`[API] ${result.message}`);
         }
@@ -7201,23 +7110,29 @@ app.get('/api/public-ip', requireAuth, requireAdmin, (req, res) => {
 // Now with server-side disk caching for performance
 // The proxy is open to every LAN device by design, so keep its disk use bounded.
 let lastImageCachePrune = 0;
-function pruneImageCache() {
+async function pruneImageCache() {
     if (Date.now() - lastImageCachePrune < 10 * 60 * 1000) return;
     lastImageCachePrune = Date.now();
-    fs.readdir(IMAGE_CACHE_DIR, (err, files) => {
-        if (err || files.length <= IMAGE_CACHE_MAX_FILES) return;
+    try {
         const entries = [];
-        files.forEach((name) => {
+        for (const name of await fs.promises.readdir(IMAGE_CACHE_DIR)) {
             try {
-                entries.push({ name, mtime: fs.statSync(path.join(IMAGE_CACHE_DIR, name)).mtimeMs });
+                const { mtimeMs, size } = await fs.promises.stat(path.join(IMAGE_CACHE_DIR, name));
+                entries.push({ name, mtimeMs, size });
             } catch (e) { /* raced with another prune */ }
-        });
-        entries.sort((a, b) => a.mtime - b.mtime);
-        entries.slice(0, Math.max(0, entries.length - IMAGE_CACHE_MAX_FILES)).forEach(({ name }) => {
-            fs.unlink(path.join(IMAGE_CACHE_DIR, name), () => { });
-        });
-        console.log(`[IMAGE_PROXY] Cache pruned to ${IMAGE_CACHE_MAX_FILES} files.`);
-    });
+        }
+        let total = entries.reduce((sum, e) => sum + e.size, 0);
+        if (total <= IMAGE_CACHE_MAX_BYTES) return;
+        entries.sort((a, b) => a.mtimeMs - b.mtimeMs);
+        for (const { name, size } of entries) {
+            if (total <= IMAGE_CACHE_MAX_BYTES) break;
+            await fs.promises.unlink(path.join(IMAGE_CACHE_DIR, name)).catch(() => { });
+            total -= size;
+        }
+        console.log(`[IMAGE_PROXY] Cache pruned to ${Math.round(total / 1048576)} MB.`);
+    } catch (err) {
+        console.error('[IMAGE_PROXY] Cache prune failed:', err.message);
+    }
 }
 
 app.get('/api/image-proxy', allowLocalOrAuth, (req, res) => {
@@ -7250,28 +7165,12 @@ app.get('/api/image-proxy', allowLocalOrAuth, (req, res) => {
                 fs.unlinkSync(cacheFilePath);
                 fs.unlinkSync(cacheMetaPath);
             } else {
-                console.log(`[IMAGE_PROXY] Serving from cache: ${safeUrlForLog(imageUrl)}`);
-
-                // Set headers from cached metadata
-                res.setHeader('Content-Type', cachedType);
-                res.setHeader('Cache-Control', 'public, max-age=2592000'); // 30 days for cached images
-                res.setHeader('X-Cache', 'HIT');
-
-                // Stream cached file
-                const fileStream = fs.createReadStream(cacheFilePath);
-                fileStream.pipe(res);
-
-                fileStream.on('error', (err) => {
-                    console.error(`[IMAGE_PROXY] Error reading cached file:`, err.message);
-                    // If cache is corrupted, delete and fall through to fetch
-                    try {
-                        fs.unlinkSync(cacheFilePath);
-                        fs.unlinkSync(cacheMetaPath);
-                    } catch (e) { }
-                    res.status(500).send('Cache read error');
+                // sendFile adds ETag and Last-Modified, answers If-None-Match with a 304 and handles Range.
+                return res.sendFile(cacheFilePath, {
+                    dotfiles: 'allow', headers: { 'Content-Type': cachedType, 'Cache-Control': IMAGE_CACHE_CONTROL, 'X-Cache': 'HIT' },
+                }, (err) => {
+                    if (err && err.code !== 'ECONNABORTED' && !res.headersSent) res.status(500).send('Cache read error');
                 });
-
-                return;
             }
         } catch (err) {
             console.error(`[IMAGE_PROXY] Error reading cache metadata:`, err.message);
@@ -7297,7 +7196,7 @@ app.get('/api/image-proxy', allowLocalOrAuth, (req, res) => {
 
         // Set response headers
         res.setHeader('Content-Type', mime);
-        res.setHeader('Cache-Control', 'public, max-age=2592000'); // 30 days
+        res.setHeader('Cache-Control', IMAGE_CACHE_CONTROL);
         res.setHeader('X-Cache', 'MISS');
 
         // Write to a temp file and only move it into the cache once the full image arrived,
@@ -7600,7 +7499,7 @@ detectHardwareAcceleration().then(() => {
         console.log(` VINI PLAY server listening at http://localhost:${port}`);
         console.log(`======================================================\n`);
 
-        runSourceProcessing(null).then((result) => {
+        runSourceProcessing(null, undefined, true).then((result) => {
             console.log('[INIT] Initial source processing complete.');
             saveProcessedSettings(result.updatedSettings);
             if (!result.success) console.warn(`[INIT] ${result.message}`);

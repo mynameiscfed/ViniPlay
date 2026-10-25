@@ -86,6 +86,11 @@ const INDEX_DDL = [
     'CREATE INDEX IF NOT EXISTS ix_psr_series ON provider_series_relations(series_id)',
     'CREATE INDEX IF NOT EXISTS ix_per_episode ON provider_episode_relations(episode_id)',
     // episodes(series_id, season_num, episode_num) is a UNIQUE index created by vodStore.ready()
+    // The library grid pages the catalog by name; these let SQLite stop after one page instead of sorting 200k titles.
+    'CREATE INDEX IF NOT EXISTS ix_movies_name ON movies(name COLLATE NOCASE)',
+    'CREATE INDEX IF NOT EXISTS ix_series_name ON series(name COLLATE NOCASE)',
+    'CREATE INDEX IF NOT EXISTS ix_movies_cat_name ON movies(category_name, name COLLATE NOCASE)',
+    'CREATE INDEX IF NOT EXISTS ix_series_cat_name ON series(category_name, name COLLATE NOCASE)',
     // Admin activity history: ORDER BY / range filters on start_time
     'CREATE INDEX IF NOT EXISTS ix_stream_history_start ON stream_history(start_time)',
     // Notifications and the 60 s delivery checker

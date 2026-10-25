@@ -1,7 +1,7 @@
 // vodLibraryCache.js
-// /api/vod/library ran a JOIN + ORDER BY over every movie and series and serialized the result on
-// every hit, but the catalog only changes when a source refresh finishes. Keep the serialized
-// response per permission signature and drop everything when the catalog changes.
+// The VOD category lists need a DISTINCT scan over every movie and series, but the catalog only changes
+// when a source refresh finishes. Keep the serialized response per permission signature and drop
+// everything when the catalog changes.
 
 function createLibraryCache(maxEntries = 8) {
     const entries = new Map(); // key -> Promise<Buffer>; the promise is stored at once, so concurrent misses share one build
