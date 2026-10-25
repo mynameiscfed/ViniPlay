@@ -489,6 +489,10 @@
         display: none;
     }
 
+    #notification-modal-wrapper {
+        bottom: calc(var(--tabbar-h) + 1rem + env(safe-area-inset-bottom, 0px));
+    }
+
     .tabbar .ni {
         flex: 1;
         width: auto;

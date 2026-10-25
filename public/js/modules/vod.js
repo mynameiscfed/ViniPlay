@@ -231,7 +231,7 @@ function renderVodGrid() {
             const proxiedLogo = displayLogo.startsWith('http') ? `/api/image-proxy?url=${encodeURIComponent(displayLogo)}` : displayLogo;
 
             return `
-                <div class="vod-item" data-id="${escapeHtml(itemIdStr)}">
+                <div class="vod-item" tabindex="-1" role="button" data-id="${escapeHtml(itemIdStr)}">
                     <span class="vod-type-badge">${itemType}</span>
                     <div class="vod-item-poster">
                         <img src="${escapeHtml(proxiedLogo)}"
@@ -448,7 +448,7 @@ function renderEpisodeList(series, seasonNum) {
         const dateText = formatEpisodeDate(ep.air_date);
 
         return `
-            <div class="episode-item" data-id="${escapeHtml(ep.id || ep.url)}" data-url="${escapeHtml(ep.url)}" data-title="${escapeHtml(originalTitle)}">
+            <div class="episode-item" tabindex="-1" role="button" data-id="${escapeHtml(ep.id || ep.url)}" data-url="${escapeHtml(ep.url)}" data-title="${escapeHtml(originalTitle)}">
                 <div class="episode-item-epnum">${escapeHtml(epNum)}</div>
                 <div class="episode-item-title" title="${escapeHtml(originalTitle)}">${escapeHtml(epName)}</div>
                 <div class="episode-item-duration">${escapeHtml(durationText)}</div>

@@ -38,10 +38,10 @@
     <link rel="stylesheet" href="/css/tokens.css?v=2">
     <link rel="stylesheet" href="/css/tailwind.css?v=1">
     <link rel="stylesheet" href="/css/base.css?v=2">
-    <link rel="stylesheet" href="/css/shell.css?v=2">
+    <link rel="stylesheet" href="/css/shell.css?v=3">
     <link rel="stylesheet" href="/css/guide.css?v=1">
-    <link rel="stylesheet" href="/css/home.css?v=5">
-    <link rel="stylesheet" href="/css/legacy.css?v=2">
+    <link rel="stylesheet" href="/css/home.css?v=6">
+    <link rel="stylesheet" href="/css/legacy.css?v=6">
     <link rel="stylesheet" href="/css/player.css?v=1">
     <link rel="stylesheet" href="/css/tv.css?v=1">
 
@@ -254,61 +254,29 @@
 
             <!-- Multi-View Page -->
             <div id="page-multiview" class="hidden flex-grow flex-col overflow-hidden">
-                <div id="multiview-header"
-                    class="flex-shrink-0 bg-gray-800 p-2 border-b border-gray-700 flex items-center justify-between flex-wrap gap-2 z-20">
-                    <div class="flex items-center gap-2">
-                        <button id="multiview-add-player"
-                            class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-3 rounded-md text-sm transition-colors flex items-center gap-2">
-                            <span data-icon="addPlayer"></span>
-                            Add Player
-                        </button>
-                        <button id="multiview-remove-player"
-                            class="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-3 rounded-md text-sm transition-colors flex items-center gap-2">
-                            <span data-icon="removePlayer"></span>
-                            Remove Player
-                        </button>
+                <div id="multiview-header" class="mv-bar">
+                    <button id="multiview-add-player" type="button" class="btn btn-primary btn-sm"><span data-icon="addPlayer"></span>Add player</button>
+                    <button id="multiview-remove-player" type="button" class="btn btn-ghost btn-sm"><span data-icon="removePlayer"></span>Remove</button>
+                    <div class="seg" role="group" aria-label="Layout">
+                        <button id="layout-btn-auto" type="button">Auto</button>
+                        <button id="layout-btn-2x2" type="button">2×2</button>
+                        <button id="layout-btn-1x3" type="button">1 + 3</button>
                     </div>
-                    <div class="flex items-center gap-2">
-                        <span class="text-sm font-medium text-gray-400">Preset Layouts:</span>
-                        <button id="layout-btn-auto"
-                            class="bg-gray-700 hover:bg-gray-600 text-white font-bold py-2 px-3 rounded-md text-sm transition-colors">Auto</button>
-                        <button id="layout-btn-2x2"
-                            class="bg-gray-700 hover:bg-gray-600 text-white font-bold py-2 px-3 rounded-md text-sm transition-colors">2x2
-                            Grid</button>
-                        <button id="layout-btn-1x3"
-                            class="bg-gray-700 hover:bg-gray-600 text-white font-bold py-2 px-3 rounded-md text-sm transition-colors">1
-                            Large + 3</button>
-                    </div>
-                    <div class="flex items-center gap-2">
-                        <label for="saved-layouts-select" class="text-sm font-medium text-gray-400">Saved
-                            Layouts:</label>
-                        <select id="saved-layouts-select"
-                            class="bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm text-white focus:ring-blue-500 focus:border-blue-500">
-                            <option value="">-- Select --</option>
-                        </select>
-                        <button id="multiview-load-layout-btn"
-                            class="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-3 rounded-md text-sm transition-colors">Load</button>
-                        <button id="multiview-save-layout-btn"
-                            class="bg-purple-600 hover:bg-purple-700 text-white font-bold py-2 px-3 rounded-md text-sm transition-colors">Save
-                            Current</button>
-                        <button id="multiview-delete-layout-btn"
-                            class="bg-red-600 hover:bg-red-700 text-white font-bold p-2 rounded-md text-sm transition-colors"
-                            title="Delete Selected Layout">
-                            <span data-icon="trash"></span>
-                        </button>
-                    </div>
-
-                    <!-- NEW: Immersive Mode Toggle -->
-                    <div class="flex items-center gap-2 border-l border-gray-700 pl-4 ml-2">
-                        <label for="immersive-mode-toggle"
-                            class="text-sm font-medium text-gray-400 cursor-pointer">Immersive Mode</label>
-                        <label class="switch">
+                    <span class="grow"></span>
+                    <select id="saved-layouts-select" aria-label="Saved layouts" class="chip">
+                        <option value="">Saved layouts</option>
+                    </select>
+                    <button id="multiview-load-layout-btn" type="button" class="btn btn-ghost btn-sm">Load</button>
+                    <button id="multiview-save-layout-btn" type="button" class="btn btn-ghost btn-sm">Save current</button>
+                    <button id="multiview-delete-layout-btn" type="button" class="btn btn-ghost btn-sm btn-icon" title="Delete selected layout"><span data-icon="trash"></span></button>
+                    <label class="mv-imm" for="immersive-mode-toggle">Immersive
+                        <span class="switch">
                             <input type="checkbox" id="immersive-mode-toggle">
                             <span class="slider"></span>
-                        </label>
-                    </div>
+                        </span>
+                    </label>
                 </div>
-                <div id="multiview-container" class="flex-grow bg-gray-900 overflow-auto relative custom-scrollbar p-2">
+                <div id="multiview-container" class="flex-grow overflow-auto relative custom-scrollbar p-2">
                     <div id="multiview-grid" class="grid-stack"></div>
                 </div>
             </div>
@@ -805,6 +773,7 @@
             <!-- Settings Page -->
             <div id="page-settings" class="hidden flex-grow flex-col items-center p-4 overflow-y-auto custom-scrollbar">
                 <div class="w-full max-w-6xl mx-auto space-y-8 pb-16">
+                    <nav id="settings-nav" aria-label="Sections"></nav>
                     <!-- *** FIX: Admin Section Visibility *** -->
                     <!-- Removed the 'hidden' class from this div. Its visibility is now controlled -->
                     <!-- by the logic that shows/hides the entire '#page-settings' container. -->
@@ -1718,17 +1687,16 @@
                     <dl class="shortcut-list">
                         <div><dt><kbd>Enter</kbd></dt><dd>Watch the channel</dd></div>
                         <div><dt>Hold <kbd>Enter</kbd></dt><dd>Program details</dd></div>
-                        <div><dt><kbd>CH +</kbd><kbd>CH -</kbd></dt><dd>Page by one hour</dd></div>
+                        <div><dt><kbd>Page Up</kbd><kbd>Page Down</kbd></dt><dd>Move the guide by one hour (CH +/- on a remote)</dd></div>
                         <div><dt><kbd>0-9</kbd></dt><dd>Go to a channel number</dd></div>
                     </dl>
                 </div>
                 <div>
                     <p class="eyebrow mb-2">Player</p>
                     <dl class="shortcut-list">
-                        <div><dt><kbd>Space</kbd></dt><dd>Play or pause</dd></div>
-                        <div><dt><kbd>&uarr;</kbd><kbd>&darr;</kbd></dt><dd>Previous or next channel</dd></div>
-                        <div><dt><kbd>M</kbd></dt><dd>Mute</dd></div>
-                        <div><dt><kbd>F</kbd></dt><dd>Full screen</dd></div>
+                        <div><dt><kbd>Page Up</kbd><kbd>Page Down</kbd></dt><dd>Previous or next channel (CH +/- on a remote)</dd></div>
+                        <div><dt><kbd>0-9</kbd></dt><dd>Switch to a channel number</dd></div>
+                        <div><dt><kbd>Esc</kbd></dt><dd>Close the channel list, then the player</dd></div>
                     </dl>
                 </div>
             </div>

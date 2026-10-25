@@ -5,7 +5,7 @@
  */
 
 import { UIElements, appState, guideState } from './state.js';
-import { refreshUserList, updateUIFromSettings } from './settings.js';
+import { refreshUserList, renderSettingsNav, updateUIFromSettings } from './settings.js';
 import { loadAndScheduleNotifications, renderNotifications } from './notification.js';
 import { initMultiView, isMultiViewActive, cleanupMultiView } from './multiview.js';
 import { initDvrPage } from './dvr.js';
@@ -643,7 +643,7 @@ async function proceedWithRouteChange(path) {
             if (blockConfigReload) {
                 console.log(`%c[DEBUG] RACE_CONDITION_FIX: Navigation to Settings tab occurred while config reload was blocked. Skipping reload.`, 'color: #fca5a5; font-weight: bold;');
             } else {
-                updateUIFromSettings();
+                updateUIFromSettings().then(renderSettingsNav);
                 if (appState.currentUser?.isAdmin) refreshUserList();
             }
         } else if (isNotifications) {

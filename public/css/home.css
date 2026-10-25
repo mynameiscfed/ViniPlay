@@ -154,3 +154,9 @@
         width: 6.5em;
     }
 }
+
+/* The key legend on a TV sits over the bottom of the page. */
+html.tv .home,
+html.tv .page-col {
+    padding-bottom: 6em;
+}

@@ -375,45 +375,6 @@
             color: var(--tx);
         }
 
-        #notification-modal-wrapper {
-            position: fixed;
-            top: 1.25rem;
-            right: 1.25rem;
-            z-index: 100;
-            pointer-events: none;
-        }
-
-        #notification-modal-wrapper.hidden {
-            display: none;
-        }
-
-        #notification-box {
-            color: var(--tx);
-            padding: 0.5rem 1rem;
-            border-radius: 0.5rem;
-            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
-            pointer-events: all;
-            opacity: 0;
-            transform: translateY(-20px);
-            transition: opacity 0.3s ease-out, transform 0.3s ease-out, background-color 0.2s ease-in-out;
-            min-width: 250px;
-            text-align: center;
-            background-color: var(--rd);
-        }
-
-        #notification-modal-wrapper:not(.hidden) #notification-box {
-            opacity: 1;
-            transform: translateY(0);
-        }
-
-        #notification-box.success-bg {
-            background-color: var(--gr);
-        }
-
-        #notification-box.error-bg {
-            background-color: var(--rd);
-        }
-
         /* Styles for the direct player page */
         #direct-player-container {
             width: 100%;
@@ -975,3 +936,57 @@
             }
         }
     
+/* --- Multi-View toolbar and empty state --- */
+.mv-bar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: .6em;
+    flex: none;
+    padding: .6em 1em;
+    border-bottom: 1px solid var(--line);
+    background: var(--s1);
+}
+
+.mv-bar .grow {
+    flex: 1 1 0;
+}
+
+.mv-imm {
+    display: flex;
+    align-items: center;
+    gap: .6em;
+    color: var(--tx2);
+    font-weight: 600;
+    cursor: pointer;
+}
+
+#multiview-grid:empty::before {
+    content: 'Add a player to watch several channels at once.';
+    display: grid;
+    place-items: center;
+    min-height: 50vh;
+    color: var(--tx3);
+    font-weight: 600;
+}
+
+/* --- Settings: sticky section chips --- */
+#settings-nav {
+    position: sticky;
+    top: -1rem; /* cancels the page's p-4 so the chips sit flush under the top bar */
+    z-index: 5;
+    display: flex;
+    gap: .5em;
+    padding: 1.5rem 0 .5em;
+    margin-top: -1rem;
+    overflow-x: auto;
+    background: var(--bg);
+}
+
+#settings-nav .chip {
+    flex: none;
+}
+
+#page-settings h2 {
+    scroll-margin-top: 4em;
+}
