@@ -1173,7 +1173,14 @@ export function performVodSeek(targetTime) {
     if (!currentVodTranscodeSession) return;
     const session = currentVodTranscodeSession;
     const safeTarget = Math.max(0, Math.floor(targetTime));
-    playVOD(session.url, session.title, session.logo, safeTarget, session.duration);
+    // Pass the active tracking info along: playVOD tears the player down, which clears it.
+    const mediaInfo = currentActiveMedia ? {
+        contentType: currentActiveMedia.contentType,
+        contentId: currentActiveMedia.contentId,
+        title: currentActiveMedia.title,
+        duration: session.duration || currentActiveMedia.duration || 0
+    } : null;
+    playVOD(session.url, session.title, session.logo, safeTarget, session.duration, mediaInfo, true);
 }
 
 function updateVodControlsUI() {
@@ -1324,6 +1331,28 @@ function setupVodControlsOverlay(profileName) {
 }
 
 /**
+ * Probes the total duration of a VOD file in the background (when not already known)
+ * and updates the transcoded VOD scrubber once it is available.
+ */
+function probeVodDuration(url, title) {
+    if (!currentVodTranscodeSession || currentVodTranscodeSession.duration) return;
+    fetch(`/api/vod/duration?url=${encodeURIComponent(url)}`)
+        .then(res => res.json())
+        .then(data => {
+            if (data && data.duration && currentVodTranscodeSession && currentVodTranscodeSession.url === url) {
+                currentVodTranscodeSession.duration = data.duration;
+                if (currentActiveMedia) currentActiveMedia.duration = data.duration;
+                const totalTimeEl = document.getElementById('vod-total-time');
+                const progressBar = document.getElementById('vod-progress-bar');
+                if (totalTimeEl) totalTimeEl.textContent = formatTimeSeconds(data.duration);
+                if (progressBar) progressBar.max = data.duration;
+                console.log(`[VOD_PLAYER] Probed duration for "${title}": ${data.duration}s`);
+            }
+        })
+        .catch(e => console.warn('[VOD_PLAYER] Could not fetch duration:', e));
+}
+
+/**
  * Plays a VOD (Movie or Episode) using either the native <video> element (Direct Play)
  * or the server's /stream endpoint with fast input seeking (-ss).
  * @param {string} url - The direct URL to the VOD file (e.g., .mp4, .mkv).
@@ -1332,8 +1361,9 @@ function setupVodControlsOverlay(profileName) {
  * @param {number} [startTime=0] - Starting timestamp offset in seconds for seeking.
  * @param {number|null} [knownDuration=null] - Preserved total duration in seconds.
  * @param {object|null} [mediaInfo=null] - Media tracking metadata { contentType, contentId, title, duration }.
+ * @param {boolean} [isSeek=false] - True when re-requesting the stream to seek (also seeks back to 0).
  */
-export const playVOD = async (url, title, logo = '', startTime = 0, knownDuration = null, mediaInfo = null) => {
+export const playVOD = async (url, title, logo = '', startTime = 0, knownDuration = null, mediaInfo = null, isSeek = false) => {
     const useDirectPlay = guideState.settings.vodDirectPlayEnabled === true;
     console.log(`[VOD_PLAYER] Attempting to play VOD: "${title}" | Direct Play: ${useDirectPlay} | StartTime: ${startTime}`);
 
@@ -1381,7 +1411,7 @@ export const playVOD = async (url, title, logo = '', startTime = 0, knownDuratio
     };
 
     let streamUrlToPlay = `/stream?url=${encodeURIComponent(url)}&profileId=${profileId}&userAgentId=${userAgentId}&vodName=${encodeURIComponent(title)}&vodLogo=${encodeURIComponent(logo)}`;
-    if (startTime > 0) {
+    if (startTime > 0 || isSeek) {
         streamUrlToPlay += `&startTime=${Math.floor(startTime)}`;
     }
 
@@ -1397,10 +1427,40 @@ export const playVOD = async (url, title, logo = '', startTime = 0, knownDuratio
     console.log(`[VOD_PLAYER] Final stream URL: ${streamUrlToPlay}`);
     logToPlayerConsole(`Final stream URL: ${streamUrlToPlay}`);
 
-    // If profile outputs MP4 container (fMP4), play directly via native video element
+    // If profile outputs MP4 container (fMP4), play via the native video element. The piped fMP4
+    // has no duration or byte ranges, so the native controls cannot seek: use the VOD overlay,
+    // which restarts FFmpeg at the requested offset (-ss) just like the MPEG-TS path.
     if (profile.command && profile.command.includes('-f mp4')) {
         console.log(`[VOD_PLAYER] Profile uses fMP4. Playing via native video element: ${streamUrlToPlay}`);
-        await playRecordingOrDirectVideo(streamUrlToPlay, title, logo, false, 0, mediaInfo);
+        if (mediaInfo) {
+            setActiveMediaTracking(mediaInfo);
+        }
+        UIElements.videoTitle.textContent = title;
+        currentChannelInfo = { url, name: title, channelId: null, logo };
+        updateMediaSession(title, logo || '/viniplay.png');
+        const refreshBtn = document.getElementById('refresh-stream-btn');
+        if (refreshBtn) refreshBtn.classList.add('hidden');
+
+        const video = UIElements.videoElement;
+        video.controls = false;
+        video.src = streamUrlToPlay;
+        video.load();
+        video.volume = parseFloat(localStorage.getItem('iptvPlayerVolume') || 0.5);
+
+        UIElements.videoModal?.classList.remove('pip-active');
+        openModal(UIElements.videoModal);
+        requestScreenWakeLock();
+        setupVodControlsOverlay(profile.name);
+        probeVodDuration(url, title);
+
+        try {
+            await video.play();
+        } catch (playErr) {
+            if (playErr.name !== 'AbortError') {
+                console.warn('[VOD_PLAYER] play() interrupted:', playErr);
+            }
+        }
+        setLocalPlayerState(streamUrlToPlay, title, null);
         return;
     }
 
@@ -1456,23 +1516,7 @@ export const playVOD = async (url, title, logo = '', startTime = 0, knownDuratio
             // Setup and display VOD controls overlay
             setupVodControlsOverlay(profile.name);
 
-            // Fetch duration in background if not known
-            if (!currentVodTranscodeSession.duration) {
-                fetch(`/api/vod/duration?url=${encodeURIComponent(url)}`)
-                    .then(res => res.json())
-                    .then(data => {
-                        if (data && data.duration && currentVodTranscodeSession && currentVodTranscodeSession.url === url) {
-                            currentVodTranscodeSession.duration = data.duration;
-                            if (currentActiveMedia) currentActiveMedia.duration = data.duration;
-                            const totalTimeEl = document.getElementById('vod-total-time');
-                            const progressBar = document.getElementById('vod-progress-bar');
-                            if (totalTimeEl) totalTimeEl.textContent = formatTimeSeconds(data.duration);
-                            if (progressBar) progressBar.max = data.duration;
-                            console.log(`[VOD_PLAYER] Probed duration for "${title}": ${data.duration}s`);
-                        }
-                    })
-                    .catch(e => console.warn('[VOD_PLAYER] Could not fetch duration:', e));
-            }
+            probeVodDuration(url, title);
 
             // Attach and play
             appState.player.attachMediaElement(UIElements.videoElement);
