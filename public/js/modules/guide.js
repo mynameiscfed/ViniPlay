@@ -63,7 +63,10 @@ export const toggleFavorite = (channelId) => {
     guideState.settings.favorites = guideState.channels.filter(c => c.isFavorite).map(c => c.id);
     saveUserSetting('favorites', guideState.settings.favorites);
     document.querySelectorAll(`.favorite-star[data-channel-id="${CSS.escape(channelId)}"]`)
-        .forEach(star => star.classList.toggle('favorited', channel.isFavorite));
+        .forEach(star => {
+            star.classList.toggle('favorited', channel.isFavorite);
+            if (star.matches('button')) star.setAttribute('aria-pressed', String(channel.isFavorite));
+        });
     if (groupFilter === 'favorites') handleSearchAndFilter(false, true);
     return channel.isFavorite;
 };
@@ -400,6 +403,30 @@ export const cardHTML = (channel) => {
     }
     const nextHTML = next ? `<div class="gc-next">Next · ${escapeHtml(next.title)} ${formatGuideTime(new Date(next.start), offset)}</div>` : '';
     return `<div class="channel-info gcard" ${channelAttrs(channel)}>${logoHTML(channel)}<div class="gc-main"><div class="gc-top"><span class="ch-no">${escapeHtml(channel.chno || '')}</span><span>${escapeHtml(channel.displayName || channel.name)}</span></div><div class="gc-now">${escapeHtml(now ? now.title : 'No guide data')}</div>${bar}${nextHTML}</div>${starHTML(channel)}</div>`;
+};
+
+/** Two-letter stand-in shown behind (or instead of) a channel logo. */
+const monogram = (name) => (String(name).match(/[A-Za-z0-9]+/g) || ['?']).slice(0, 2).map(w => w[0]).join('').toUpperCase();
+
+/**
+ * Channel card used on Home. The card (a button) plays the channel; the star is its own button
+ * beside it so it works on its own. Programme data shown is whatever the guide has: with none,
+ * the line reads "No guide" and nothing is invented.
+ */
+export const channelCardHTML = (channel) => {
+    const name = channel.displayName || channel.name;
+    const { now } = nowNext(channel.id);
+    const meta = [channel.chno, channel.group].filter(Boolean).map(escapeHtml).join(' · ');
+    let nowHTML = '<div class="chc-none">No guide</div>';
+    if (now) {
+        const start = new Date(now.start), stop = new Date(now.stop);
+        const pct = Math.min(100, Math.max(0, ((Date.now() - start) / (stop - start)) * 100));
+        const left = Math.max(1, Math.round((stop - Date.now()) / 60000));
+        nowHTML = `<div class="chc-now"><span class="chc-prog">${escapeHtml(now.title)}</span><span class="chc-left">${left} min left</span></div><div class="chc-bar" aria-hidden="true"><i style="width:${pct}%"></i></div>`;
+    }
+    const logo = channel.logo ? `<img src="${escapeHtml(channel.logo)}" alt="" loading="lazy" onerror="this.onerror=null;this.remove()">` : '';
+    const fav = channel.isFavorite;
+    return `<div class="chc"><button type="button" class="chc-main" data-longpress data-url="${escapeHtml(channel.url)}" data-name="${escapeHtml(name)}" data-id="${escapeHtml(channel.id)}" title="${escapeHtml(name)}"><span class="chc-logo" aria-hidden="true"><b>${escapeHtml(monogram(name))}</b>${logo}</span><span class="chc-text"><span class="chc-name">${escapeHtml(name)}</span><span class="chc-meta">${meta}</span>${nowHTML}</span></button><button type="button" class="favorite-star chc-fav ${fav ? 'favorited' : ''}" data-channel-id="${escapeHtml(channel.id)}" aria-pressed="${fav}" aria-label="${fav ? 'Remove' : 'Add'} ${escapeHtml(name)} ${fav ? 'from' : 'to'} favorites">${ICONS.star}</button></div>`;
 };
 
 /** Programme cells of one channel row. */

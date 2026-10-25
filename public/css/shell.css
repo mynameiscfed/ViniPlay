@@ -7,7 +7,7 @@
 
 #app-container {
     display: grid;
-    grid-template-columns: 5.9em minmax(0, 1fr);
+    grid-template-columns: var(--rail-w) minmax(0, 1fr);
     height: 100%;
     font-size: .875rem;
     background: var(--bg);
@@ -35,20 +35,21 @@
 .rail {
     display: flex;
     flex-direction: column;
-    align-items: center;
-    gap: .3em;
-    padding: 1.1em 0 1em;
+    align-items: stretch;
+    gap: .15em;
+    padding: 1em 0 .8em;
     background: var(--s1);
     border-right: 1px solid var(--line);
     overflow-y: auto;
+    overflow-x: hidden;
 }
 
 .rail-brand {
     display: block;
-    width: 2.7em;
-    height: 2.7em;
-    margin-bottom: .9em;
-    border-radius: .8em;
+    width: 2.4em;
+    height: 2.4em;
+    margin: 0 auto 1em;
+    border-radius: var(--r-md);
     overflow: hidden;
     flex: none;
 }
@@ -59,57 +60,83 @@
     display: block;
 }
 
+/* Separates account-level controls from navigation. */
 .rail .sp {
     flex: 1;
 }
 
+.rail .sp + .ni {
+    border-top: 0;
+}
+
 .ni {
+    position: relative;
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: .28em;
-    width: 5em;
-    padding: .4em 0;
+    justify-content: center;
+    gap: .3em;
+    min-height: 3.6em;
+    padding: .45em 0;
     border: 0;
-    border-radius: .8em;
+    border-radius: 0;
     background: transparent;
-    color: var(--tx3);
-    font: 650 .82em/1.1 var(--f-ui);
+    color: var(--tx2);
+    font: 500 var(--t-nav)/1.1 var(--f-ui);
+    letter-spacing: .01em;
     cursor: pointer;
     white-space: nowrap;
     flex: none;
-    transition: color .15s;
+    transition: color var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease);
 }
 
 .ni .pl {
     display: grid;
     place-items: center;
-    width: 3.6em;
-    height: 2.2em;
-    border-radius: 1.2em;
-    transition: background-color .15s, color .15s;
+    width: var(--ico);
+    height: var(--ico);
 }
 
 .ni .pl svg {
-    width: 1.5em;
-    height: 1.5em;
+    width: var(--ico);
+    height: var(--ico);
+    stroke-width: 1.75;
+}
+
+.ni .lb {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .ni:hover {
     color: var(--tx);
-}
-
-.ni:hover .pl {
     background: var(--s3);
 }
 
-.ni.active {
-    color: var(--tx);
+.ni:active {
+    background: var(--s4);
 }
 
-.ni.active .pl {
+/* Selected: a restrained tint and a 2px accent bar, no pill. */
+.ni.active {
+    color: var(--cy);
+    background: var(--tint-cy);
+}
+
+.ni.active::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: .5em;
+    bottom: .5em;
+    width: 2px;
+    border-radius: 0 2px 2px 0;
     background: var(--cy);
-    color: var(--on);
+}
+
+.ni.active .lb {
+    font-weight: 600;
 }
 
 /* ---------- Top bar ---------- */
@@ -117,22 +144,24 @@
     display: flex;
     align-items: center;
     gap: 1em;
-    height: 4.1em;
-    padding: 0 1.5em;
+    height: 3.6em;
+    padding: 0 var(--gutter);
+    border-bottom: 1px solid var(--line);
     flex: none;
 }
 
 .top h1 {
     margin: 0;
-    font: 700 1.7em/1 var(--f-disp);
-    letter-spacing: -.015em;
+    font: 600 1.45em/1.2 var(--f-disp);
+    letter-spacing: -.01em;
     white-space: nowrap;
     color: var(--tx);
 }
 
 .top .clock {
-    font: 600 .95em var(--f-mono);
-    color: var(--tx2);
+    font: 500 var(--t-meta) var(--f-ui);
+    font-variant-numeric: tabular-nums;
+    color: var(--tx3);
     white-space: nowrap;
 }
 
@@ -147,11 +176,11 @@
     gap: .6em;
     width: 25em;
     max-width: 38vw;
-    height: 2.6em;
-    padding: 0 .7em 0 .9em;
-    border: 1px solid var(--line);
-    border-radius: .8em;
-    background: var(--s2);
+    height: var(--h-ctl);
+    padding: 0 .6em 0 .8em;
+    border: 1px solid var(--ctl);
+    border-radius: var(--r-md);
+    background: var(--s1);
     color: var(--tx3);
     font: 500 1em var(--f-ui);
     text-align: left;
@@ -160,8 +189,13 @@
 }
 
 .search:hover {
-    border-color: var(--line2);
-    color: var(--tx2);
+    background: var(--s3);
+    color: var(--tx);
+}
+
+.search:focus-visible {
+    outline: 2px solid var(--cy);
+    outline-offset: 2px;
 }
 
 .search .search-label {
@@ -181,15 +215,15 @@
     position: relative;
     display: grid;
     place-items: center;
-    width: 2.6em;
-    height: 2.6em;
-    border: 1px solid var(--line);
-    border-radius: .8em;
-    background: var(--s2);
+    width: var(--h-ctl);
+    height: var(--h-ctl);
+    border: 1px solid var(--ctl);
+    border-radius: var(--r-md);
+    background: var(--s1);
     color: var(--tx2);
     cursor: pointer;
     flex: none;
-    transition: background-color .15s, color .15s, border-color .15s;
+    transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
 }
 
 .ib:hover {
@@ -217,7 +251,7 @@
     border-radius: 1em;
     background: var(--pk);
     color: var(--on-pk);
-    font: 800 .72em/1 var(--f-ui);
+    font: 600 .72em/1 var(--f-ui);
 }
 
 .ib .nb.hidden {
@@ -227,13 +261,13 @@
 .av {
     display: grid;
     place-items: center;
-    width: 2.4em;
-    height: 2.4em;
-    border: 1px solid var(--line2);
+    width: var(--h-ctl);
+    height: var(--h-ctl);
+    border: 1px solid var(--ctl);
     border-radius: 50%;
-    background: var(--s4);
+    background: var(--s3);
     color: var(--tx);
-    font: 800 .95em var(--f-ui);
+    font: 600 var(--t-meta) var(--f-ui);
     text-transform: uppercase;
     cursor: pointer;
     flex: none;
@@ -254,8 +288,8 @@
     max-width: calc(100vw - 1.5em);
     padding: .4em;
     border: 1px solid var(--line2);
-    border-radius: 1em;
-    background: var(--s2);
+    border-radius: var(--r-lg);
+    background: var(--s1);
     box-shadow: var(--shadow-2);
 }
 
@@ -295,10 +329,10 @@
     min-height: 2.9em;
     padding: 0 .8em;
     border: 0;
-    border-radius: .7em;
+    border-radius: var(--r-md);
     background: transparent;
     color: var(--tx);
-    font: 600 1em var(--f-ui);
+    font: 500 1em var(--f-ui);
     text-align: left;
     cursor: pointer;
 }
@@ -453,12 +487,25 @@
         font-size: .9rem;
     }
 
-    .top {
-        padding: 0 1.1em;
+    #app-container {
+        --rail-w: 3.9em;
+    }
+
+    .ni .lb {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
+    }
+
+    .ni {
+        min-height: 3em;
     }
 
     .search {
-        width: 3em;
+        width: var(--h-ctl);
         padding: 0;
         justify-content: center;
     }
@@ -528,13 +575,25 @@
     .tabbar .ni {
         flex: 1;
         width: auto;
-        font-size: .76em;
+        min-height: 2.75rem;
         padding: .2em 0;
     }
 
-    .tabbar .ni .pl {
-        width: 3.4em;
-        height: 2em;
+    .tabbar .ni .lb {
+        position: static;
+        width: auto;
+        height: auto;
+        clip: auto;
+    }
+
+    .tabbar .ni.active::before {
+        left: 25%;
+        right: 25%;
+        top: 0;
+        bottom: auto;
+        width: auto;
+        height: 2px;
+        border-radius: 0 0 2px 2px;
     }
 }
 

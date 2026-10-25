@@ -32,15 +32,14 @@
         })();
     </script>
 
-    <link rel="preload" href="/fonts/figtree-latin.woff2" as="font" type="font/woff2" crossorigin>
-    <link rel="preload" href="/fonts/bricolage-grotesque-latin.woff2" as="font" type="font/woff2" crossorigin>
-    <link rel="stylesheet" href="/css/fonts.css?v=1">
-    <link rel="stylesheet" href="/css/tokens.css?v=2">
+    <link rel="preload" href="/fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="stylesheet" href="/css/fonts.css?v=2">
+    <link rel="stylesheet" href="/css/tokens.css?v=3">
     <link rel="stylesheet" href="/css/tailwind.css?v=2">
-    <link rel="stylesheet" href="/css/base.css?v=2">
-    <link rel="stylesheet" href="/css/shell.css?v=3">
+    <link rel="stylesheet" href="/css/base.css?v=3">
+    <link rel="stylesheet" href="/css/shell.css?v=5">
     <link rel="stylesheet" href="/css/guide.css?v=5">
-    <link rel="stylesheet" href="/css/home.css?v=6">
+    <link rel="stylesheet" href="/css/home.css?v=9">
     <link rel="stylesheet" href="/css/legacy.css?v=7">
     <link rel="stylesheet" href="/css/player.css?v=1">
     <link rel="stylesheet" href="/css/tv.css?v=1">
@@ -118,14 +117,14 @@
         <!-- Navigation rail (tablet and desktop) -->
         <nav id="app-rail" class="rail" aria-label="Main">
             <a class="rail-brand" href="/" aria-label="ViniPlay home"><img src="/logo.svg" alt=""></a>
-            <button id="tab-home" type="button" class="ni"><span class="pl"><span data-icon="home"></span></span><span class="lb">Home</span></button>
-            <button id="tab-guide" type="button" class="ni"><span class="pl"><span data-icon="tv"></span></span><span class="lb">Live TV</span></button>
-            <button id="tab-multiview" type="button" class="ni"><span class="pl"><span data-icon="grid"></span></span><span class="lb">Multi-View</span></button>
-            <button id="tab-vod" type="button" class="ni"><span class="pl"><span data-icon="film"></span></span><span class="lb">On Demand</span></button>
-            <button id="tab-dvr" type="button" class="ni"><span class="pl"><span data-icon="rec"></span></span><span class="lb">Recordings</span></button>
+            <button id="tab-home" type="button" title="Home" class="ni"><span class="pl"><span data-icon="home"></span></span><span class="lb">Home</span></button>
+            <button id="tab-guide" type="button" title="Live TV" class="ni"><span class="pl"><span data-icon="tv"></span></span><span class="lb">Live TV</span></button>
+            <button id="tab-multiview" type="button" title="Multi-View" class="ni"><span class="pl"><span data-icon="grid"></span></span><span class="lb">Multi-View</span></button>
+            <button id="tab-vod" type="button" title="On Demand" class="ni"><span class="pl"><span data-icon="film"></span></span><span class="lb">On Demand</span></button>
+            <button id="tab-dvr" type="button" title="Recordings" class="ni"><span class="pl"><span data-icon="rec"></span></span><span class="lb">Recordings</span></button>
             <span class="sp"></span>
-            <button id="tab-activity" type="button" class="ni hidden"><span class="pl"><span data-icon="pulse"></span></span><span class="lb">Activity</span></button>
-            <button id="tab-settings" type="button" class="ni hidden"><span class="pl"><span data-icon="gear"></span></span><span class="lb">Settings</span></button>
+            <button id="tab-activity" type="button" title="Activity" class="ni hidden"><span class="pl"><span data-icon="pulse"></span></span><span class="lb">Activity</span></button>
+            <button id="tab-settings" type="button" title="Settings" class="ni hidden"><span class="pl"><span data-icon="gear"></span></span><span class="lb">Settings</span></button>
         </nav>
 
         <div id="app-body">
@@ -1944,7 +1943,7 @@
     </div>
 
     <div id="notification-modal-wrapper" class="hidden">
-        <div id="notification-box">
+        <div id="notification-box" role="status" aria-live="polite">
             <p id="notification-message"></p>
         </div>
     </div>

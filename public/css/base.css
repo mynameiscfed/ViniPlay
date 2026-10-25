@@ -148,6 +148,12 @@ html.kb [role="button"]:focus {
     z-index: 2;
 }
 
+/* Keyboard focus is always visible, whether or not the app's key mode is on. */
+:focus-visible {
+    outline: 2px solid var(--cy);
+    outline-offset: 2px;
+}
+
 /* Hidden native checkboxes paint their ring on the visible control. */
 html.kb .switch input:focus {
     box-shadow: none;

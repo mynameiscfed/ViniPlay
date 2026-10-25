@@ -45,8 +45,8 @@ module.exports = {
         },
         extend: {
             fontFamily: {
-                sans: ['Figtree', 'system-ui', '-apple-system', 'Segoe UI', 'Roboto', 'Helvetica Neue', 'Arial', 'sans-serif'],
-                display: ['Bricolage Grotesque', 'Figtree', 'system-ui', 'sans-serif'],
+                sans: ['Inter', 'system-ui', '-apple-system', 'Segoe UI', 'Roboto', 'Helvetica Neue', 'Arial', 'sans-serif'],
+                display: ['Inter', 'system-ui', 'sans-serif'],
                 mono: ['JetBrains Mono', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'Consolas', 'monospace'],
             },
             borderRadius: {
