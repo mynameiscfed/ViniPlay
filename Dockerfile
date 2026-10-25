@@ -68,19 +68,31 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
+# Create an unprivileged user to run the app (and every FFmpeg/ffprobe child process).
+# The base image ships an 'ubuntu' user on UID/GID 1000; replace it so 'viniplay'
+# owns the conventional 1000:1000 IDs. PUID/PGID can override these at runtime.
+RUN userdel -r ubuntu 2>/dev/null || true && \
+    groupadd -g 1000 viniplay && \
+    useradd -u 1000 -g viniplay -G video -m -d /home/viniplay -s /usr/sbin/nologin viniplay
+
 # Create and set the working directory
 WORKDIR /usr/src/app
 
-# Copy the application files and the installed node_modules from the 'builder' stage
+# Copy the application files and the installed node_modules from the 'builder' stage.
+# The code stays root-owned so the app user can read but not modify it.
 COPY --from=builder /usr/src/app .
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh
 
 # Expose the application port
 EXPOSE 8998
 
 # Create and declare volumes for persistent data
-RUN mkdir -p /data /dvr
+RUN mkdir -p /data /dvr && chown viniplay:viniplay /data /dvr
 VOLUME /data
 VOLUME /dvr
 
-# Define the command to run your application
-CMD [ "npm", "start" ]
+# The entrypoint starts as root only long enough to fix volume ownership and GPU
+# device group membership, then drops to the 'viniplay' user before starting Node.
+ENTRYPOINT [ "docker-entrypoint.sh" ]
+CMD [ "node", "server.js" ]

@@ -107,6 +107,12 @@ ViniPlay is designed for easy deployment using Docker.
     
     ```
 
+### Running as a non-root user
+
+The container drops root privileges at startup and runs ViniPlay (and every FFmpeg process it starts) as an unprivileged `viniplay` user, UID/GID `1000` by default. On startup it hands ownership of `/data` and `/dvr` to that user, so existing installs that were written as root keep working.
+
+To match the owner of your host folders, set `PUID` and `PGID` in your `.env` file (for example `PUID=1001` and `PGID=1001`). If you map `/dev/dri` for Intel QSV / VA-API, the user is added to the group that owns the render device automatically. Setting `PUID=0` restores the old run-as-root behaviour, which is not recommended.
+
 ### Method 2: Using `docker`
 
 1.  **Build the Image:**
