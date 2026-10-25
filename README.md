@@ -128,6 +128,18 @@ ViniPlay is designed for easy deployment using Docker.
     
     ```
     
+### Prebuilt Image (CI/CD)
+
+Every push to `main` is tested and published by GitHub Actions (`.github/workflows/docker-image.yml`) to the GitHub Container Registry:
+
+```
+docker pull ghcr.io/mynameiscfed/viniplay:latest
+```
+
+Available tags: `latest` and `main` (latest `main`), `sha-<commit>` (a specific build), and `1.2.3` / `1.2` when a `v1.2.3` git tag is pushed. Pull requests are built and tested but not published.
+
+To run the same checks locally: `npm test` (JavaScript syntax check) and `npm run test:container -- <image>` (boots the image and checks it responds).
+
 ### First-Time Setup
 
 Once the container is running, open your browser and navigate to `http://localhost:8998`. You will be prompted to create your initial **admin account**. After creating the admin account, you can log in and start configuring your sources in the **Settings** tab.
