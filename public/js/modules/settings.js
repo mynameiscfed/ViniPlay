@@ -12,6 +12,7 @@ import { handleGuideLoad } from './guide.js';
 import { navigate } from './ui.js';
 import { ICONS } from './icons.js';
 import { escapeHtml } from './utils.js';
+import { renderEpgMap, setupEpgMap } from './epgmap.js';
 
 let currentSourceTypeForEditor = 'url';
 let hardwareChecked = false; // Flag to prevent re-checking hardware on every UI update
@@ -886,6 +887,7 @@ export const updateUIFromSettings = async () => {
     if (appState.currentUser?.isAdmin) {
         refreshUserList();
     }
+    renderEpgMap();
 };
 
 
@@ -1267,6 +1269,7 @@ function handleClearLogs() {
  * Sets up all event listeners for the settings page.
  */
 export function setupSettingsEventListeners() {
+    setupEpgMap();
 
     // --- Source Management ---
     // Processes every active source, or only `sourceId` (merged with the cached rest).

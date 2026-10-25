@@ -27,4 +27,32 @@ async function forEachProgramme(stream, onProgramme) {
     }
 }
 
-module.exports = { forEachProgramme };
+const CHANNEL = /<channel\b[^>]*?(?:\/>|>[\s\S]*?<\/channel>)/g;
+const text = (n) => (n?._cdata ?? n?._text ?? '').toString().trim();
+
+// Calls onChannel({id, names}) for each <channel>, and stops reading at the first <programme>: XMLTV puts
+// channels first, so the pass stays cheap even on a huge guide.
+// shortcut: a <channel> placed after the first <programme> is missed, upgrade by scanning the whole file.
+async function forEachChannel(stream, onChannel) {
+    stream.setEncoding('utf8');
+    let buf = '';
+    for await (const chunk of stream) {
+        buf += chunk;
+        const stop = buf.indexOf('<programme');
+        const head = stop === -1 ? buf : buf.slice(0, stop);
+        let end = 0;
+        CHANNEL.lastIndex = 0;
+        for (let m; (m = CHANNEL.exec(head));) {
+            const ch = xmlJS.xml2js(m[0], { compact: true }).channel;
+            const id = ch._attributes?.id;
+            if (id) onChannel({ id, names: [].concat(ch['display-name'] || []).map(text).filter(Boolean) });
+            end = CHANNEL.lastIndex;
+        }
+        if (stop !== -1) return; // leaving the loop closes the stream
+        const rest = buf.slice(end);
+        const open = rest.lastIndexOf('<channel');
+        buf = open >= 0 ? rest.slice(open) : rest.slice(-10);
+    }
+}
+
+module.exports = { forEachProgramme, forEachChannel };
