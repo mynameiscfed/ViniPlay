@@ -126,6 +126,8 @@ ViniPlay keeps users, sessions, DVR jobs, stream history and the VOD catalogue i
 
 WAL does not work reliably when `/data` is on a network share (NFS/SMB). In that case add `SQLITE_JOURNAL_MODE=DELETE` to `.env` to keep the classic rollback journal. Accepted values are `WAL` (default), `DELETE`, `TRUNCATE` and `PERSIST`.
 
+Foreign keys are enforced, so deleting a user also removes their DVR jobs, notifications, push subscriptions, layouts and watch progress. If something on your install relies on the old behaviour, set `SQLITE_FOREIGN_KEYS=off`. Stream history older than 90 days and notifications older than 30 days are deleted nightly; set `STREAM_HISTORY_RETENTION_DAYS` to change the first (`0` keeps it forever).
+
 ### Method 2: Using `docker`
 
 1.  **Build the Image:**
