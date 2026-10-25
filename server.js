@@ -32,6 +32,7 @@ const { pipeline } = require('stream');
 const { pipeline: pipelineAsync } = require('stream/promises');
 const { forEachProgramme, forEachChannel } = require('./epgStream');
 const { buildTargets, createSuggester, bestMatch, CONFIDENT } = require('./epgMatch');
+const { createSuggestStore, suggestChunk, runMatchJob } = require('./epgSuggest');
 const { chat, pickWithLlm, listModels, searchModels, aiStatus, updateAiConfig } = require('./epgLlm');
 const webpush = require('web-push');
 const schedule = require('node-schedule');
@@ -142,6 +143,14 @@ const readEpgChannels = cachedFile(EPG_CHANNELS_JSON_PATH, JSON.parse);
 const NO_EPG_CHANNELS = [];
 const readAiConfig = cachedFile(OPENROUTER_PATH, JSON.parse);
 const AI_UNSET = 'AI matching is not set up: add your OpenRouter key and model in Settings > AI Matching.';
+// Pending match suggestions survive refresh and restart; accept/reject mutate this same store.
+const EPG_SUGGESTIONS_PATH = path.join(DATA_DIR, 'epg_suggestions.json');
+const suggestStore = createSuggestStore(
+    cachedFile(EPG_SUGGESTIONS_PATH, (text) => text),
+    (data) => writeFileAtomic(EPG_SUGGESTIONS_PATH, data),
+);
+// Channel ids that already have guide data, for the match job's "unresolved" filter; parsed once per merge.
+const readEpgKeys = cachedFile(LIVE_EPG_JSON_PATH, (text) => { try { return Object.keys(JSON.parse(text)); } catch (e) { return []; } });
 let epgSuggester; // [the list it was built from, its search]; rebuilt only when the file changes
 const suggestEpg = (name, k) => {
     const list = readEpgChannels() || NO_EPG_CHANNELS;
@@ -1544,6 +1553,7 @@ async function mergeEpg(req, settings, liveChannels, onlyIds, failedSources) {
 
     // Pass 1: make every guide readable and list the channels it declares, so channels can be matched by name.
     const epgChannels = new Map(); // XMLTV channel id -> {id, names}, across all guides
+    const syntheticChannelIds = new Set(); // guide channels whose <channel id=""> had to be synthesized from the name
     for (const source of activeEpgSources) {
         console.log(`[EPG] Processing source: "${source.name}" (ID: ${source.id}, Type: ${source.type}, Path: ${source.path})`);
         const cached = onlyIds && !onlyIds.includes(source.id);
@@ -1571,7 +1581,8 @@ async function mergeEpg(req, settings, liveChannels, onlyIds, failedSources) {
                 epgFiles.set(source.id, cachePath);
             }
             if (epgFiles.has(source.id)) {
-                await forEachChannel(openEpg(source), ({ id, names }) => {
+                await forEachChannel(openEpg(source), ({ id, names, synthetic }) => {
+                    if (synthetic) syntheticChannelIds.add(id);
                     const known = epgChannels.get(id);
                     epgChannels.set(id, { id, names: known ? [...new Set([...known.names, ...names])] : names });
                 });
@@ -1587,6 +1598,9 @@ async function mergeEpg(req, settings, liveChannels, onlyIds, failedSources) {
 
     // Which playlist channels each XMLTV channel feeds: manual overrides, then exact ids, then unambiguous names.
     const targets = buildTargets({ channels: liveChannels, overrides: settings.epgOverrides, epgChannels: [...epgChannels.values()] });
+    if (syntheticChannelIds.size) {
+        sendProcessingStatus(req, `Warning: ${syntheticChannelIds.size} guide channels had an empty channel id and were matched by name only.`, 'info');
+    }
     const sample = new Map(); // XMLTV channel id -> one programme title, so the picker can show what a channel airs
     const titleOf = (prog) => (prog.title && prog.title._cdata ? prog.title._cdata : (prog.title?._text || 'No Title')).trim();
 
@@ -1844,9 +1858,10 @@ async function processAndMergeSources(req, onlyIds) {
                     liveStreamCount++;
                     let processedExtInf = currentExtInf;
                     const idMatch = currentExtInf.match(/tvg-id="([^"]*)"/); // Still needed for unique ID
-                    const nameMatch = line.match(/tvg-name="([^"]*)"/); // Get name if available
+                    const tvgNameMatch = currentExtInf.match(/tvg-name="([^"]*)"/);
                     const commaIndex = currentExtInf.lastIndexOf(',');
-                    const name = nameMatch ? nameMatch[1] : ((commaIndex !== -1) ? currentExtInf.substring(commaIndex + 1).trim() : 'Unknown');
+                    const tvgName = (tvgNameMatch && tvgNameMatch[1]) || '';
+                    const name = (commaIndex !== -1) ? currentExtInf.substring(commaIndex + 1).trim() : 'Unknown';
 
                     // Consistent Unique Channel ID Generation
                     // Treat an empty tvg-id="" the same as a missing attribute: otherwise
@@ -1869,7 +1884,7 @@ async function processAndMergeSources(req, onlyIds) {
                     processedExtInf = processedExtInf.slice(0, tvgIdAttrEnd) + ` vini-source="${source.name}"` + processedExtInf.slice(tvgIdAttrEnd);
 
                     mergedLiveM3uContent += processedExtInf + '\n' + streamUrl + '\n';
-                    liveChannels.set(finalUniqueChannelId, { originalId: originalTvgId, name });
+                    liveChannels.set(finalUniqueChannelId, { originalId: originalTvgId, name, tvgName, group: groupTitle });
                     // --- END LIVE CHANNEL PROCESSING ---
 
                     currentExtInf = ''; // Reset for next entry
@@ -3340,43 +3355,90 @@ app.get('/api/epg/channels', requireAuth, requireAdmin, (req, res) => {
     res.json(q ? suggestEpg(q, limit) : (readEpgChannels() || NO_EPG_CHANNELS).slice(0, limit));
 });
 
-// Best guess per channel. Saves nothing: the admin reviews and accepts through PUT /api/epg/overrides.
+// Best guess per channel, saved to the suggestion store so refresh/restart and re-runs lose nothing.
 // Capped per call (a search is a few ms): the client sends big lists in batches so the server stays responsive.
 // With `llm`, channels the name search is not sure about are put to a small model on OpenRouter, choosing among
 // the search's own top candidates. Only those channel and guide names leave the server.
 const MAX_SUGGEST_BATCH = 300;
 const AI_CONFIDENCE = 0.8; // a model's pick has no score: shown, but never part of "accept all confident"
+
+// Per-chunk suggest, shared by the single-shot endpoint and the background job.
+const suggestFor = (items, withAi) => {
+    const { apiKey, model } = readAiConfig() || {};
+    return suggestChunk(items, { suggestName: suggestEpg, bestOf: bestMatch, pickWithLlm, withAi, apiKey, model, CONFIDENT, AI_CONFIDENCE });
+};
+
 app.post('/api/epg/suggest', requireAuth, requireAdmin, async (req, res) => {
     const { channelIds, llm } = req.body || {};
     if (!Array.isArray(channelIds) || channelIds.length > MAX_SUGGEST_BATCH) {
         return res.status(400).json({ error: `channelIds must be a list of at most ${MAX_SUGGEST_BATCH}.` });
     }
-    const { apiKey, model } = readAiConfig() || {};
-    if (llm && !(apiKey && model)) return res.status(400).json({ error: AI_UNSET });
+    if (llm && !(readAiConfig()?.apiKey && readAiConfig()?.model)) return res.status(400).json({ error: AI_UNSET });
     const wanted = new Set(channelIds);
-    const suggestions = new Map(); // channel id -> suggestion
-    const ask = []; // for the model
-    for (const { id, displayName, group } of (readChannels() || []).filter(c => wanted.has(c.id))) {
-        const best = bestMatch(suggestEpg, displayName);
-        if (best) {
-            suggestions.set(id, { channelId: id, epgId: best.id, names: best.names, sample: best.sample, confidence: best.confidence, confident: best.confidence >= CONFIDENT, via: 'name' });
+    const items = (readChannels() || []).filter((c) => wanted.has(c.id)).map((c) => ({ id: c.id, name: c.displayName, group: c.group }));
+    const { suggestions, error } = await suggestFor(items, !!llm);
+    if (error) return res.status(502).json({ error: `AI matching failed: ${error}` });
+    const list = Object.values(suggestions);
+    if (list.length) suggestStore.merge(list);
+    res.json({ suggestions: list });
+});
+
+app.get('/api/epg/suggest', requireAuth, requireAdmin, (req, res) => res.json({ suggestions: suggestStore.all() }));
+
+app.delete('/api/epg/suggest', requireAuth, requireAdmin, (req, res) => {
+    const { channelIds } = req.body || {};
+    if (!Array.isArray(channelIds) || !channelIds.every((v) => typeof v === 'string') || channelIds.length > 10000) {
+        return res.status(400).json({ error: 'channelIds must be a list of channel ids.' });
+    }
+    suggestStore.remove(channelIds);
+    res.json({ success: true });
+});
+
+// --- Background matching over every unresolved channel (admin) ---
+// State lives in memory; the suggestion store is the resume point, so a restart re-POSTs and skips stored ones.
+let epgMatchState = { status: 'idle', totalChunks: 0, chunkSize: 0, done: 0, suggested: 0, failed: 0, error: null };
+let epgMatchRunning = null; // Promise of the in-flight run, to serialize starts
+
+function startMatch(useAi) {
+    if (epgMatchState.status === 'running') return epgMatchRunning;
+    const stored = new Set(suggestStore.all().map((s) => s.channelId));
+    const overrides = getSettings().epgOverrides || {};
+    const withGuide = new Set(readEpgKeys() || []);
+    const items = (readChannels() || [])
+        .filter((c) => !overrides[c.id] && !withGuide.has(c.id) && !stored.has(c.id))
+        .map((c) => ({ id: c.id, name: c.displayName, group: c.group }));
+    const chunkSize = useAi ? 25 : 300;
+    const chunks = [];
+    for (let i = 0; i < items.length; i += chunkSize) chunks.push(items.slice(i, i + chunkSize));
+
+    epgMatchState = { status: 'running', useAi, totalChunks: chunks.length, totalChannels: items.length, chunkSize, done: 0, suggested: 0, failed: 0, error: null };
+    epgMatchRunning = (async () => {
+        try {
+            await runMatchJob({
+                chunks,
+                processChunk: (chunk) => suggestFor(chunk, useAi),
+                persist: (list) => suggestStore.merge(list),
+                concurrency: useAi ? 4 : 1,
+                onProgress: ({ done, total, suggested, failed }) => { Object.assign(epgMatchState, { done, totalChunks: total, suggested, failed }); },
+            });
+            epgMatchState.status = 'done';
+        } catch (e) {
+            epgMatchState = { ...epgMatchState, status: 'done', error: e.message };
         }
-        const candidates = suggestEpg(displayName, 10);
-        if (llm && candidates.length && !suggestions.get(id)?.confident) ask.push({ id, name: displayName, group, candidates });
-    }
-    try {
-        const picks = ask.length ? await pickWithLlm(ask, { apiKey, model }) : [];
-        ask.forEach(({ id, candidates }, i) => {
-            if (picks[i] === undefined) return; // no usable answer: keep the name-based suggestion
-            const pick = candidates.find(c => c.id === picks[i]);
-            if (!pick) suggestions.delete(id); // the model judged that none of them is the same channel
-            else suggestions.set(id, { channelId: id, epgId: pick.id, names: pick.names, sample: pick.sample, confidence: AI_CONFIDENCE, confident: false, via: 'ai' });
-        });
-    } catch (error) {
-        console.error('[API] AI matching failed:', error.message);
-        return res.status(502).json({ error: `AI matching failed: ${error.message}` });
-    }
-    res.json({ suggestions: [...suggestions.values()] });
+    })();
+    return epgMatchRunning;
+}
+
+app.post('/api/epg/match', requireAuth, requireAdmin, (req, res) => {
+    const useAi = !!req.body?.useAi;
+    if (useAi && !(readAiConfig()?.apiKey && readAiConfig()?.model)) return res.status(400).json({ error: AI_UNSET });
+    if (epgMatchState.status === 'running') return res.json({ started: false, ...epgMatchState });
+    startMatch(useAi);
+    res.json({ started: true, ...epgMatchState });
+});
+
+app.get('/api/epg/match', requireAuth, requireAdmin, (req, res) => {
+    res.json({ ...epgMatchState, stored: suggestStore.all().length });
 });
 
 // --- AI matching settings (admin) ---
@@ -3434,9 +3496,11 @@ app.put('/api/epg/overrides', requireAuth, requireAdmin, async (req, res) => {
         settings.epgOverrides = { ...settings.epgOverrides, ...set };
         for (const id of clear) delete settings.epgOverrides[id];
         writeSettings(settings);
+        // Accepted suggestions are no longer pending: drop them from the store so they do not resurface.
+        if (Object.keys(set).length) suggestStore.remove(Object.keys(set));
 
         // Same shape as processAndMergeSources builds from the playlists; the prefix before the first "_" is the source id.
-        const liveChannels = new Map(channels.map(c => [c.id, { originalId: c.id.slice(c.id.indexOf('_') + 1), name: c.displayName }]));
+        const liveChannels = new Map(channels.map(c => [c.id, { originalId: c.id.slice(c.id.indexOf('_') + 1), name: c.displayName, tvgName: c.name, group: c.group }]));
         await mergeEpg(req, settings, liveChannels, [], []);
         settings.sourcesLastUpdated = new Date().toISOString(); // tells every client its cached guide is stale
         saveProcessedSettings(settings);

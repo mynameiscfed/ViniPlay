@@ -6,6 +6,7 @@
 // would split it; upgrade to a SAX parser if a real guide ever does that.
 
 const xmlJS = require('xml-js');
+const { nameKey } = require('./epgMatch');
 
 const PROGRAMME = /<programme\b[^>]*?(?:\/>|>[\s\S]*?<\/programme>)/g;
 
@@ -45,7 +46,15 @@ async function forEachChannel(stream, onChannel) {
         for (let m; (m = CHANNEL.exec(head));) {
             const ch = xmlJS.xml2js(m[0], { compact: true }).channel;
             const id = ch._attributes?.id;
-            if (id) onChannel({ id, names: [].concat(ch['display-name'] || []).map(text).filter(Boolean) });
+            const names = [].concat(ch['display-name'] || []).map(text).filter(Boolean);
+            // Guides sometimes leave channel ids empty; fall back to a slug so the channel stays name-matchable.
+            if (!id) {
+                const slug = names[0] && nameKey(names[0]);
+                if (!slug) continue;
+                onChannel({ id: slug, names, synthetic: true });
+            } else {
+                onChannel({ id, names });
+            }
             end = CHANNEL.lastIndex;
         }
         if (stop !== -1) return; // leaving the loop closes the stream
