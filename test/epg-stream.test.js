@@ -2,7 +2,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const { Readable } = require('node:stream');
-const { forEachProgramme } = require('../epgStream');
+const { forEachProgramme, forEachChannel } = require('../epgStream');
 
 const programme = (channel, title) =>
     `<programme start="20250101120000 +0000" stop="20250101130000 +0000" channel="${channel}">` +
@@ -35,6 +35,23 @@ test('streams far more data than it buffers', async () => {
     let count = 0;
     await forEachProgramme(source, () => count++);
     assert.strictEqual(count, total);
+});
+
+test('lists channels with all their names and stops at the first programme', async () => {
+    const xml = '<tv><channel id="espn.us"><display-name>ESPN</display-name><display-name lang="en"><![CDATA[ESPN HD]]></display-name></channel>' +
+        '<channel id="bare"/><channel id="x"><display-name>X</display-name></channel>' +
+        `${programme('espn.us', 'One')}<channel id="late"><display-name>Late</display-name></channel></tv>`;
+    const buf = Buffer.from(xml);
+    const chunks = Array.from({ length: Math.ceil(buf.length / 7) }, (_, i) => buf.subarray(i * 7, i * 7 + 7));
+    const source = Readable.from(chunks);
+    const found = [];
+    await forEachChannel(source, (c) => found.push(c));
+    assert.deepStrictEqual(found, [
+        { id: 'espn.us', names: ['ESPN', 'ESPN HD'] },
+        { id: 'bare', names: [] },
+        { id: 'x', names: ['X'] },
+    ]);
+    assert.ok(source.destroyed, 'the rest of the guide is not read');
 });
 
 test('a stream error rejects instead of hanging', async () => {
