@@ -785,7 +785,9 @@ async function playChannelInWidget(widgetId, channel, gridstackItemContentEl) {
             const mpegtsConfig = {
                 enableStashBuffer: true,
                 stashInitialSize: 4096,
-                liveBufferLatency: 2.0,
+                liveBufferLatencyChasing: true,
+                liveBufferLatencyMaxLatency: 5.0,
+                liveBufferLatencyMinRemain: 1.0,
             };
 
             const player = mpegts.createPlayer({

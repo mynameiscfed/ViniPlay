@@ -34,10 +34,15 @@ export const guideState = {
         multiviewLayouts: [], // To store saved layouts for the user
         adminPageSize: 25, // NEW: Default page size for the admin history table
         vodDirectPlayEnabled: true, // Default to true (native <video> playback with full seeking)
+        downloads: { enabled: true, maxConcurrent: 2 },
+        liveRewind: { enabled: false, minutes: 15, diskCapMb: 4096 },
+        playerFallbackProfileId: null,
+        allowUserQualitySwitch: false,
         // IANA zone plus its current offset as a fallback (will be overridden by server settings).
         timeZone: null,
         timezoneOffset: -(new Date().getTimezoneOffset() / 60),
     }, // This will hold both GLOBAL and USER settings, merged.
+    hardware: null,
     guideDurationHours: 48,
     hourWidthPixels: window.innerWidth < 768 ? 200 : 300,
     currentDate: new Date(),
@@ -53,6 +58,7 @@ export const guideState = {
 export const dvrState = {
     scheduledJobs: [],
     completedRecordings: [],
+    seriesRules: [],
 };
 
 // NEW: State specific to the Admin Activity page

@@ -54,7 +54,10 @@ The server-side backend resolves common CORS and browser compatibility issues by
  - 🚀 **High Performance UI**: The frontend uses UI virtualization for the guide and efficient state management to keep the interface fast and responsive.
  - 🐳 **Dockerized Deployment**: The entire application is packaged in a single Docker container for simple deployment with Docker or Docker Compose.
  - ▶️ **Picture-in-Picture**: Pop out the player to keep watching while you work on other things.
- - 🎥 **DVR**: Record programs using FFmpeg. Schedule recording via the TV Guide, or set a specific channel and time with the manual timer. Watch an in-progress recording with live DVR chase play; completed `.ts` recordings are remuxed to MP4 on first play so the browser can seek in them. Completed recordings are private to their owner; admins can see all of them.
+ - 🎥 **DVR**: Record programs using FFmpeg. Schedule from the TV Guide, the DVR page, or the record button in the player. Set pre/post padding, a global concurrent-recording limit, a free-disk reserve and optional size-based retention. Create a **series recording** rule for a programme title to schedule every upcoming match on that channel. Watch an in-progress recording with live DVR chase play; completed `.ts` recordings are remuxed to MP4 on first play so the browser can seek in them. Completed recordings are private to their owner; admins can see all of them.
+ - ⏪ **Live rewind**: When enabled in Settings → Playback & Downloads, ViniPlay keeps a shared rolling HLS buffer for each tuned channel so live TV can be paused, rewound and returned to live. It is off by default because it uses one upstream connection and disk per channel.
+ - ⬇️ **Downloads**: Download a finished recording, movie or episode, or queue a whole season with **Download Season**. VOD downloads go through the server so the configured User-Agent and source permissions are respected.
+ - 🔊 **Audio tracks**: For HTTP transcoded live streams, the player can probe the provider for alternate audio tracks and restart FFmpeg with the chosen one. Native/direct playback continues to use the browser's own audio-track list.
  - 📽️ **Direct player**: Play a direct stream URL (`.m3u8`, `.ts`, `.mp4`, `.mkv`, etc.) in the browser or through the server, with recent links and a debug console.
  - 👥 **Admin monitoring page**: Monitor users watching in real time, browse watch history, change a user's channel, check system health and broadcast messages to all users.
  - 📺 **On Demand (VOD)**: Browse Movies and Series from active XC providers in a scalable, filterable grid with search and pagination. VOD requires an XC source.
@@ -179,12 +182,12 @@ Select the generated profile in **Settings → Player Settings**, **DVR Settings
 
 ### URL fetching and SSRF protection
 
-ViniPlay checks client-supplied URLs before use. The image proxy (VOD posters and logos) and the source editor's **Test** button refuse loopback, link-local/cloud metadata and private LAN addresses such as `192.168.x.x`, re-checking every redirect. If your posters or test URLs live on your own network, add one of these to `.env`:
+ViniPlay checks client-supplied URLs before use. The image proxy (VOD posters and logos), the player `/stream` proxy, VOD duration probing, VOD downloads, audio-track probing and the source editor's **Test** button refuse loopback, link-local/cloud metadata and private LAN addresses such as `192.168.x.x`, re-checking every redirect. If your posters or sources live on your own network, add one of these to `.env`:
 
 -   `SSRF_ALLOW_PRIVATE_NETWORKS=true` allows private LAN ranges (loopback and metadata addresses stay blocked).
 -   `SSRF_ALLOWED_HOSTS=dispatcharr.lan,192.168.1.20` exempts specific hosts.
 
-Stream and source URLs may use private LAN hosts (where self-hosted IPTV feeds usually live), but localhost names and loopback, link-local and cloud metadata IP literals are always blocked.
+Private LAN sources need one of these settings for server-side playback, VOD probing and VOD downloads. Localhost names, loopback, link-local and cloud metadata IP literals remain blocked. If the media server runs on the same host as ViniPlay, expose it on a LAN address/hostname rather than `localhost`.
 
 ### Reverse proxies and `TRUST_PROXY`
 
@@ -210,8 +213,9 @@ Most day-to-day configuration is done in the web interface under **Settings**. D
 -   **Processing:** A new active source is downloaded and merged as soon as you add it. Use the refresh button on a source's row to refresh just that source, or **Process Sources & View Guide** to download, parse and merge all active sources.
 -   **Channel EPG (Admin):** A virtualized list of channels, filterable by status (including **Has a suggestion**), source and group, so large guides stay fast. **Suggest matches** proposes guide channels by name and labels them Exact, Likely, AI pick or Guess. **Accept all** permanently assigns the Exact, Likely and AI picks after a confirmation; Guesses (close ties, wrong time-shifts and AI disagreements) stay for manual review. Select rows to bulk accept or dismiss suggestions, or remove assignments; the pencil assigns a guide channel by hand, and a manual choice always wins over automatic matching. **Process Sources** builds the guide-channel list.
 -   **AI Matching (Admin):** Tick **Also ask AI** in Channel EPG to send doubtful channels to a small model on [OpenRouter](https://openrouter.ai). Save your API key and pick a model (the list comes from OpenRouter, with prices) here, and use **Save & test** to check them with a real request. The key is stored in `/data/openrouter.json` and is never sent back in full; the UI only shows whether a key is saved and at most its last four characters. Requests contain the channel name, its group, and the candidate guide-channel ids and names; no stream URLs or credentials are sent. The model can only choose among matches ViniPlay already found.
--   **Player Settings:** Manage User-Agent strings and define FFmpeg stream profiles. Hardware profiles are added automatically.
--   **DVR Settings and Storage Management:** Choose the recording profile, pre/post buffers and the maximum number of simultaneous recordings, and set how many days to keep old recordings.
+-   **Player Settings:** Manage User-Agent strings, define FFmpeg stream profiles and choose an optional fallback profile tried once when the active profile keeps failing.
+-   **Playback & Downloads (Admin):** Turn downloads on or off, limit concurrent VOD downloads, and enable live TV rewind with a 5–60 minute window and a per-channel disk cap. Keep rewind off if the provider only allows one connection or the `/dvr` volume is small.
+-   **DVR Settings and Storage Management:** Choose the recording profile, pre/post buffers, the global simultaneous-recording limit, a free-disk reserve, a maximum recording length, size-based retention and how many days to keep old recordings.
 -   **Chromecast Settings:** Choose the FFmpeg profile used when casting.
 -   **App Settings, Log Management and Danger Zone:** EPG timezone correction, guide search scope, notification lead time, server logs, settings export/import and a full data reset.
 -   **User Management (Admin):** Admins can create, edit and delete user accounts, grant DVR access and restrict which sources and groups each user can see. New passwords must be at least 12 characters; changing that user's password or deleting the account also ends their open sessions.

@@ -13,7 +13,7 @@ import { formatTimeInZone, formatDateInZone, zoneDayStartUtc } from './time.js';
 import { playChannel } from './player.js';
 import { showNotification, openModal, closeModal } from './ui.js';
 import { addOrRemoveNotification, findNotificationForProgram } from './notification.js';
-import { addOrRemoveDvrJob, findDvrJobForProgram } from './dvr.js';
+import { addOrRemoveDvrJob, findDvrJobForProgram, addSeriesRule, findSeriesRuleForProgram, loadSeriesRules } from './dvr.js';
 import { ICONS } from './icons.js'; // MODIFIED: Import the new icon library
 import { setDigitHandler, focusEl } from './focus.js';
 import { isPlayerOpen } from './osd.js';
@@ -113,6 +113,7 @@ export function openProgramDetails(progItem) {
     const detailsPlayBtn = programDetailsModal.querySelector('#details-play-btn');
     const programDetailsNotifyBtn = programDetailsModal.querySelector('#program-details-notify-btn');
     const programDetailsRecordBtn = programDetailsModal.querySelector('#details-record-btn');
+    const programDetailsSeriesBtn = programDetailsModal.querySelector('#details-series-btn');
     const detailsCloseBtn = programDetailsModal.querySelector('#details-close-btn');
     const detailsFavoriteBtn = programDetailsModal.querySelector('#details-favorite-btn');
 
@@ -237,6 +238,26 @@ export function openProgramDetails(progItem) {
         }
     } else if (programDetailsRecordBtn) {
         programDetailsRecordBtn.classList.add('hidden');
+    }
+
+    // --- Series Rule Button ---
+    if (programDetailsSeriesBtn) {
+        if (hasDvrAccess && isProgramRelevant) {
+            programDetailsSeriesBtn.classList.remove('hidden');
+            const updateSeriesButton = () => {
+                const existing = findSeriesRuleForProgram(programData);
+                programDetailsSeriesBtn.textContent = existing ? 'Series Set' : 'Record Series';
+                programDetailsSeriesBtn.disabled = !!existing;
+                programDetailsSeriesBtn.className = `font-bold py-2 px-4 rounded-md transition-colors ${existing ? 'bg-gray-600' : 'bg-purple-600 hover:bg-purple-700'} text-white`;
+            };
+            updateSeriesButton();
+            programDetailsSeriesBtn.onclick = async () => {
+                if (await addSeriesRule(programData)) updateSeriesButton();
+            };
+            loadSeriesRules().then(updateSeriesButton).catch(() => { });
+        } else {
+            programDetailsSeriesBtn.classList.add('hidden');
+        }
     }
 
     if (detailsCloseBtn) {
