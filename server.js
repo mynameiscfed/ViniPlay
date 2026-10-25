@@ -23,6 +23,10 @@ const { throttleSessionTouch } = require('./sessionTouch');
 const { createUserCache } = require('./userCache');
 const { createVodStore } = require('./vodStore');
 const { createLibraryCache } = require('./vodLibraryCache');
+const { cachedFile, writeFileAtomic } = require('./fileStore');
+const { sendJson } = require('./sendJson');
+const { createEpgPayload } = require('./epgPayload');
+const { applyProcessed } = require('./processedSettings');
 const xmlJS = require('xml-js');
 const zlib = require('zlib');
 const webpush = require('web-push');
@@ -122,6 +126,10 @@ const LIVE_EPG_JSON_PATH = path.join(DATA_DIR, 'epg.json'); // Renamed
 const VOD_MOVIES_JSON_PATH = path.join(DATA_DIR, 'vod_movies.json'); // New
 const VOD_SERIES_JSON_PATH = path.join(DATA_DIR, 'vod_series.json'); // New
 const SETTINGS_PATH = path.join(DATA_DIR, 'settings.json');
+const writeSettings = (settings) => writeFileAtomic(SETTINGS_PATH, JSON.stringify(settings, null, 2));
+// Parsed once per change of the file instead of on every request; callers must not modify what they get.
+const readChannels = cachedFile(LIVE_CHANNELS_M3U_PATH, parseM3U);
+const epgPayload = createEpgPayload(cachedFile(LIVE_EPG_JSON_PATH, (text) => text));
 
 console.log(`[INIT] Application starting. Data directory: ${DATA_DIR}, Public directory: ${PUBLIC_DIR}`);
 
@@ -528,7 +536,7 @@ const updateAndScheduleSourceRefreshes = () => {
                     try {
                         const result = await processAndMergeSources();
                         if (result.success) {
-                            fs.writeFileSync(SETTINGS_PATH, JSON.stringify(result.updatedSettings, null, 2));
+                            saveProcessedSettings(result.updatedSettings);
                             console.log(`[SCHEDULER_RUN] Successfully refreshed and processed sources for "${source.name}".`);
                         }
                     } catch (error) {
@@ -554,9 +562,11 @@ const updateAndScheduleSourceRefreshes = () => {
     console.log(`[SCHEDULER] Finished scheduling. Active timers: ${sourceRefreshTimers.size}`);
 };
 
+const saveProcessedSettings = (processed) => writeSettings(applyProcessed(getSettings(), processed));
+
 function saveSettings(settings) {
     try {
-        fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2));
+        writeSettings(settings);
         console.log('[SETTINGS] Settings saved successfully.');
         updateAndScheduleSourceRefreshes();
     } catch (e) {
@@ -1006,7 +1016,7 @@ function getSettings() {
 
     if (!fs.existsSync(SETTINGS_PATH)) {
         console.log('[SETTINGS] settings.json not found, creating default settings.');
-        fs.writeFileSync(SETTINGS_PATH, JSON.stringify(defaultSettings, null, 2));
+        writeSettings(defaultSettings);
         return defaultSettings;
     }
     try {
@@ -1155,7 +1165,7 @@ function getSettings() {
                 console.log('[SETTINGS_MIGRATE] Settings are all valid.');
                 if (needsSave) {
                     console.log('[SETTINGS_MIGRATE] Saving updated settings file after migration.');
-                    fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2));
+                    writeSettings(settings);
                 }
             } else {
                 console.log('[SETTINGS_MIGRATE_ERROR] Settings are not all valid.');
@@ -1736,7 +1746,7 @@ async function processAndMergeSources(req) {
 
     // --- Save the new separated files ---
     try { // Try block for saving LIVE M3U
-        fs.writeFileSync(LIVE_CHANNELS_M3U_PATH, mergedLiveM3uContent);
+        writeFileAtomic(LIVE_CHANNELS_M3U_PATH, mergedLiveM3uContent);
         console.log(`[M3U] Merged LIVE CHANNELS content saved to ${LIVE_CHANNELS_M3U_PATH}.`);
         sendProcessingStatus(req, `Successfully merged all live channels.`, 'success');
     } catch (writeErr) { // Catch block for saving LIVE M3U
@@ -1858,7 +1868,7 @@ async function processAndMergeSources(req) {
         mergedProgramData[channelId].sort((a, b) => new Date(a.start) - new Date(b.start));
     }
     try { // Try block for saving EPG JSON
-        fs.writeFileSync(LIVE_EPG_JSON_PATH, JSON.stringify(mergedProgramData));
+        writeFileAtomic(LIVE_EPG_JSON_PATH, JSON.stringify(mergedProgramData));
         console.log(`[EPG] Merged EPG JSON content saved to ${LIVE_EPG_JSON_PATH}.`);
         sendProcessingStatus(req, `Successfully merged all EPG data for live channels.`, 'success');
     } catch (writeErr) { // Catch block for saving EPG JSON
@@ -2243,10 +2253,15 @@ app.delete('/api/users/:id', requireAdmin, (req, res) => {
     });
 });
 // --- Protected IPTV API Endpoints ---
+// The EPG arrives as ready-made JSON text, so it is spliced into the response instead of being serialized again.
+const sendConfig = (req, res, config, epgJson = 'null') =>
+    sendJson(req, res, Buffer.from(`${JSON.stringify(config).slice(0, -1)},"epgContent":${epgJson}}`));
+
 app.get('/api/config', requireAuth, async (req, res) => {
     try {
         // ADDED vodMovies and vodSeries
-        let config = { m3uContent: null, epgContent: null, settings: {}, vodMovies: [], vodSeries: [] };
+        let config = { m3uContent: null, settings: {}, vodMovies: [], vodSeries: [] }; // epgContent is added by sendConfig
+        let epgJson;
         let globalSettings = getSettings();
         config.settings = globalSettings;
 
@@ -2351,39 +2366,10 @@ app.get('/api/config', requireAuth, async (req, res) => {
         }
 
         // LOAD EPG
-        if (fs.existsSync(LIVE_EPG_JSON_PATH)) {
-            try {
-                const fullEpg = JSON.parse(fs.readFileSync(LIVE_EPG_JSON_PATH, 'utf-8'));
-                if (allowedSources) {
-                    const filteredEpg = {};
-                    for (const channelId in fullEpg) {
-                        const underscoreIndex = channelId.indexOf('_');
-                        if (underscoreIndex !== -1) {
-                            const sourceId = channelId.substring(0, underscoreIndex);
-                            if (allowedSources[sourceId] && allowedSources[sourceId].allowed) {
-                                // For EPG, we can't easily filter by group unless we look up the channel's group from M3U
-                                // But EPG entries don't have group info. 
-                                // However, the frontend matches EPG to M3U channels. 
-                                // If M3U channel is hidden, EPG doesn't matter much, but good to filter for payload size.
-                                // Limiting factor: We don't know the group here easily without re-parsing M3U or having a mapping.
-                                // DECISION: Filter EPG by Source ID only. Granular group filtering happens naturally because the M3U won't have the channel.
-                                filteredEpg[channelId] = fullEpg[channelId];
-                            }
-                        }
-                    }
-                    config.epgContent = filteredEpg;
-                    console.log(`[API] Loaded and FILTERED EPG content for user ${req.session.username}.`);
-                } else {
-                    config.epgContent = fullEpg;
-                    console.log(`[API] Loaded EPG content from ${LIVE_EPG_JSON_PATH}.`);
-                }
-            } catch (parseError) {
-                console.error(`[API] Error parsing merged EPG JSON from ${LIVE_EPG_JSON_PATH}: ${parseError.message}`);
-                config.epgContent = {};
-            }
-        } else {
-            console.log(`[API] No merged EPG JSON file found at ${LIVE_EPG_JSON_PATH}.`);
-        }
+        epgJson = epgPayload(allowedSources);
+        console.log(epgJson === undefined
+            ? `[API] No merged EPG JSON file found at ${LIVE_EPG_JSON_PATH}.`
+            : `[API] Loaded${allowedSources ? ' and FILTERED' : ''} EPG content from ${LIVE_EPG_JSON_PATH}.`);
 
         // --- NEW: Load VOD Files (Legacy) ---
         // VOD filtering is complex here as it uses legacy JSON files. 
@@ -2407,7 +2393,7 @@ app.get('/api/config', requireAuth, async (req, res) => {
         db.all(`SELECT key, value FROM user_settings WHERE user_id = ?`, [req.session.userId], (err, rows) => {
             if (err) {
                 console.error("[API] Error fetching user settings:", err);
-                return res.status(200).json(config);
+                return sendConfig(req, res, config, epgJson);
             }
             if (rows) {
                 const userSettings = {};
@@ -2441,7 +2427,7 @@ app.get('/api/config', requireAuth, async (req, res) => {
             console.log(`[API] Serving config with permissions signature: ${userPermissionsSignature}`);
             // --------------------------------
 
-            res.status(200).json(config);
+            sendConfig(req, res, config, epgJson);
         });
 
     } catch (error) {
@@ -2611,7 +2597,7 @@ app.get('/api/vod/library', requireAuth, async (req, res) => {
         )).digest('hex');
 
         const library = await vodLibraryCache.get(cacheKey, () => buildVodLibrary(providerMap, allowedSources));
-        res.type('json').send(library);
+        await sendJson(req, res, library);
 
     } catch (error) {
         console.error(`[API_VOD] Error fetching VOD library from DB: ${error.message}`, error);
@@ -3282,7 +3268,7 @@ app.post('/api/process-sources', requireAuth, requireAdmin, async (req, res) => 
         const result = await processAndMergeSources(req); // <-- MODIFIED: Pass req
 
         if (result.success) {
-            fs.writeFileSync(SETTINGS_PATH, JSON.stringify(result.updatedSettings, null, 2));
+            saveProcessedSettings(result.updatedSettings);
             console.log('[API] Source processing completed and settings saved (manual trigger).');
             res.json({ success: true, message: 'Sources merged successfully.' });
         } else {
@@ -3319,7 +3305,7 @@ app.post('/api/save/settings', requireAuth, requireAdmin, async (req, res) => {
             console.log("[API] Timezone setting changed, re-processing sources.");
             const result = await processAndMergeSources();
             if (result.success) {
-                fs.writeFileSync(SETTINGS_PATH, JSON.stringify(result.updatedSettings, null, 2));
+                saveProcessedSettings(result.updatedSettings);
             }
         }
 
@@ -3870,7 +3856,7 @@ app.get('/stream', allowLocalOrAuth, async (req, res) => {
         console.log(`[STREAM] VOD stream detected for logging: Name='${channelName}'`);
     } else {
         // It's a live channel stream, use existing M3U parsing logic
-        const allChannels = parseM3U(fs.existsSync(LIVE_CHANNELS_M3U_PATH) ? fs.readFileSync(LIVE_CHANNELS_M3U_PATH, 'utf-8') : '');
+        const allChannels = readChannels() || [];
         const channel = allChannels.find(c => c.url === streamUrl);
         channelName = channel ? channel.displayName || channel.name : 'Direct Stream';
         channelId = channel ? channel.id : null;
@@ -4853,8 +4839,8 @@ class DvrSupervisor {
 
     resolveStreamUrl() {
         try {
-            if (fs.existsSync(LIVE_CHANNELS_M3U_PATH)) {
-                const channels = parseM3U(fs.readFileSync(LIVE_CHANNELS_M3U_PATH, 'utf-8'));
+            const channels = readChannels();
+            if (channels) {
                 const freshChannel = channels.find(c => c.id === this.job.channelId);
                 if (freshChannel && freshChannel.url) {
                     return freshChannel.url;
@@ -5191,7 +5177,7 @@ function stopRecording(jobId) {
 async function startRecording(job) {
     console.log(`[DVR] Starting recording for job ${job.id}: "${job.programTitle}"`);
     const settings = getSettings();
-    const allChannels = parseM3U(fs.existsSync(LIVE_CHANNELS_M3U_PATH) ? fs.readFileSync(LIVE_CHANNELS_M3U_PATH, 'utf-8') : '');
+    const allChannels = readChannels() || [];
     const channel = allChannels.find(c => c.id === job.channelId);
 
     if (!channel) {
@@ -6377,7 +6363,7 @@ detectHardwareAcceleration().then(() => {
 
         processAndMergeSources().then((result) => {
             console.log('[INIT] Initial source processing complete.');
-            if (result.success) fs.writeFileSync(SETTINGS_PATH, JSON.stringify(result.updatedSettings, null, 2));
+            if (result.success) saveProcessedSettings(result.updatedSettings);
             updateAndScheduleSourceRefreshes();
         }).catch(error => console.error('[INIT] Initial source processing failed:', error.message));
 
