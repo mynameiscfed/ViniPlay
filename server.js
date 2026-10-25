@@ -33,6 +33,14 @@ const activeRedirectStreams = new Map(); // Tracks live redirect streams for the
 
 const app = express();
 const port = 8998;
+
+// Only trust X-Forwarded-For when the operator explicitly says a reverse proxy sits in front.
+// TRUST_PROXY accepts anything Express's 'trust proxy' does (e.g. "1", "loopback", "10.0.0.5").
+// Unset = forwarded headers are ignored and req.ip is the real socket address.
+const TRUST_PROXY = process.env.TRUST_PROXY;
+if (TRUST_PROXY) {
+    app.set('trust proxy', /^\d+$/.test(TRUST_PROXY) ? parseInt(TRUST_PROXY, 10) : TRUST_PROXY);
+}
 const saltRounds = 10;
 // Initialize global variables at the top-level scope
 let notificationCheckInterval = null;
@@ -520,7 +528,7 @@ app.use(
 
 app.use((req, res, next) => {
     // Add client IP to the request object for logging
-    req.clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+    req.clientIp = req.ip || req.socket.remoteAddress;
 
     if (req.path === '/api/events') {
         return next();
@@ -1883,7 +1891,7 @@ app.post('/api/auth/logout', (req, res) => {
 });
 
 // --- NEW/OPTIMIZED ENDPOINT FOR GROUP FILTERING (with Caching & Refresh) ---
-app.post('/api/sources/fetch-groups', requireAuth, async (req, res) => {
+app.post('/api/sources/fetch-groups', requireAuth, requireAdmin, async (req, res) => {
     // --- ADDITION: Get refresh flag from query or body ---
     const forceRefresh = req.query.refresh === 'true' || req.body.refresh === true;
     const { type, url, xc, sourceId } = req.body; // Added sourceId
@@ -2809,7 +2817,7 @@ const upload = multer({
 });
 
 
-app.post('/api/sources', requireAuth, upload.single('sourceFile'), async (req, res) => {
+app.post('/api/sources', requireAuth, requireAdmin, upload.single('sourceFile'), async (req, res) => {
     // ADD selectedGroups to the destructured body
     const { sourceType, name, url, isActive, id, refreshHours, xc, selectedGroups } = req.body;
 
@@ -3099,7 +3107,7 @@ app.post('/api/sources', requireAuth, upload.single('sourceFile'), async (req, r
 });
 
 
-app.put('/api/sources/:sourceType/:id', requireAuth, (req, res) => {
+app.put('/api/sources/:sourceType/:id', requireAuth, requireAdmin, (req, res) => {
     const { sourceType, id } = req.params;
     const { name, path: newPath, isActive } = req.body;
     console.log(`[SOURCES_API] Partial update source ID: ${id}, Type: ${sourceType}, isActive: ${isActive}`);
@@ -3126,7 +3134,7 @@ app.put('/api/sources/:sourceType/:id', requireAuth, (req, res) => {
     res.json({ success: true, message: 'Source updated.', settings: getSettings() });
 });
 
-app.delete('/api/sources/:sourceType/:id', requireAuth, async (req, res) => {
+app.delete('/api/sources/:sourceType/:id', requireAuth, requireAdmin, async (req, res) => {
     const { sourceType, id } = req.params;
     console.log(`[SOURCES_API] Deleting source ID: ${id}, Type: ${sourceType}`);
 
@@ -3202,7 +3210,7 @@ app.delete('/api/sources/:sourceType/:id', requireAuth, async (req, res) => {
     res.json({ success: true, message: 'Source deleted.', settings: getSettings() });
 });
 
-app.post('/api/process-sources', requireAuth, async (req, res) => {
+app.post('/api/process-sources', requireAuth, requireAdmin, async (req, res) => {
     console.log('[API] Received request to /api/process-sources (manual trigger).');
     try {
         const result = await processAndMergeSources(req); // <-- MODIFIED: Pass req
@@ -3223,7 +3231,7 @@ app.post('/api/process-sources', requireAuth, async (req, res) => {
 });
 
 
-app.post('/api/save/settings', requireAuth, async (req, res) => {
+app.post('/api/save/settings', requireAuth, requireAdmin, async (req, res) => {
     console.log('[API] Received request to /api/save/settings.');
     try {
         let currentSettings = getSettings();
@@ -3674,24 +3682,22 @@ function allowLocalOrAuth(req, res, next) {
         return next();
     }
 
-    // Get the real client IP (first IP in X-Forwarded-For chain, before Cloudflare)
-    let clientIp = req.clientIp || req.ip;
-
-    // X-Forwarded-For can be a comma-separated list: "client, proxy1, proxy2"
-    // We want the FIRST IP (the real client)
-    if (clientIp && clientIp.includes(',')) {
-        clientIp = clientIp.split(',')[0].trim();
+    // Fail closed: forwarded headers with no configured trusted proxy mean the socket address is
+    // the proxy's, not the client's, so "local" cannot be established.
+    if (req.headers['x-forwarded-for'] && !TRUST_PROXY) {
+        console.warn('[STREAM_AUTH] ✗ X-Forwarded-For present but TRUST_PROXY is not set; refusing local-network bypass.');
+        return res.status(401).send('Authentication required');
     }
 
-    console.log(`[STREAM_AUTH] Checking IP: ${clientIp} (original: ${req.clientIp || req.ip})`);
+    const clientIp = req.ip || req.socket.remoteAddress || '';
+    console.log(`[STREAM_AUTH] Checking IP: ${clientIp}`);
 
-    // Check if request is from local network (fallback for direct local access)
-    const isLocal = clientIp.startsWith('192.168.') ||
-        clientIp.startsWith('10.') ||
-        clientIp.startsWith('172.16.') ||
-        clientIp === '127.0.0.1' ||
-        clientIp === '::1' ||
-        clientIp === '::ffff:127.0.0.1';
+    const m = clientIp.match(/^(?:::ffff:)?(\d+)\.(\d+)\.\d+\.\d+$/);
+    const isLocal = clientIp === '::1' || (m && (
+        m[1] === '127' || m[1] === '10' ||
+        (m[1] === '192' && m[2] === '168') ||
+        (m[1] === '172' && +m[2] >= 16 && +m[2] <= 31)
+    ));
 
     if (isLocal) {
         console.log(`[STREAM_AUTH] ✓ Allowing unauthenticated access from local network: ${clientIp}`);
@@ -5907,7 +5913,7 @@ app.get('/api/events', requireAuth, (req, res) => {
     });
 });
 
-app.post('/api/validate-url', requireAuth, async (req, res) => {
+app.post('/api/validate-url', requireAuth, requireAdmin, async (req, res) => {
     const { url } = req.body;
     if (!url) {
         return res.status(400).json({ error: 'URL is required.' });
@@ -5926,7 +5932,7 @@ app.get('/api/hardware', requireAuth, (req, res) => {
     res.json(detectedHardware);
 });
 
-app.get('/api/public-ip', requireAuth, (req, res) => {
+app.get('/api/public-ip', requireAuth, requireAdmin, (req, res) => {
     console.log('[IP_API] Fetching public IP address...');
     https.get('https://ifconfig.me/ip', (ipRes) => {
         let data = '';

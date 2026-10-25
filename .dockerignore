@@ -13,3 +13,8 @@ docker-compose.yml
 
 # Persistent data directory (should be mounted as a volume, not copied)
 viniplay-data
+
+# CI and tests (not needed at runtime)
+.git
+.github
+test
