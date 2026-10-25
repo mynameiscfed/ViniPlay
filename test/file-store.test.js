@@ -44,3 +44,10 @@ test('writeFileAtomic replaces the file and leaves no temp file behind', () => {
     assert.strictEqual(fs.readFileSync(file, 'utf-8'), 'two');
     assert.deepStrictEqual(fs.readdirSync(dir), ['settings.json']);
 });
+
+test('writeFileAtomic can create a secret file readable by its owner only', () => {
+    const file = path.join(tempDir(), 'secret.json');
+    writeFileAtomic(file, '{"k":1}', 0o600);
+    assert.strictEqual(fs.statSync(file).mode & 0o777, 0o600);
+    assert.strictEqual(fs.readFileSync(file, 'utf-8'), '{"k":1}');
+});

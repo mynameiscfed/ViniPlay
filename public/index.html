@@ -885,7 +885,7 @@
                             <input type="search" id="epg-map-search" placeholder="Filter channels..."
                                 class="flex-grow bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm text-white focus:ring-blue-500 focus:border-blue-500">
                             <label class="flex items-center gap-2 text-sm text-gray-300"
-                                title="Sends channel names to OpenRouter; needs OPENROUTER_API_KEY and EPG_LLM_MODEL on the server">
+                                title="Sends channel names to OpenRouter; set it up in AI Matching below">
                                 <input type="checkbox" id="epg-map-ai"> Also ask AI</label>
                             <button type="button" id="epg-map-auto-btn"
                                 class="bg-blue-600 hover:bg-blue-700 disabled:bg-blue-800 text-white text-sm font-bold py-2 px-3 rounded-md">Suggest
@@ -912,6 +912,39 @@
                         <button type="button" id="epg-map-more-btn"
                             class="hidden mt-3 bg-gray-700 hover:bg-gray-600 text-white text-sm font-bold py-2 px-4 rounded-md">Show
                             more</button>
+                    </div>
+
+                    <div class="bg-gray-800 p-4 sm:p-6 rounded-xl shadow-lg">
+                        <h2 class="text-xl font-bold text-white mb-2 border-b border-gray-700 pb-2">AI Matching</h2>
+                        <p class="text-sm text-gray-400 mb-4">Lets <strong>Also ask AI</strong> in Channel EPG settle the matches
+                            the name search is unsure of, using a model on
+                            <a href="https://openrouter.ai/keys" target="_blank" rel="noopener noreferrer"
+                                class="underline">OpenRouter</a>. Only channel names and guide channel names are sent.</p>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                                <label for="epg-ai-key" class="block text-sm font-medium text-gray-400 mb-2">OpenRouter API key</label>
+                                <input type="password" id="epg-ai-key" autocomplete="new-password" placeholder="sk-or-..."
+                                    class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-white focus:ring-blue-500 focus:border-blue-500">
+                            </div>
+                            <div>
+                                <label for="epg-ai-model" class="block text-sm font-medium text-gray-400 mb-2">Model</label>
+                                <input type="text" id="epg-ai-model" list="epg-ai-models" autocomplete="off"
+                                    placeholder="Search OpenRouter models..."
+                                    class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-white focus:ring-blue-500 focus:border-blue-500">
+                                <datalist id="epg-ai-models"></datalist>
+                            </div>
+                        </div>
+                        <div class="flex flex-wrap items-center gap-3 mt-4">
+                            <button type="button" id="epg-ai-save-btn"
+                                class="bg-blue-600 hover:bg-blue-700 disabled:bg-blue-800 text-white text-sm font-bold py-2 px-3 rounded-md">Save</button>
+                            <button type="button" id="epg-ai-test-btn"
+                                class="bg-green-600 hover:bg-green-700 disabled:bg-green-800 text-white text-sm font-bold py-2 px-3 rounded-md">Save
+                                &amp; test</button>
+                            <button type="button" id="epg-ai-clear-btn"
+                                class="bg-red-600 hover:bg-red-700 disabled:bg-red-800 text-white text-sm font-bold py-2 px-3 rounded-md">Remove
+                                key</button>
+                            <span id="epg-ai-status" class="text-sm text-gray-400" role="status"></span>
+                        </div>
                     </div>
 
                     <div class="bg-gray-800 p-4 sm:p-6 rounded-xl shadow-lg">

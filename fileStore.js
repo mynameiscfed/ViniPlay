@@ -27,9 +27,10 @@ function cachedFile(file, parse) {
 }
 
 // Readers see the old file or the new one, never half of it, and a crash cannot leave a truncated file behind.
-function writeFileAtomic(file, data) {
+// `mode` (e.g. 0o600 for a secret) is set when the file is created, so it is never readable by others, not even briefly.
+function writeFileAtomic(file, data, mode) {
     const temp = `${file}.tmp`;
-    fs.writeFileSync(temp, data);
+    fs.writeFileSync(temp, data, mode === undefined ? undefined : { mode });
     fs.renameSync(temp, file);
 }
 

@@ -32,7 +32,7 @@ const { pipeline } = require('stream');
 const { pipeline: pipelineAsync } = require('stream/promises');
 const { forEachProgramme, forEachChannel } = require('./epgStream');
 const { buildTargets, createSuggester, bestMatch, CONFIDENT } = require('./epgMatch');
-const { pickWithLlm } = require('./epgLlm');
+const { chat, pickWithLlm, listModels, searchModels, aiStatus, updateAiConfig } = require('./epgLlm');
 const webpush = require('web-push');
 const schedule = require('node-schedule');
 const disk = require('diskusage');
@@ -119,6 +119,8 @@ const DATA_DIR = '/data';
 const DVR_DIR = '/dvr';
 const LOGS_DIR = path.join(DATA_DIR, 'logs'); // NEW: Log management directory
 const VAPID_KEYS_PATH = path.join(DATA_DIR, 'vapid.json');
+// The OpenRouter key and model ({apiKey, model}). A secret, so not in settings.json: /api/config sends every setting to every user.
+const OPENROUTER_PATH = path.join(DATA_DIR, 'openrouter.json');
 const SOURCES_DIR = path.join(DATA_DIR, 'sources');
 const RAW_CACHE_DIR = path.join(SOURCES_DIR, 'raw_cache');
 const IMAGE_CACHE_DIR = path.join(DATA_DIR, 'image_cache'); // NEW: VOD poster image cache
@@ -138,6 +140,8 @@ const epgPayload = createEpgPayload(cachedFile(LIVE_EPG_JSON_PATH, (text) => tex
 const EPG_CHANNELS_JSON_PATH = path.join(DATA_DIR, 'epg_channels.json');
 const readEpgChannels = cachedFile(EPG_CHANNELS_JSON_PATH, JSON.parse);
 const NO_EPG_CHANNELS = [];
+const readAiConfig = cachedFile(OPENROUTER_PATH, JSON.parse);
+const AI_UNSET = 'AI matching is not set up: add your OpenRouter key and model in Settings > AI Matching.';
 let epgSuggester; // [the list it was built from, its search]; rebuilt only when the file changes
 const suggestEpg = (name, k) => {
     const list = readEpgChannels() || NO_EPG_CHANNELS;
@@ -3347,11 +3351,8 @@ app.post('/api/epg/suggest', requireAuth, requireAdmin, async (req, res) => {
     if (!Array.isArray(channelIds) || channelIds.length > MAX_SUGGEST_BATCH) {
         return res.status(400).json({ error: `channelIds must be a list of at most ${MAX_SUGGEST_BATCH}.` });
     }
-    const apiKey = process.env.OPENROUTER_API_KEY;
-    const model = process.env.EPG_LLM_MODEL;
-    if (llm && !(apiKey && model)) {
-        return res.status(400).json({ error: 'AI matching is not set up: set OPENROUTER_API_KEY and EPG_LLM_MODEL on the server.' });
-    }
+    const { apiKey, model } = readAiConfig() || {};
+    if (llm && !(apiKey && model)) return res.status(400).json({ error: AI_UNSET });
     const wanted = new Set(channelIds);
     const suggestions = new Map(); // channel id -> suggestion
     const ask = []; // for the model
@@ -3376,6 +3377,42 @@ app.post('/api/epg/suggest', requireAuth, requireAdmin, async (req, res) => {
         return res.status(502).json({ error: `AI matching failed: ${error.message}` });
     }
     res.json({ suggestions: [...suggestions.values()] });
+});
+
+// --- AI matching settings (admin) ---
+// The key is never sent back: the browser only learns whether one is set and how it ends.
+app.get('/api/epg/ai', requireAuth, requireAdmin, (req, res) => res.json(aiStatus(readAiConfig())));
+
+app.put('/api/epg/ai', requireAuth, requireAdmin, (req, res) => {
+    let next;
+    try {
+        next = updateAiConfig(readAiConfig() || {}, req.body);
+    } catch (error) {
+        return res.status(400).json({ error: error.message });
+    }
+    writeFileAtomic(OPENROUTER_PATH, JSON.stringify(next), 0o600);
+    res.json(aiStatus(next));
+});
+
+// OpenRouter's own model list, with prices, for the model picker.
+app.get('/api/epg/ai/models', requireAuth, requireAdmin, async (req, res) => {
+    try {
+        res.json(searchModels(await listModels(), req.query.q));
+    } catch (error) {
+        res.status(502).json({ error: `Could not load OpenRouter's model list: ${error.message}` });
+    }
+});
+
+// One real, tiny completion with the saved key and model: proves the key, the model and the credit all at once.
+app.post('/api/epg/ai/test', requireAuth, requireAdmin, async (req, res) => {
+    const { apiKey, model } = readAiConfig() || {};
+    if (!(apiKey && model)) return res.status(400).json({ error: AI_UNSET });
+    try {
+        const reply = await chat({ apiKey, model, maxTokens: 16, messages: [{ role: 'user', content: 'Reply with the single word OK.' }] });
+        res.json({ ok: true, model, reply: reply.trim() });
+    } catch (error) {
+        res.status(502).json({ error: error.message });
+    }
 });
 
 // {set: {channelId: xmltvId}, clear: [channelId]}. Re-merges the guides (not the playlists) so it shows at once.
@@ -3797,7 +3834,7 @@ app.delete('/api/data', requireAuth, requireAdmin, (req, res) => {
         runningFFmpegProcesses.clear();
 
         console.log('[API_RESET] Wiping all data files...');
-        const filesToDelete = [LIVE_CHANNELS_M3U_PATH, LIVE_EPG_JSON_PATH, EPG_CHANNELS_JSON_PATH, VOD_MOVIES_JSON_PATH, VOD_SERIES_JSON_PATH, SETTINGS_PATH, VAPID_KEYS_PATH];
+        const filesToDelete = [LIVE_CHANNELS_M3U_PATH, LIVE_EPG_JSON_PATH, EPG_CHANNELS_JSON_PATH, VOD_MOVIES_JSON_PATH, VOD_SERIES_JSON_PATH, SETTINGS_PATH, VAPID_KEYS_PATH, OPENROUTER_PATH];
         filesToDelete.forEach(file => {
             if (fs.existsSync(file)) fs.unlinkSync(file);
         });
