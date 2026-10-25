@@ -27,6 +27,7 @@
   --c-s4: 39 45 64;
   --c-line: 38 44 61;
   --c-line2: 57 64 88;
+  --c-ctl: 90 99 128;
   --c-tx: 242 244 250;
   --c-tx2: 179 187 207;
   --c-tx3: 141 150 176;
@@ -114,18 +115,19 @@
     color-scheme: light;
 
     --c-deep: 255 255 255;
-    --c-bg: 243 245 250;
+    --c-bg: 246 247 249;
     --c-s1: 255 255 255;
     --c-s2: 255 255 255;
     --c-s3: 237 240 247;
     --c-s4: 225 230 241;
-    --c-line: 221 226 238;
+    --c-line: 226 231 239;
     --c-line2: 196 204 221;
-    --c-tx: 14 18 32;
-    --c-tx2: 59 67 90;
-    --c-tx3: 90 100 128;
+    --c-ctl: 138 148 168;
+    --c-tx: 21 27 43;
+    --c-tx2: 61 71 96;
+    --c-tx3: 100 112 135;
 
-    --c-cy: 8 105 124;
+    --c-cy: 7 107 118;
     --c-pk: 176 20 88;
     --c-am: 122 80 0;
     --c-gr: 11 112 72;
@@ -145,7 +147,7 @@
     --glow: 0 0 0 .17em rgb(var(--c-bg)), 0 0 0 .34em rgb(var(--c-cy));
 
     --g-950: 255 255 255;
-    --g-900: 243 245 250;
+    --g-900: 246 247 249;
     --g-800: 255 255 255;
     --g-700: 225 230 241;
     --g-600: 205 212 227;
@@ -205,18 +207,19 @@
   color-scheme: light;
 
   --c-deep: 255 255 255;
-  --c-bg: 243 245 250;
+  --c-bg: 246 247 249;
   --c-s1: 255 255 255;
   --c-s2: 255 255 255;
   --c-s3: 237 240 247;
   --c-s4: 225 230 241;
-  --c-line: 221 226 238;
+  --c-line: 226 231 239;
   --c-line2: 196 204 221;
-  --c-tx: 14 18 32;
-  --c-tx2: 59 67 90;
-  --c-tx3: 90 100 128;
+  --c-ctl: 138 148 168;
+  --c-tx: 21 27 43;
+  --c-tx2: 61 71 96;
+  --c-tx3: 100 112 135;
 
-  --c-cy: 8 105 124;
+  --c-cy: 7 107 118;
   --c-pk: 176 20 88;
   --c-am: 122 80 0;
   --c-gr: 11 112 72;
@@ -236,7 +239,7 @@
   --glow: 0 0 0 .17em rgb(var(--c-bg)), 0 0 0 .34em rgb(var(--c-cy));
 
   --g-950: 255 255 255;
-  --g-900: 243 245 250;
+  --g-900: 246 247 249;
   --g-800: 255 255 255;
   --g-700: 225 230 241;
   --g-600: 205 212 227;
@@ -302,6 +305,7 @@
   --s4: rgb(var(--c-s4));
   --line: rgb(var(--c-line));
   --line2: rgb(var(--c-line2));
+  --ctl: rgb(var(--c-ctl));
   --tx: rgb(var(--c-tx));
   --tx2: rgb(var(--c-tx2));
   --tx3: rgb(var(--c-tx3));
@@ -314,18 +318,75 @@
 }
 
 :root {
-  --f-ui: 'Figtree', system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  --f-disp: 'Bricolage Grotesque', 'Figtree', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --f-ui: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --f-disp: var(--f-ui);
   --f-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
-  --r-sm: 8px;
-  --r-md: 10px;
-  --r-lg: 14px;
-  --r-xl: 20px;
+  /* Radius: controls and cards stay small; only overlays get the larger step. */
+  --r-xs: 2px;
+  --r-sm: 4px;
+  --r-md: 6px;
+  --r-lg: 8px;
+  --r-xl: 12px;
+
+  /* Type scale (rem, 16px base). Weights used: 400, 500, 600. */
+  --t-page: 1.875rem;     /* 30px page title */
+  --t-section: 1.25rem;   /* 20px section heading */
+  --t-card: .9375rem;     /* 15px card and channel title */
+  --t-body: .875rem;      /* 14px */
+  --t-meta: .8125rem;     /* 13px supporting metadata */
+  --t-small: .75rem;      /* 12px technical metadata */
+  --t-nav: .6875rem;      /* 11px navigation labels */
+  --lh-tight: 1.2;
+  --lh-snug: 1.35;
+  --lh-body: 1.5;
+
+  /* Spacing, 4px steps. */
+  --sp-1: .25rem;
+  --sp-2: .5rem;
+  --sp-3: .75rem;
+  --sp-4: 1rem;
+  --sp-5: 1.5rem;
+  --sp-6: 2rem;
+  --sp-7: 3rem;
+
+  /* Control heights, icon sizes, motion. */
+  --h-ctl-sm: 1.75rem;
+  --h-ctl: 2.25rem;
+  --h-ctl-lg: 2.75rem;
+  --ico-sm: 1rem;
+  --ico: 1.25rem;
+  --ico-lg: 1.5rem;
+  --dur-fast: 120ms;
+  --dur: 180ms;
+  --ease: cubic-bezier(.2, 0, 0, 1);
+
+  /* Layout: gutters grow with the viewport; prose and forms get a reading measure, pages do not. */
+  --gutter: 1rem;
+  --measure: 46rem;
+  --card-min: 18rem;
 
   /* Layout metrics the shell and pages share. */
   --rail-w: 5.9em;
   --tabbar-h: 4.25rem;
   --safe-x: 0px;
   --safe-y: 0px;
+}
+
+@media (min-width: 768px) {
+  :root { --gutter: 1.5rem; }
+}
+
+@media (min-width: 1440px) {
+  :root { --gutter: 2rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --dur-fast: 0ms; --dur: 0ms; }
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: .001ms !important;
+  }
 }

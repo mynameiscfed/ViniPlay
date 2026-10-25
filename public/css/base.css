@@ -148,6 +148,12 @@ html.kb [role="button"]:focus {
     z-index: 2;
 }
 
+/* Keyboard focus is always visible, whether or not the app's key mode is on. */
+:focus-visible {
+    outline: 2px solid var(--cy);
+    outline-offset: 2px;
+}
+
 /* Hidden native checkboxes paint their ring on the visible control. */
 html.kb .switch input:focus {
     box-shadow: none;
@@ -247,7 +253,7 @@ button:disabled,
     min-height: 2rem;
     padding: 0 .75rem;
     font-size: .8125rem;
-    border-radius: 8px;
+    border-radius: var(--r-md);
 }
 
 .btn-lg {
@@ -457,6 +463,29 @@ input:checked+.slider:before {
     }
 }
 
+/* ---------- Radius and elevation ----------
+ * The Tailwind utilities in the markup map onto the restrained scale in tokens.css, and
+ * only overlays keep a shadow: surfaces are separated by a hairline border instead.
+ */
+.rounded { border-radius: var(--r-sm); }
+.rounded-md { border-radius: var(--r-sm); }
+.rounded-lg { border-radius: var(--r-md); }
+.rounded-xl,
+.rounded-2xl { border-radius: var(--r-lg); }
+
+.shadow,
+.shadow-md,
+.shadow-lg,
+.shadow-xl,
+.shadow-2xl {
+    box-shadow: none;
+}
+
+body>div[id$="-modal"] .shadow-xl,
+body>div[id$="-modal"] .shadow-2xl {
+    box-shadow: var(--shadow-2);
+}
+
 /* ---------- Surfaces ---------- */
 .card {
     background: var(--s2);
@@ -485,9 +514,9 @@ input:checked+.slider:before {
     gap: .35em;
     height: 1.4rem;
     padding: 0 .55rem;
-    border-radius: 999px;
+    border-radius: var(--r-sm);
     font-size: .6875rem;
-    font-weight: 750;
+    font-weight: 600;
     letter-spacing: .04em;
     text-transform: uppercase;
     white-space: nowrap;
@@ -544,11 +573,11 @@ input:checked+.slider:before {
     gap: .45em;
     height: 2.25rem;
     padding: 0 .95rem;
-    border: 1px solid var(--line);
-    border-radius: 999px;
-    background: var(--s2);
+    border: 1px solid var(--ctl);
+    border-radius: var(--r-md);
+    background: var(--s1);
     color: var(--tx2);
-    font: 600 .8125rem/1 var(--f-ui);
+    font: 500 .8125rem/1 var(--f-ui);
     white-space: nowrap;
     cursor: pointer;
     transition: background-color .15s, color .15s, border-color .15s;
@@ -585,7 +614,7 @@ input:checked+.slider:before {
     padding: 3px;
     gap: 2px;
     border: 1px solid var(--line);
-    border-radius: 12px;
+    border-radius: var(--r-lg);
     background: var(--s2);
 }
 
@@ -593,7 +622,7 @@ input:checked+.slider:before {
     min-height: 2rem;
     padding: 0 .85rem;
     border: 0;
-    border-radius: 9px;
+    border-radius: var(--r-md);
     background: transparent;
     color: var(--tx2);
     font: 600 .8125rem/1 var(--f-ui);
@@ -625,7 +654,17 @@ input:checked+.slider:before {
     background-color: var(--s3);
 }
 
-/* ---------- Tables ---------- */
+/* Page padding for the data pages: gutters follow the viewport. */
+.pg {
+    padding: var(--sp-4) var(--gutter) var(--sp-5);
+}
+
+/* ---------- Tables ----------
+ * One system for every data table. Cells wrap at natural boundaries and break unbreakable
+ * strings (URLs, IDs); only times and numbers stay on one line (.nw). Action cells (.act) are
+ * compact and share a width. Below 768px a table with .stack becomes one card per row; the
+ * cell labels come from the header (see js/modules/tablelabels.js).
+ */
 .dvr-table,
 .sources-table,
 .admin-table {
@@ -636,26 +675,72 @@ input:checked+.slider:before {
 .dvr-table th,
 .sources-table th,
 .admin-table th {
-    padding: .65rem 1rem;
+    padding: .6rem .75rem;
     text-align: left;
-    font-size: .6875rem;
-    font-weight: 700;
-    letter-spacing: .08em;
+    font-size: var(--t-small);
+    font-weight: 600;
+    letter-spacing: .04em;
     text-transform: uppercase;
     color: var(--tx3);
     background: transparent;
-    border-bottom: 1px solid var(--line);
+    border-bottom: 1px solid var(--line2);
     white-space: nowrap;
 }
 
 .dvr-table td,
 .sources-table td,
 .admin-table td {
-    padding: .8rem 1rem;
-    font-size: .875rem;
+    padding: .6rem .75rem;
+    font-size: var(--t-body);
+    line-height: var(--lh-snug);
     color: var(--tx2);
     border-bottom: 1px solid var(--line);
+    vertical-align: middle;
+    overflow-wrap: break-word;
+}
+
+/* Strings with no natural break (URLs, IDs, addresses) may break anywhere. */
+td.cell-main,
+td.cell-sub,
+td.brk {
+    overflow-wrap: anywhere;
+}
+
+td.brk {
+    min-width: 8rem;
+}
+
+.dvr-table td.nw,
+.sources-table td.nw,
+.admin-table td.nw {
     white-space: nowrap;
+}
+
+.dvr-table td.num,
+.sources-table td.num,
+.admin-table td.num {
+    font-variant-numeric: tabular-nums;
+    font-size: var(--t-meta);
+}
+
+/* Primary identifier: strongest text in the row, wraps to at most three lines. */
+td.cell-main {
+    min-width: 12rem;
+    color: var(--tx);
+    font-weight: 600;
+    font-size: var(--t-card);
+}
+
+td.cell-sub {
+    color: var(--tx2);
+    font-size: var(--t-meta);
+}
+
+td.act,
+th.text-right {
+    width: 1%;
+    white-space: nowrap;
+    text-align: right;
 }
 
 .dvr-table tbody tr:last-child td,
@@ -670,19 +755,104 @@ input:checked+.slider:before {
     background: rgb(var(--c-tx) / .035);
 }
 
-.dvr-table th.text-right,
-.sources-table th.text-right,
-.admin-table th.text-right {
-    text-align: right;
-}
-
 .action-btn {
+    display: inline-grid;
+    place-items: center;
+    width: 2rem;
+    height: 2rem;
+    padding: 0;
+    border: 0;
+    border-radius: var(--r-md);
+    background: transparent;
     color: var(--tx3);
-    transition: color .15s;
+    cursor: pointer;
+    transition: color var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease);
 }
 
 .action-btn:hover {
+    background: var(--s3);
     color: var(--tx);
+}
+
+@media (pointer: coarse) {
+    .action-btn {
+        width: 2.75rem;
+        height: 2.75rem;
+    }
+}
+
+@media (max-width: 1023.98px) {
+    .dvr-table td,
+    .sources-table td,
+    .admin-table td,
+    .dvr-table th,
+    .sources-table th,
+    .admin-table th {
+        padding: .5rem .5rem;
+    }
+}
+
+@media (max-width: 767.98px) {
+    table.stack td.nw {
+        white-space: normal;
+    }
+
+    table.stack,
+    table.stack tbody,
+    table.stack tr,
+    table.stack td {
+        display: block;
+        width: auto;
+    }
+
+    table.stack thead {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+    }
+
+    table.stack tr {
+        padding: var(--sp-3) 0;
+        border-bottom: 1px solid var(--line);
+    }
+
+    table.stack td {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: var(--sp-3);
+        padding: .2rem 0;
+        border: 0;
+        text-align: right;
+    }
+
+    table.stack td::before {
+        content: attr(data-label);
+        flex: none;
+        color: var(--tx3);
+        font-size: var(--t-small);
+        text-align: left;
+    }
+
+    table.stack td.cell-main {
+        display: block;
+        min-width: 0;
+        padding-bottom: .35rem;
+        text-align: left;
+    }
+
+    table.stack td.cell-main::before,
+    table.stack td:not([data-label])::before,
+    table.stack td[data-label=""]::before {
+        content: none;
+    }
+
+    table.stack td.act {
+        justify-content: flex-end;
+        width: auto;
+    }
 }
 
 /* ---------- Overlays ---------- */

@@ -562,8 +562,11 @@ async function proceedWithRouteChange(path) {
     // Navigation state. The rail (tab-*) and the phone tab bar (mobile-nav-*) stay in step.
     // The phone bar has no Multi-View, Activity or Settings tab, so those light up "More".
     const setActive = (name, on) => {
-        UIElements['tab' + name]?.classList.toggle('active', on);
-        UIElements['mobileNav' + name]?.classList.toggle('active', on);
+        for (const el of [UIElements['tab' + name], UIElements['mobileNav' + name]]) {
+            if (!el) continue;
+            el.classList.toggle('active', on);
+            if (on) el.setAttribute('aria-current', 'page'); else el.removeAttribute('aria-current');
+        }
     };
     setActive('Home', isHome);
     setActive('Guide', isGuide);

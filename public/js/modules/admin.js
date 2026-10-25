@@ -134,7 +134,7 @@ function renderAnalyticsWidgets(analytics) {
     if (analytics.topChannels.length > 0) {
         topChannelsEl.innerHTML = analytics.topChannels.map(c => `
             <div class="flex justify-between items-center">
-                <span class="truncate" title="${escapeHtml(c.channel_name)}">${escapeHtml(c.channel_name)}</span>
+                <span class="min-w-0 break-words" title="${escapeHtml(c.channel_name)}">${escapeHtml(c.channel_name)}</span>
                 <span class="font-mono text-gray-400">${formatDuration(c.total_duration, true)}</span>
             </div>
         `).join('');
@@ -145,7 +145,7 @@ function renderAnalyticsWidgets(analytics) {
     if (analytics.topUsers.length > 0) {
         topUsersEl.innerHTML = analytics.topUsers.map(u => `
             <div class="flex justify-between items-center">
-                <span class="truncate" title="${escapeHtml(u.username)}">${escapeHtml(u.username)}</span>
+                <span class="min-w-0 break-words" title="${escapeHtml(u.username)}">${escapeHtml(u.username)}</span>
                 <span class="font-mono text-gray-400">${formatDuration(u.total_duration, true)}</span>
             </div>
         `).join('');
@@ -182,21 +182,21 @@ function renderLiveActivity() {
 
         tr.innerHTML = `
             <td><span class="clickable-username" title="Filter history for this user">${escapeHtml(stream.username)}</span></td>
-            <td>${escapeHtml(stream.clientIp || 'N/A')}</td>
+            <td class="brk">${escapeHtml(stream.clientIp || 'N/A')}</td>
             <td>
                 <div class="flex items-center gap-3">
                     <img src="${escapeHtml(stream.channelLogo || 'https://placehold.co/40x40/1f2937/d1d5db?text=?')}" 
                          onerror="this.onerror=null; this.src='https://placehold.co/40x40/1f2937/d1d5db?text=?';" 
                          class="w-10 h-10 object-contain rounded-md bg-gray-700 flex-shrink-0" 
                          alt="Channel Logo">
-                    <span class="truncate" title="${escapeHtml(stream.channelName)}">${escapeHtml(stream.channelName)}</span>
+                    <span class="min-w-0 break-words" title="${escapeHtml(stream.channelName)}">${escapeHtml(stream.channelName)}</span>
                 </div>
             </td>
             <td>${escapeHtml(stream.streamProfileName || 'N/A')}</td>
             <td class="text-center">${transcodeIndicator}</td>
-            <td>${new Date(stream.startTime).toLocaleString()}</td>
-            <td class="live-duration" data-start-time="${escapeHtml(stream.startTime)}">-</td>
-            <td class="text-right">
+            <td class="nw num">${new Date(stream.startTime).toLocaleString()}</td>
+            <td class="nw num live-duration" data-start-time="${escapeHtml(stream.startTime)}">-</td>
+            <td class="act">
                 <div class="flex items-center justify-end gap-3">
                     <button class="action-btn change-stream-btn text-blue-400 hover:text-blue-300" title="Change User's Channel">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"></path></svg>
@@ -235,20 +235,20 @@ function renderWatchHistory() {
         const tr = document.createElement('tr');
         tr.innerHTML = `
             <td><span class="clickable-username" title="Filter history for this user">${escapeHtml(entry.username)}</span></td>
-            <td>${escapeHtml(entry.client_ip || 'N/A')}</td>
+            <td class="brk">${escapeHtml(entry.client_ip || 'N/A')}</td>
             <td>
                 <div class="flex items-center gap-3">
                     <img src="${escapeHtml(entry.channel_logo || 'https://placehold.co/40x40/1f2937/d1d5db?text=?')}" 
                          onerror="this.onerror=null; this.src='https://placehold.co/40x40/1f2937/d1d5db?text=?';" 
                          class="w-10 h-10 object-contain rounded-md bg-gray-700 flex-shrink-0" 
                          alt="Channel Logo">
-                    <span class="truncate" title="${escapeHtml(entry.channel_name)}">${escapeHtml(entry.channel_name)}</span>
+                    <span class="min-w-0 break-words" title="${escapeHtml(entry.channel_name)}">${escapeHtml(entry.channel_name)}</span>
                 </div>
             </td>
             <td>${escapeHtml(entry.stream_profile_name || 'N/A')}</td>
-            <td>${new Date(entry.start_time).toLocaleString()}</td>
-            <td>${entry.end_time ? new Date(entry.end_time).toLocaleString() : 'N/A'}</td>
-            <td>${formatDuration(entry.duration_seconds)}</td>
+            <td class="nw num">${new Date(entry.start_time).toLocaleString()}</td>
+            <td class="nw num">${entry.end_time ? new Date(entry.end_time).toLocaleString() : 'N/A'}</td>
+            <td class="nw num">${formatDuration(entry.duration_seconds)}</td>
         `;
         tbody.appendChild(tr);
     });
