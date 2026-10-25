@@ -691,6 +691,12 @@ html.kb .channel-info:focus {
     white-space: nowrap;
 }
 
+.gc-now.gc-none {
+    color: var(--tx3);
+    font-size: var(--t-small);
+    font-weight: 400;
+}
+
 .gc-now {
     overflow: hidden;
     text-overflow: ellipsis;
@@ -995,4 +1001,26 @@ html.tv .guide-status {
         padding-left: calc(.9em + env(safe-area-inset-left, 0px));
         padding-right: calc(.9em + env(safe-area-inset-right, 0px));
     }
+}
+
+/* Multi-View: the canvas fills the page, not just the first 50vh. */
+#multiview-container {
+    display: flex;
+    flex-direction: column;
+}
+
+#multiview-grid {
+    flex: 1 1 auto;
+    min-height: 100%;
+}
+
+#multiview-grid:empty::before {
+    min-height: 100%;
+    height: 100%;
+}
+
+.grid-stack-item-content {
+    border-radius: var(--r-md);
+    box-shadow: none;
+    border: 1px solid var(--line);
 }

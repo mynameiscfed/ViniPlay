@@ -25,6 +25,7 @@ import { ICONS } from './modules/icons.js'; // MODIFIED: Import the new icon lib
 import { initActivityPage, setupAdminEventListeners, handleActivityUpdate, handleAdminChannelClick } from './modules/admin.js';
 import { initTelemetry } from './modules/telemetry.js';
 import { refreshHome } from './modules/home.js';
+import { initTableLabels } from './modules/tablelabels.js';
 import { initFocus } from './modules/focus.js';
 import { setupPalette } from './modules/palette.js';
 import { setupOsd } from './modules/osd.js';
@@ -195,6 +196,7 @@ export async function initMainApp() {
     setupDvrEventListeners();
     setupDirectPlayerEventListeners();
     setupAdminEventListeners(); // NEW: Setup admin event listeners
+    initTableLabels();
     // REMOVED: The direct call to initializeCastApi() is no longer needed here.
     // The cast.js module will now be initialized automatically by the Google Cast SDK callback.
     console.log('[MAIN] All event listeners set up.');

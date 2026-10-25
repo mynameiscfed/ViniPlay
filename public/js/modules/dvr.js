@@ -760,24 +760,20 @@ function renderScheduledJobs() {
             const statusHTML = `<span class="status-badge ${escapeHtml(job.status)}">${escapeHtml(job.status)}</span>`;
             const conflictIcon = job.isConflicting ?
                 `<svg class="h-5 w-5 text-yellow-400" fill="currentColor" viewBox="0 0 20 20" title="This recording conflicts with another scheduled recording."><path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.21 3.03-1.742 3.03H4.42c-1.532 0-2.492-1.696-1.742-3.03l5.58-9.92zM10 13a1 1 0 110-2 1 1 0 010 2zm-1.75-5.25a.75.75 0 00-1.5 0v3.5a.75.75 0 001.5 0v-3.5z" clip-rule="evenodd" /></svg>` : '';
-            const userColumn = isAdmin ? `<td>${escapeHtml(job.username || 'N/A')}</td>` : '';
+            const userColumn = isAdmin ? `<td class="nw">${escapeHtml(job.username || 'N/A')}</td>` : '';
 
             const tr = document.createElement('tr');
             tr.dataset.jobId = job.id;
             tr.innerHTML = `
-                <td class="max-w-xs truncate font-medium text-white" title="${escapeHtml(job.programTitle)}">${escapeHtml(job.programTitle)}</td>
-                <td class="max-w-xs truncate">
-                    <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-gray-700/80 text-gray-200 text-xs font-medium border border-gray-600">
-                        ${escapeHtml(job.channelName)}
-                    </span>
-                </td>
+                <td class="cell-main" title="${escapeHtml(job.programTitle)}">${escapeHtml(job.programTitle)}</td>
+                <td class="cell-sub">${escapeHtml(job.channelName)}</td>
                 ${userColumn}
-                <td class="font-mono text-xs text-gray-300">${startTime}</td>
-                <td class="font-mono text-xs text-gray-300">${endTime}</td>
+                <td class="nw num">${startTime}</td>
+                <td class="nw num">${endTime}</td>
                 <td>${statusHTML}</td>
                 <td class="text-center">${conflictIcon}</td>
-                <td class="text-right">
-                    <div class="flex items-center justify-end gap-2">
+                <td class="act">
+                    <div class="flex items-center justify-end gap-1">
                         <button class="action-btn go-to-guide-btn" title="View in TV Guide" data-channel-id="${escapeHtml(job.channelId)}" data-program-start="${escapeHtml(job.programStart || job.startTime)}">
                             ${ICONS.goToGuide}
                         </button>
@@ -813,23 +809,19 @@ function renderScheduledJobs() {
             const statusHTML = job.status === 'error' && job.errorMessage
                 ? `<button class="status-badge ${escapeHtml(job.status)} view-error-btn" data-job-id="${escapeHtml(job.id)}">${escapeHtml(job.status)}</button>`
                 : `<span class="status-badge ${escapeHtml(job.status)}">${escapeHtml(job.status)}</span>`;
-            const userColumn = isAdmin ? `<td>${escapeHtml(job.username || 'N/A')}</td>` : '';
+            const userColumn = isAdmin ? `<td class="nw">${escapeHtml(job.username || 'N/A')}</td>` : '';
 
             const tr = document.createElement('tr');
             tr.dataset.jobId = job.id;
             tr.innerHTML = `
-                <td class="max-w-xs truncate font-medium text-white" title="${escapeHtml(job.programTitle)}">${escapeHtml(job.programTitle)}</td>
-                <td class="max-w-xs truncate">
-                    <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-gray-700/80 text-gray-200 text-xs font-medium border border-gray-600">
-                        ${escapeHtml(job.channelName)}
-                    </span>
-                </td>
+                <td class="cell-main" title="${escapeHtml(job.programTitle)}">${escapeHtml(job.programTitle)}</td>
+                <td class="cell-sub">${escapeHtml(job.channelName)}</td>
                 ${userColumn}
-                <td class="font-mono text-xs text-gray-300">${startTime}</td>
-                <td class="font-mono text-xs text-gray-300">${endTime}</td>
+                <td class="nw num">${startTime}</td>
+                <td class="nw num">${endTime}</td>
                 <td>${statusHTML}</td>
-                <td class="text-right">
-                    <div class="flex items-center justify-end gap-2">
+                <td class="act">
+                    <div class="flex items-center justify-end gap-1">
                         <button class="action-btn go-to-guide-btn" title="View in TV Guide" data-channel-id="${escapeHtml(job.channelId)}" data-program-start="${escapeHtml(job.programStart || job.startTime)}">
                             ${ICONS.goToGuide}
                         </button>
@@ -882,31 +874,20 @@ function renderCompletedRecordings() {
 
         filteredRecordings.forEach(rec => {
             const recordedOn = new Date(rec.startTime).toLocaleString();
-            const userColumn = isAdmin ? `<td class="max-w-xs truncate" title="${escapeHtml(rec.username)}">${escapeHtml(rec.username || 'N/A')}</td>` : '';
+            const userColumn = isAdmin ? `<td class="cell-sub nw" title="${escapeHtml(rec.username)}">${escapeHtml(rec.username || 'N/A')}</td>` : '';
 
             const tr = document.createElement('tr');
             tr.dataset.recordingId = rec.id;
             tr.className = 'hover:bg-gray-700/30 transition-colors';
             tr.innerHTML = `
-                <td class="max-w-xs truncate font-medium text-white" title="${escapeHtml(rec.programTitle)}">
-                    <div class="flex items-center gap-3">
-                        <button class="play-recording-btn w-7 h-7 rounded-full bg-blue-600 hover:bg-blue-500 text-white flex items-center justify-center transition-colors shadow flex-shrink-0" title="Play Recording">
-                            <svg class="w-3.5 h-3.5 fill-current ml-0.5" viewBox="0 0 20 20"><polygon points="5 3 19 10 5 17 5 3"/></svg>
-                        </button>
-                        <span class="truncate font-semibold">${escapeHtml(rec.programTitle)}</span>
-                    </div>
-                </td>
-                <td class="max-w-xs truncate">
-                    <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-gray-700/80 text-gray-200 text-xs font-medium border border-gray-600">
-                        ${escapeHtml(rec.channelName)}
-                    </span>
-                </td>
+                <td class="cell-main" title="${escapeHtml(rec.programTitle)}">${escapeHtml(rec.programTitle)}</td>
+                <td class="cell-sub">${escapeHtml(rec.channelName)}</td>
                 ${userColumn}
-                <td class="font-mono text-xs text-gray-300">${recordedOn}</td>
-                <td class="font-mono text-xs font-medium">${formatDuration(rec.durationSeconds)}</td>
-                <td class="font-mono text-xs text-gray-400">${formatBytes(rec.fileSizeBytes)}</td>
-                <td class="text-right">
-                    <div class="flex items-center justify-end gap-2">
+                <td class="nw num">${recordedOn}</td>
+                <td class="nw num">${formatDuration(rec.durationSeconds)}</td>
+                <td class="nw num">${formatBytes(rec.fileSizeBytes)}</td>
+                <td class="act">
+                    <div class="flex items-center justify-end gap-1">
                         <button class="action-btn play-recording-btn text-blue-400 hover:text-blue-300" title="Play Recording">
                             ${ICONS.play}
                         </button>

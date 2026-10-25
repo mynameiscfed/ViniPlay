@@ -36,11 +36,11 @@
     <link rel="stylesheet" href="/css/fonts.css?v=2">
     <link rel="stylesheet" href="/css/tokens.css?v=3">
     <link rel="stylesheet" href="/css/tailwind.css?v=2">
-    <link rel="stylesheet" href="/css/base.css?v=3">
-    <link rel="stylesheet" href="/css/shell.css?v=5">
-    <link rel="stylesheet" href="/css/guide.css?v=5">
-    <link rel="stylesheet" href="/css/home.css?v=9">
-    <link rel="stylesheet" href="/css/legacy.css?v=7">
+    <link rel="stylesheet" href="/css/base.css?v=6">
+    <link rel="stylesheet" href="/css/shell.css?v=6">
+    <link rel="stylesheet" href="/css/guide.css?v=7">
+    <link rel="stylesheet" href="/css/home.css?v=10">
+    <link rel="stylesheet" href="/css/legacy.css?v=8">
     <link rel="stylesheet" href="/css/player.css?v=1">
     <link rel="stylesheet" href="/css/tv.css?v=1">
 
@@ -352,7 +352,7 @@
                                 <p class="mt-1 text-sm">No recent links. Played streams will appear here.</p>
                             </div>
                             <div class="overflow-x-auto">
-                                <table class="min-w-full dvr-table">
+                                <table class="min-w-full dvr-table stack">
                                     <thead>
                                         <tr>
                                             <th>URL</th>
@@ -368,8 +368,8 @@
             </div>
 
             <!-- DVR Page -->
-            <div id="page-dvr" class="hidden flex-grow flex-col items-center p-4 overflow-y-auto custom-scrollbar">
-                <div class="w-full max-w-6xl xl:max-w-screen-xl mx-auto space-y-6 pb-16">
+            <div id="page-dvr" class="hidden flex-grow flex-col items-center pg overflow-y-auto custom-scrollbar">
+                <div class="w-full mx-auto space-y-6 pb-16">
                     
                     <!-- DVR Storage Usage Card -->
                     <div id="dvr-storage-bar-container" class="bg-gray-800 p-4 sm:p-5 rounded-xl shadow-lg border border-gray-700/60">
@@ -486,7 +486,7 @@
 
                             <!-- Table View -->
                             <div id="dvr-recordings-table-container" class="overflow-x-auto px-4 sm:px-6 pt-3">
-                                <table class="min-w-full dvr-table">
+                                <table class="min-w-full dvr-table stack">
                                     <thead>
                                         <tr>
                                             <th>Program Title</th>
@@ -520,7 +520,7 @@
                             </div>
 
                             <div id="dvr-jobs-table-container" class="overflow-x-auto px-4 sm:px-6 pt-3">
-                                <table class="min-w-full dvr-table">
+                                <table class="min-w-full dvr-table stack">
                                     <thead>
                                         <tr>
                                             <th>Program Title</th>
@@ -559,7 +559,7 @@
                             </div>
 
                             <div id="dvr-history-table-container" class="overflow-x-auto px-4 sm:px-6 pt-3">
-                                <table class="min-w-full dvr-table">
+                                <table class="min-w-full dvr-table stack">
                                     <thead>
                                         <tr>
                                             <th>Program Title</th>
@@ -627,8 +627,8 @@
             </div>
 
             <!-- Admin Activity Page -->
-            <div id="page-activity" class="hidden flex-grow flex-col items-start p-4 overflow-y-auto custom-scrollbar">
-                <div class="w-full max-w-7xl mx-auto space-y-6 pb-16">
+            <div id="page-activity" class="hidden flex-grow flex-col items-start pg overflow-y-auto custom-scrollbar">
+                <div class="w-full mx-auto space-y-6 pb-16">
                     <!-- NEW: Dashboard Widgets -->
                     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
                         <!-- Stat Card: Current Viewers -->
@@ -683,7 +683,7 @@
                             <p class="mt-1 text-sm">No users are currently streaming.</p>
                         </div>
                         <div id="live-activity-table-container" class="overflow-x-auto">
-                            <table class="min-w-full admin-table">
+                            <table class="min-w-full admin-table stack">
                                 <thead>
                                     <tr>
                                         <th>User</th>
@@ -729,7 +729,7 @@
                             <p class="mt-1 text-sm">No watch history has been recorded yet.</p>
                         </div>
                         <div id="watch-history-table-container" class="overflow-x-auto">
-                            <table class="min-w-full admin-table">
+                            <table class="min-w-full admin-table stack">
                                 <thead>
                                     <tr>
                                         <th>User</th>
@@ -800,7 +800,7 @@
                                 New User</button>
                         </div>
                         <div class="overflow-x-auto">
-                            <table class="min-w-full">
+                            <table class="min-w-full admin-table stack">
                                 <thead class="bg-gray-700/50">
                                     <tr>
                                         <th
@@ -909,7 +909,7 @@
                             </div>
                         </div>
                         <div id="epg-map-scroll" class="bg-gray-900/50 rounded-lg">
-                            <table class="min-w-full sources-table">
+                            <table class="min-w-full sources-table stack">
                                 <thead>
                                     <tr>
                                         <th class="w-8"><input type="checkbox" id="epg-map-all" aria-label="Select every channel on this page"></th>

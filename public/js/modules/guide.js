@@ -402,7 +402,7 @@ export const cardHTML = (channel) => {
         bar = `<div class="gc-bar"><i><b style="width:${pct}%"></b></i><span>${Math.max(1, Math.round((stop - Date.now()) / 60000))} min left</span></div>`;
     }
     const nextHTML = next ? `<div class="gc-next">Next · ${escapeHtml(next.title)} ${formatGuideTime(new Date(next.start), offset)}</div>` : '';
-    return `<div class="channel-info gcard" ${channelAttrs(channel)}>${logoHTML(channel)}<div class="gc-main"><div class="gc-top"><span class="ch-no">${escapeHtml(channel.chno || '')}</span><span>${escapeHtml(channel.displayName || channel.name)}</span></div><div class="gc-now">${escapeHtml(now ? now.title : 'No guide data')}</div>${bar}${nextHTML}</div>${starHTML(channel)}</div>`;
+    return `<div class="channel-info gcard" ${channelAttrs(channel)}>${logoHTML(channel)}<div class="gc-main"><div class="gc-top"><span class="ch-no">${escapeHtml(channel.chno || '')}</span><span>${escapeHtml(channel.displayName || channel.name)}</span></div><div class="gc-now${now ? '' : ' gc-none'}">${escapeHtml(now ? now.title : 'No guide')}</div>${bar}${nextHTML}</div>${starHTML(channel)}</div>`;
 };
 
 /** Two-letter stand-in shown behind (or instead of) a channel logo. */
