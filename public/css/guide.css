@@ -9,7 +9,7 @@
 /* ---------- Filter bar ---------- */
 .guide-bar {
     position: relative;
-    z-index: 40;
+    z-index: 50; /* above the sticky corner (45), so the Groups menu overlays the timeline */
     display: flex;
     align-items: center;
     gap: .6em;
@@ -24,7 +24,7 @@
     font-size: 1em;
 }
 
-.guide-bar select.chip {
+.guide-bar .dd {
     max-width: 16em;
     min-height: 0;
     padding-right: 2.2em;
@@ -38,6 +38,11 @@
     appearance: none;
 }
 
+.guide-bar .dd span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
 .guide-bar .chip svg {
     width: 1.1em;
     height: 1.1em;
@@ -47,6 +52,75 @@
     display: flex;
     gap: .5em;
     flex: none;
+}
+
+/* Groups menu: tick rows under the Groups button (the .menu panel from shell.css, anchored left). */
+.gm {
+    left: 0;
+    right: auto;
+    width: 24em;
+}
+
+.gm-head {
+    display: flex;
+    gap: .4em;
+    padding: .2em .2em .5em;
+}
+
+.gm-head input {
+    flex: 1;
+    min-width: 0;
+}
+
+.gm-list {
+    max-height: 55vh;
+    padding: .3em; /* room for the focus ring, which the scroll area would clip */
+    overflow-y: auto;
+}
+
+.gm .count {
+    padding: .4em .8em;
+    font-size: .875em;
+    color: var(--tx3);
+}
+
+.gm .nm {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.gm .n {
+    font: .75em var(--f-mono);
+    color: var(--tx3);
+}
+
+.gm .ck {
+    position: relative;
+    flex: none;
+    width: 1.2em;
+    height: 1.2em;
+    border: 2px solid var(--tx3);
+    border-radius: .3em;
+}
+
+.gm [aria-checked="true"] .ck {
+    border-color: var(--cy);
+    background: var(--cy);
+}
+
+.gm [aria-checked="true"] .ck::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 45%;
+    width: .3em;
+    height: .6em;
+    border: solid var(--on);
+    border-width: 0 .14em .14em 0;
+    transform: translate(-50%, -55%) rotate(45deg);
 }
 
 .guide-tools {
@@ -860,8 +934,20 @@ html.tv .guide-status {
         padding: .1em .9em .7em;
     }
 
-    .guide-bar select.chip {
+    .guide-bar .dd {
         max-width: 9.5em;
+    }
+
+    /* On a phone the Groups menu spans the bar instead of hanging off the button. */
+    .guide-bar .menu-wrap {
+        position: static;
+    }
+
+    .gm {
+        left: .9em;
+        right: .9em;
+        width: auto;
+        max-width: none;
     }
 
     .guide-tools .seg {

@@ -28,6 +28,8 @@ const formatGuideTime = (date) => formatTimeInZone(date, guideState.settings.tim
 // Program IDs that matched the current search, highlighted in the timeline.
 let searchMatchedProgramIds = new Set();
 
+// The group filter: 'all', 'favorites', 'recents', or a list of group names picked in the Groups menu.
+let groupFilter = null; // null until populateGroupFilter() has read the saved value
 
 /**
  * Returns the UTC instant that corresponds to local midnight of the selected guide date,
@@ -62,7 +64,7 @@ export const toggleFavorite = (channelId) => {
     saveUserSetting('favorites', guideState.settings.favorites);
     document.querySelectorAll(`.favorite-star[data-channel-id="${CSS.escape(channelId)}"]`)
         .forEach(star => star.classList.toggle('favorited', channel.isFavorite));
-    if (UIElements.groupFilter.value === 'favorites') handleSearchAndFilter(false, true);
+    if (groupFilter === 'favorites') handleSearchAndFilter(false, true);
     return channel.isFavorite;
 };
 
@@ -729,7 +731,7 @@ export const updateNowLinePosition = () => {
 
 /**
  * Populates the playlist ("source") filter. This is the first step of the filter flow:
- * pick a playlist, then pick one of that playlist's groups.
+ * pick a playlist, then pick any of that playlist's groups.
  */
 const populateSourceFilter = () => {
     const savedFilter = getDeviceSetting('activeSourceFilter', guideState.settings.activeSourceFilter);
@@ -754,62 +756,68 @@ const populateSourceFilter = () => {
     UIElements.sourceFilter.style.display = guideState.channelSources.size <= 1 ? 'none' : '';
 };
 
+/** The groups of the selected playlist with their channel counts (none while several playlists need one picked). */
+const groupCounts = () => {
+    const source = UIElements.sourceFilter.value;
+    const counts = new Map();
+    if (source === 'all' && guideState.channelSources.size > 1) return counts;
+    guideState.channels.forEach(ch => {
+        if (ch.group && (source === 'all' || ch.source === source)) counts.set(ch.group, (counts.get(ch.group) || 0) + 1);
+    });
+    return counts;
+};
+
 /**
- * Populates the group filter with the groups of the currently selected playlist.
- * When several playlists exist and none is selected, only the cross-playlist views
- * (All, Favorites, Recents) are offered, so the group list never mixes playlists.
+ * Reads the group filter (saved on this device, or kept from before a playlist change) and drops
+ * groups the selected playlist does not have. A single saved group name from before multi-select still works.
  */
 const populateGroupFilter = () => {
-    const selectedSource = UIElements.sourceFilter ? UIElements.sourceFilter.value : 'all';
-    const savedFilter = getDeviceSetting('activeGroupFilter', guideState.settings.activeGroupFilter);
-    const currentFilter = UIElements.groupFilter.value || savedFilter;
-    const needsPlaylist = selectedSource === 'all' && guideState.channelSources.size > 1;
+    const saved = groupFilter || getDeviceSetting('activeGroupFilter', guideState.settings.activeGroupFilter) || 'all';
+    const counts = groupCounts();
+    const named = [].concat(saved).filter(g => counts.has(g));
+    groupFilter = ['favorites', 'recents'].includes(saved) ? saved : named.length ? named : 'all';
 
-    const sourceChannels = selectedSource === 'all'
-        ? guideState.channels
-        : guideState.channels.filter(ch => ch.source === selectedSource);
-    const groupCounts = new Map();
-    if (!needsPlaylist) {
-        sourceChannels.forEach(ch => {
-            if (ch.group) groupCounts.set(ch.group, (groupCounts.get(ch.group) || 0) + 1);
-        });
+    if (JSON.stringify(guideState.settings.activeGroupFilter) !== JSON.stringify(groupFilter)) {
+        guideState.settings.activeGroupFilter = groupFilter;
+        saveDeviceSetting('activeGroupFilter', groupFilter);
     }
-
-    UIElements.groupFilter.innerHTML = '';
-    UIElements.groupFilter.appendChild(new Option(`All Groups (${sourceChannels.length})`, 'all'));
-    UIElements.groupFilter.appendChild(new Option('Favorites', 'favorites'));
-    UIElements.groupFilter.appendChild(new Option('Recents', 'recents'));
-
-    if (needsPlaylist) {
-        const hint = new Option('Select a playlist to see its groups', '');
-        hint.disabled = true;
-        UIElements.groupFilter.appendChild(hint);
-    } else if (groupCounts.size > 0) {
-        const optgroup = document.createElement('optgroup');
-        optgroup.label = selectedSource === 'all' ? 'Groups' : `Groups in ${selectedSource}`;
-        [...groupCounts.keys()].sort((a, b) => a.localeCompare(b)).forEach(group => {
-            optgroup.appendChild(new Option(`${group} (${groupCounts.get(group)})`, group));
-        });
-        UIElements.groupFilter.appendChild(optgroup);
-    }
-
-    const optionExists = Array.from(UIElements.groupFilter.options).some(opt => opt.value === currentFilter && !opt.disabled);
-    UIElements.groupFilter.value = (currentFilter && optionExists) ? currentFilter : 'all';
-
-    // Keep guideState and settings in sync if group was reset
-    if (guideState.settings.activeGroupFilter !== UIElements.groupFilter.value) {
-        guideState.settings.activeGroupFilter = UIElements.groupFilter.value;
-        saveDeviceSetting('activeGroupFilter', UIElements.groupFilter.value);
-    }
-
     syncChips();
 };
 
-/** Marks the quick-filter chip (or the group menu, for a named group) that matches the current group. */
+/** Marks the matching quick-filter chip and words the Groups button after the picked groups. */
 const syncChips = () => {
-    const group = UIElements.groupFilter.value;
-    UIElements.groupChips.querySelectorAll('[data-group]').forEach(chip => chip.classList.toggle('on', chip.dataset.group === group));
-    UIElements.groupFilter.classList.toggle('on', !UIElements.groupChips.querySelector(`[data-group="${CSS.escape(group)}"]`));
+    const picked = Array.isArray(groupFilter);
+    UIElements.groupChips.querySelectorAll('[data-group]').forEach(chip => chip.classList.toggle('on', chip.dataset.group === groupFilter));
+    UIElements.groupFilter.classList.toggle('on', picked);
+    UIElements.groupFilterLabel.textContent = !picked ? 'Groups' : groupFilter.length === 1 ? groupFilter[0] : `${groupFilter.length} groups`;
+};
+
+/** Lists the playlist's groups as tick rows that narrow to the text in the menu's filter box. */
+const renderGroupMenu = () => {
+    const counts = groupCounts();
+    const find = UIElements.groupMenuSearch.value.trim().toLowerCase();
+    const picked = Array.isArray(groupFilter) ? groupFilter : [];
+    const rows = [...counts.keys()].filter(g => g.toLowerCase().includes(find)).sort((a, b) => a.localeCompare(b)).map(g =>
+        `<button type="button" class="mi" role="menuitemcheckbox" aria-checked="${picked.includes(g)}" data-name="${escapeHtml(g)}"><span class="ck"></span><span class="nm">${escapeHtml(g)}</span><span class="n">${counts.get(g)}</span></button>`);
+    UIElements.groupMenuList.innerHTML = rows.join('') || `<p class="count">${counts.size ? 'No group matches' : 'Pick a playlist to see its groups'}</p>`;
+};
+
+const setGroupMenuOpen = (open) => {
+    UIElements.groupMenu.classList.toggle('hidden', !open);
+    UIElements.groupFilter.setAttribute('aria-expanded', String(open));
+    if (open) {
+        UIElements.groupMenuSearch.value = '';
+        renderGroupMenu();
+    }
+};
+
+/** Applies a new group filter: remembers it on this device and redraws the guide. */
+const setGroupFilter = (next) => {
+    groupFilter = next;
+    guideState.settings.activeGroupFilter = next;
+    saveDeviceSetting('activeGroupFilter', next);
+    syncChips();
+    handleSearchAndFilter(true); // Auto-center when filter changes
 };
 
 /**
@@ -822,8 +830,8 @@ const getFilteredChannels = (selectedSource, selectedGroup) => {
         channels = recentIds.map(id => guideState.channels.find(ch => ch.id === id)).filter(Boolean);
     } else if (selectedGroup === 'favorites') {
         channels = channels.filter(ch => ch.isFavorite);
-    } else if (selectedGroup && selectedGroup !== 'all') {
-        channels = channels.filter(ch => ch.group === selectedGroup);
+    } else if (Array.isArray(selectedGroup)) {
+        channels = channels.filter(ch => selectedGroup.includes(ch.group));
     }
     if (selectedSource !== 'all') {
         channels = channels.filter(ch => ch.source === selectedSource);
@@ -891,7 +899,7 @@ const updateSearchStatus = (searchTerm, channelCount, programMatches, searchedAl
  */
 export function handleSearchAndFilter(shouldCenter = false, preserveScroll = false) {
     const searchTerm = UIElements.searchInput.value.trim().toLowerCase();
-    const selectedGroup = UIElements.groupFilter.value;
+    const selectedGroup = groupFilter;
     const selectedSource = UIElements.sourceFilter.value;
     const searchScope = guideState.settings.searchScope || 'channels_only_filtered';
 
@@ -1024,31 +1032,47 @@ const shiftHour = (dir) => {
  * Sets up all event listeners for the guide page.
  */
 export function setupGuideEventListeners() {
-    UIElements.groupFilter.addEventListener('change', () => {
-        const selectedGroup = UIElements.groupFilter.value;
-        // Save the setting for this device
-        saveDeviceSetting('activeGroupFilter', selectedGroup);
-        // Update local state immediately for responsiveness
-        guideState.settings.activeGroupFilter = selectedGroup;
-        syncChips();
-        handleSearchAndFilter(true); // Auto-center when filter changes
-    });
     UIElements.groupChips.addEventListener('click', (e) => {
         const chip = e.target.closest('[data-group]');
-        if (!chip) return;
-        UIElements.groupFilter.value = chip.dataset.group;
-        UIElements.groupFilter.dispatchEvent(new Event('change'));
+        if (chip) setGroupFilter(chip.dataset.group);
+    });
+    UIElements.groupFilter.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const open = UIElements.groupMenu.classList.contains('hidden');
+        setGroupMenuOpen(open);
+        // A remote or a finger would raise the on-screen keyboard, so they start on the first group instead.
+        const typing = !document.documentElement.classList.contains('tv') && matchMedia('(pointer: fine)').matches;
+        if (open) focusEl((!typing && UIElements.groupMenuList.querySelector('.mi')) || UIElements.groupMenuSearch);
+    });
+    document.addEventListener('click', (e) => {
+        if (!UIElements.groupMenu.contains(e.target)) setGroupMenuOpen(false);
+    });
+    UIElements.groupMenu.addEventListener('click', (e) => {
+        const row = e.target.closest('[data-name]');
+        if (!row) return;
+        const picked = Array.isArray(groupFilter) ? groupFilter : [];
+        const next = picked.includes(row.dataset.name) ? picked.filter(g => g !== row.dataset.name) : [...picked, row.dataset.name];
+        setGroupFilter(next.length ? next : 'all');
+        row.setAttribute('aria-checked', String(next.includes(row.dataset.name))); // in place, not a redraw: the row keeps its focus
+    });
+    UIElements.groupMenuClear.addEventListener('click', () => {
+        setGroupFilter('all');
+        renderGroupMenu();
+    });
+    UIElements.groupMenuSearch.addEventListener('input', renderGroupMenu);
+    UIElements.groupMenuSearch.addEventListener('keydown', (e) => {
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            focusEl(UIElements.groupMenuList.querySelector('.mi'));
+        }
     });
     UIElements.sourceFilter.addEventListener('change', () => {
         const selectedSource = UIElements.sourceFilter.value;
         // Save the setting for this device
         saveDeviceSetting('activeSourceFilter', selectedSource);
         guideState.settings.activeSourceFilter = selectedSource;
-        // A new playlist means a new set of groups: start from "All Groups" of that playlist
-        // unless the current selection (e.g. Favorites) still applies.
-        if (!['favorites', 'recents'].includes(UIElements.groupFilter.value)) {
-            UIElements.groupFilter.value = 'all';
-        }
+        // A new playlist has other groups, so named groups start over; Favorites and Recents still apply.
+        if (Array.isArray(groupFilter)) groupFilter = 'all';
         populateGroupFilter();
         handleSearchAndFilter(true); // Auto-center when filter changes
     });

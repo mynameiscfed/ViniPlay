@@ -31,9 +31,9 @@ const settle = (el) => {
     settleTimers.set(el, setTimeout(() => el.dispatchEvent(new Event('change', { bubbles: true })), 600));
 };
 
-/** The part of the page that currently owns focus: an open dialog, the account menu, or everything. */
+/** The part of the page that currently owns focus: an open dialog, a menu, or everything. */
 function scope() {
-    const dialogs = [...document.querySelectorAll('body > div[id$="-modal"]:not(.hidden), #mobile-nav-menu:not(.hidden), #avatar-menu:not(.hidden), #search-palette:not(.hidden)')];
+    const dialogs = [...document.querySelectorAll('body > div[id$="-modal"]:not(.hidden), #mobile-nav-menu:not(.hidden), #avatar-menu:not(.hidden), #group-menu:not(.hidden), #search-palette:not(.hidden)')];
     return dialogs.length ? dialogs[dialogs.length - 1] : document;
 }
 
@@ -87,7 +87,13 @@ function goBack() {
     const top = scope();
     if (top !== document) {
         if (top.id === 'processing-status-modal') return true;
-        if (top.id === 'avatar-menu') { top.classList.add('hidden'); UIElements.avatarBtn?.focus(); return true; }
+        if (top.classList.contains('menu')) {
+            const opener = top.previousElementSibling;
+            top.classList.add('hidden');
+            opener.setAttribute('aria-expanded', 'false');
+            opener.focus();
+            return true;
+        }
         const closer = top.querySelector('#close-modal, [id$="close-btn"], [id$="cancel-btn"], #search-palette-close');
         if (closer) closer.click(); else if (top.id.endsWith('-modal')) closeModal(top);
         return true;
@@ -136,7 +142,7 @@ function onKeyDown(e) {
     const isBack = BACK_KEYS.has(e.key) || e.keyCode === 10009 || (e.key === 'Backspace' && !typing(target) && !target.isContentEditable);
     if (isBack) {
         root.classList.add('kb');
-        if (typing(target) && e.key === 'Escape' && !target.closest('#search-palette')) { target.blur(); e.preventDefault(); return; }
+        if (typing(target) && e.key === 'Escape' && !target.closest('#search-palette, #group-menu')) { target.blur(); e.preventDefault(); return; }
         if (e.key === 'Escape' && document.fullscreenElement) return; // let the browser leave fullscreen
         if (goBack()) e.preventDefault();
         return;
