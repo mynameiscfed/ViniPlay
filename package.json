@@ -6,7 +6,9 @@
   "scripts": {
     "start": "node server.js",
     "test": "node --test test/syntax.test.js",
-    "test:container": "bash test/container-smoke.sh"
+    "test:container": "bash test/container-smoke.sh",
+    "build:css": "tailwindcss -c tailwind.config.js -i src/tailwind.css -o public/css/tailwind.css --minify",
+    "watch:css": "tailwindcss -c tailwind.config.js -i src/tailwind.css -o public/css/tailwind.css --watch"
   },
   "author": "Andrea Ardovini",
   "license": "CC BY-NC-SA 4.0",
@@ -26,5 +28,8 @@
     "node-schedule": "^2.1.1",
     "diskusage": "^1.2.0",
     "systeminformation": "^5.27.11"
+  },
+  "devDependencies": {
+    "tailwindcss": "^3.4.17"
   }
 }
