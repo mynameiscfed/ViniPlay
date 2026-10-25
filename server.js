@@ -29,6 +29,7 @@ const { createEpgPayload } = require('./epgPayload');
 const { applyProcessed } = require('./processedSettings');
 const zlib = require('zlib');
 const { pipeline } = require('stream');
+const { pipeline: pipelineAsync } = require('stream/promises');
 const { forEachProgramme } = require('./epgStream');
 const webpush = require('web-push');
 const schedule = require('node-schedule');
@@ -1492,7 +1493,8 @@ const parseEpgTime = (timeStr, offsetHours = 0) => {
     return date;
 };
 
-async function processAndMergeSources(req) {
+// onlyIds: refresh just those sources; the others are merged from their cached raw copy (fetched only if it is missing).
+async function processAndMergeSources(req, onlyIds) {
     console.log('[PROCESS] Starting to process and merge all active sources.');
     sendProcessingStatus(req, 'Starting to process sources...', 'info');
     const settings = getSettings();
@@ -1516,6 +1518,7 @@ async function processAndMergeSources(req) {
 
     for (const source of activeM3uSources) {
         console.log(`[M3U] Processing source: "${source.name}" (ID: ${source.id}, Type: ${source.type}, Path: ${source.path})`);
+        const cached = onlyIds && !onlyIds.includes(source.id);
         sendProcessingStatus(req, `Processing M3U source: "${source.name}"...`, 'info');
 
         // --- NEW: Group Filter Logic ---
@@ -1544,6 +1547,9 @@ async function processAndMergeSources(req) {
                     failedSources.push(source.name);
                     continue;
                 }
+            } else if (cached && source.cachedRawPath && fs.existsSync(source.cachedRawPath)) {
+                content = fs.readFileSync(source.cachedRawPath, 'utf-8');
+                sendProcessingStatus(req, ` -> Using cached content.`, 'info');
             } else if (source.type === 'url') {
                 sendProcessingStatus(req, ` -> Fetching content from URL...`, 'info');
                 content = await fetchUrlContent(source.path);
@@ -1721,7 +1727,7 @@ async function processAndMergeSources(req) {
             sendProcessingStatus(req, ` -> Processed ${liveStreamCount} Live channels from "${source.name}".`, 'info');
 
             // --- NEW: Trigger VOD Refresh for XC Sources ---
-            if (source.type === 'xc') {
+            if (source.type === 'xc' && !cached) {
                 console.log(`[PROCESS] Source "${source.name}" is XC. Triggering VOD refresh.`);
                 sendProcessingStatus(req, ` -> Triggering VOD content refresh for XC source "${source.name}"...`, 'info');
                 // Use setImmediate to run the VOD refresh *after* the current M3U processing finishes
@@ -1737,7 +1743,7 @@ async function processAndMergeSources(req) {
             source.status = 'Error';
             source.statusMessage = `Processing failed: ${error.message.substring(0, 100)}...`;
         }
-        source.lastUpdated = new Date().toISOString();
+        if (!cached) source.lastUpdated = new Date().toISOString();
     }
 
     // --- Save the new separated files ---
@@ -1761,6 +1767,7 @@ async function processAndMergeSources(req) {
 
     for (const source of activeEpgSources) {
         console.log(`[EPG] Processing source: "${source.name}" (ID: ${source.id}, Type: ${source.type}, Path: ${source.path})`);
+        const cached = onlyIds && !onlyIds.includes(source.id);
         sendProcessingStatus(req, `Processing EPG source: "${source.name}"...`, 'info');
         try {
             let stream;
@@ -1777,8 +1784,15 @@ async function processAndMergeSources(req) {
                     continue;
                 }
             } else if (source.type === 'url') {
-                sendProcessingStatus(req, ` -> Fetching content from URL...`, 'info');
-                stream = await fetchUrlContent(source.path, source.fetchOptions || {}, true);
+                // Kept on disk so refreshing another source can re-merge this guide without downloading it again.
+                const cachePath = path.join(RAW_CACHE_DIR, `raw_${source.id}.epg_cache`);
+                if (!(cached && fs.existsSync(cachePath))) {
+                    sendProcessingStatus(req, ` -> Fetching content from URL...`, 'info');
+                    await pipelineAsync(await fetchUrlContent(source.path, source.fetchOptions || {}, true), fs.createWriteStream(`${cachePath}.tmp`));
+                    fs.renameSync(`${cachePath}.tmp`, cachePath);
+                }
+                source.cachedRawPath = cachePath;
+                stream = fs.createReadStream(cachePath);
             }
             // The guide is parsed as a stream: big ones don't fit in a single string.
             if (source.path.endsWith('.gz')) stream = pipeline(stream, zlib.createGunzip(), () => {});
@@ -1840,7 +1854,7 @@ async function processAndMergeSources(req) {
                 source.statusMessage = `Processing failed: ${error.message.substring(0, 100)}...`;
             }
         }
-        if (!source.isXcEpg) {
+        if (!source.isXcEpg && !cached) {
             source.lastUpdated = new Date().toISOString();
         }
     }
@@ -2961,6 +2975,7 @@ app.post('/api/sources', requireAuth, requireAdmin, upload.single('sourceFile'),
         // Case 1: Type changed FROM XC to something else (URL or File)
         if (wasXc && !isNowXc) {
             const epgIdToDelete = `epg_for_${id}`;
+            fs.rmSync(path.join(RAW_CACHE_DIR, `raw_${epgIdToDelete}.epg_cache`), { force: true });
             const initialEpgCount = settings.epgSources.length;
             settings.epgSources = settings.epgSources.filter(epg => epg.id !== epgIdToDelete);
             if (settings.epgSources.length < initialEpgCount) {
@@ -3149,7 +3164,7 @@ app.post('/api/sources', requireAuth, requireAdmin, upload.single('sourceFile'),
 
         saveSettings(settings);
         console.log(`[SOURCES_API] New source "${name}" added successfully (ID: ${newSource.id}).`);
-        res.json({ success: true, message: 'Source added successfully.', settings: getSettings() });
+        res.json({ success: true, message: 'Source added successfully.', id: newSource.id, settings: getSettings() });
     }
 });
 
@@ -3220,6 +3235,7 @@ app.delete('/api/sources/:sourceType/:id', requireAuth, requireAdmin, async (req
     // --- NEW: Automatically delete the managed EPG when an XC source is deleted ---
     if (sourceType === 'm3u' && source && source.type === 'xc') {
         const epgIdToDelete = `epg_for_${id}`;
+        fs.rmSync(path.join(RAW_CACHE_DIR, `raw_${epgIdToDelete}.epg_cache`), { force: true });
         const initialEpgCount = settings.epgSources.length;
         settings.epgSources = settings.epgSources.filter(epg => epg.id !== epgIdToDelete);
         if (settings.epgSources.length < initialEpgCount) {
@@ -3248,8 +3264,14 @@ app.delete('/api/sources/:sourceType/:id', requireAuth, requireAdmin, async (req
 
 app.post('/api/process-sources', requireAuth, requireAdmin, async (req, res) => {
     console.log('[API] Received request to /api/process-sources (manual trigger).');
+    const { sourceId } = req.body || {}; // optional: refresh only this source
+    const settings = getSettings();
+    if (sourceId && ![...settings.m3uSources, ...settings.epgSources].some(s => s.id === sourceId && s.isActive)) {
+        return res.status(404).json({ error: 'Active source not found.' });
+    }
     try {
-        const result = await processAndMergeSources(req); // <-- MODIFIED: Pass req
+        // An XC source is refreshed together with its managed EPG.
+        const result = await processAndMergeSources(req, sourceId && [sourceId, `epg_for_${sourceId}`]);
 
         if (result.success) {
             saveProcessedSettings(result.updatedSettings);

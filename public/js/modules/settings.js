@@ -7,7 +7,7 @@
 import { appState, guideState, UIElements } from './state.js';
 import { apiFetch, saveGlobalSetting, saveUserSetting, fetchAppVersion } from './api.js';
 // MODIFIED: Import isProcessingRunning for the button logic
-import { showNotification, openModal, closeModal, showConfirm, setButtonLoadingState, showProcessingModal, isProcessingRunning } from './ui.js';
+import { showNotification, openModal, closeModal, showConfirm, setButtonLoadingState, showProcessingModal, updateProcessingStatus, isProcessingRunning } from './ui.js';
 import { handleGuideLoad } from './guide.js';
 import { navigate } from './ui.js';
 import { ICONS } from './icons.js';
@@ -667,6 +667,7 @@ const renderSourceTable = (sourceType) => {
             </td>
             <td class="text-right">
                 <div class="flex items-center justify-end gap-3">
+                    ${source.isActive ? `<button class="action-btn refresh-source-btn" title="Refresh this source">${ICONS.refresh}</button>` : ''}
                     <button class="action-btn edit-source-btn" title="Edit Source">
                         ${ICONS.edit}
                     </button>
@@ -1268,26 +1269,33 @@ function handleClearLogs() {
 export function setupSettingsEventListeners() {
 
     // --- Source Management ---
-    if (UIElements.processSourcesBtn) {
-        UIElements.processSourcesBtn.addEventListener('click', async () => {
-            if (isProcessingRunning && UIElements.processingStatusModal.classList.contains('hidden')) {
-                // Process is running in the background, just reopen the modal
-                openModal(UIElements.processingStatusModal);
-                return;
-            }
+    // Processes every active source, or only `sourceId` (merged with the cached rest).
+    const runProcessing = async (sourceId) => {
+        if (isProcessingRunning && UIElements.processingStatusModal.classList.contains('hidden')) {
+            // Process is running in the background, just reopen the modal
+            openModal(UIElements.processingStatusModal);
+            return;
+        }
 
-            // 1. Open the processing modal (this sets isProcessingRunning = true)
-            showProcessingModal();
+        // 1. Open the processing modal (this sets isProcessingRunning = true)
+        showProcessingModal();
 
-            // 2. Trigger the backend process.
-            const res = await apiFetch('/api/process-sources', { method: 'POST' });
-
-            // 3. Handle initial request failure
-            if (!res || !res.ok) {
-                const data = res ? await res.json() : { error: 'Could not connect to server.' };
-                updateProcessingStatus(`Failed to start process: ${data.error}`, 'error');
-            }
+        // 2. Trigger the backend process.
+        const res = await apiFetch('/api/process-sources', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sourceId })
         });
+
+        // 3. Handle initial request failure
+        if (!res || !res.ok) {
+            const data = res ? await res.json() : { error: 'Could not connect to server.' };
+            updateProcessingStatus(`Failed to start process: ${data.error}`, 'error');
+        }
+    };
+
+    if (UIElements.processSourcesBtn) {
+        UIElements.processSourcesBtn.addEventListener('click', () => runProcessing());
     }
 
     UIElements.addM3uBtn.addEventListener('click', () => openSourceEditor('m3u'));
@@ -1371,6 +1379,8 @@ export function setupSettingsEventListeners() {
             updateUIFromSettings();
             closeModal(UIElements.sourceEditorModal);
             showNotification(`Source ${id ? 'updated' : 'added'} successfully.`);
+            // A new source has no data until it is processed.
+            if (!id && UIElements.sourceEditorIsActive.checked) runProcessing(data.id);
         } else {
             const data = res ? await res.json() : { error: 'An unknown error occurred.' };
             showNotification(`Error: ${data.error}`, true);
@@ -1413,6 +1423,8 @@ export function setupSettingsEventListeners() {
 
         if (target.closest('.edit-source-btn')) {
             openSourceEditor(sourceType, source);
+        } else if (target.closest('.refresh-source-btn')) {
+            runProcessing(sourceId);
         } else if (target.closest('.delete-source-btn')) {
             showConfirm('Delete Source?', 'This will delete the source configuration. The downloaded file (if any) will also be removed.', async () => {
                 const res = await apiFetch(`/api/sources/${sourceType}/${sourceId}`, { method: 'DELETE' });

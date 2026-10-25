@@ -171,7 +171,7 @@ Once the container is running, open your browser and navigate to `http://localho
 All configuration is done via the web interface in the **Settings** tab.
 
 -   **Data Sources:** Add your M3U and EPG sources from remote URLs, XC Codes, uploaded files.
--   **Processing:** After adding sources, click the **Process Sources & View Guide** button to download, parse, and merge all your data.
+-   **Processing:** A new source is downloaded and merged as soon as you add it. Use the refresh button on a source's row to refresh just that source, or **Process Sources & View Guide** to download, parse, and merge all of them.
 -   **Player Settings:** Manage User-Agent strings and define `ffmpeg` stream profiles.
 -   **User Management (Admin):** Admins can create, edit, and delete user accounts.
 
