@@ -8,6 +8,8 @@ const ALLOWED_JOURNAL_MODES = ['WAL', 'DELETE', 'TRUNCATE', 'PERSIST'];
 const BUSY_TIMEOUT_MS = 5000;
 const JOURNAL_SIZE_LIMIT_BYTES = 64 * 1024 * 1024;
 const JOURNAL_MODE_ATTEMPTS = 3;
+// SQLITE_FOREIGN_KEYS=off turns foreign key enforcement off, in case something relies on a dangling reference.
+const FOREIGN_KEYS_OFF = /^(0|off|false|no)$/i;
 
 function resolveJournalMode(raw = process.env.SQLITE_JOURNAL_MODE) {
     const mode = String(raw || 'WAL').trim().toUpperCase();
@@ -63,6 +65,8 @@ async function configureConnection(conn, { label = 'db', setJournalMode = true, 
         if (mode === 'wal') {
             await pragmaExec(conn, `PRAGMA synchronous=NORMAL; PRAGMA journal_size_limit=${JOURNAL_SIZE_LIMIT_BYTES};`);
         }
+        // ON DELETE CASCADE / SET NULL in the schema only work with this on (SQLite defaults to off).
+        await pragmaExec(conn, `PRAGMA foreign_keys=${FOREIGN_KEYS_OFF.test(process.env.SQLITE_FOREIGN_KEYS || '') ? 'OFF' : 'ON'}`);
         if (tuneCache) {
             // 32 MiB page cache; temp b-trees (ORDER BY, DISTINCT) stay in memory.
             await pragmaExec(conn, 'PRAGMA temp_store=MEMORY; PRAGMA cache_size=-32768;');
@@ -88,6 +92,7 @@ const INDEX_DDL = [
     'CREATE INDEX IF NOT EXISTS ix_notif_user_time ON notifications(user_id, notificationTime)',
     'CREATE INDEX IF NOT EXISTS ix_notif_time ON notifications(notificationTime)',
     'CREATE INDEX IF NOT EXISTS ix_deliv_notif ON notification_deliveries(notification_id, status)',
+    'CREATE INDEX IF NOT EXISTS ix_deliv_sub ON notification_deliveries(subscription_id)',
     "CREATE INDEX IF NOT EXISTS ix_deliv_pending ON notification_deliveries(status) WHERE status = 'pending'",
     'CREATE INDEX IF NOT EXISTS ix_push_subs_user ON push_subscriptions(user_id)',
     // DVR
@@ -99,4 +104,17 @@ const INDEX_DDL = [
     'CREATE INDEX IF NOT EXISTS ix_multiview_user ON multiview_layouts(user_id)',
 ];
 
-module.exports = { configureConnection, resolveJournalMode, INDEX_DDL, BUSY_TIMEOUT_MS };
+// Foreign keys were never enforced, so rows whose parent is gone piled up (a deleted user's push
+// subscriptions kept receiving reminders). Idempotent; run at boot, children of children last.
+const ORPHAN_CLEANUP_SQL = [
+    ...['user_settings', 'multiview_layouts', 'notifications', 'push_subscriptions', 'dvr_jobs', 'dvr_recordings', 'watch_progress']
+        .map((table) => `DELETE FROM ${table} WHERE user_id NOT IN (SELECT id FROM users)`),
+    'DELETE FROM notification_deliveries WHERE notification_id NOT IN (SELECT id FROM notifications) OR subscription_id NOT IN (SELECT id FROM push_subscriptions)',
+    'UPDATE dvr_recordings SET job_id = NULL WHERE job_id IS NOT NULL AND job_id NOT IN (SELECT id FROM dvr_jobs)',
+    'DELETE FROM provider_movie_relations WHERE movie_id NOT IN (SELECT id FROM movies)',
+    'DELETE FROM provider_series_relations WHERE series_id NOT IN (SELECT id FROM series)',
+    'DELETE FROM episodes WHERE series_id NOT IN (SELECT id FROM series)',
+    'DELETE FROM provider_episode_relations WHERE episode_id NOT IN (SELECT id FROM episodes)',
+];
+
+module.exports = { configureConnection, resolveJournalMode, INDEX_DDL, ORPHAN_CLEANUP_SQL, BUSY_TIMEOUT_MS };

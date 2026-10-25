@@ -18,7 +18,7 @@ const session = require('express-session');
 const bcrypt = require('bcrypt');
 const sqlite3 = require('sqlite3').verbose();
 const SQLiteStore = require('connect-sqlite3')(session);
-const { configureConnection, INDEX_DDL } = require('./dbConfig');
+const { configureConnection, INDEX_DDL, ORPHAN_CLEANUP_SQL } = require('./dbConfig');
 const { throttleSessionTouch } = require('./sessionTouch');
 const { createUserCache } = require('./userCache');
 const { createVodStore } = require('./vodStore');
@@ -348,9 +348,22 @@ const db = new sqlite3.Database(DB_PATH, (err) => {
             });
             // Refresh planner statistics so the new indexes are picked correctly.
             db.run('PRAGMA optimize');
-            // Runs after the statements above, so the VOD tables exist: adds the unique keys the
-            // VOD upserts rely on (and removes duplicate episodes first).
-            db.run('SELECT 1', () => { vodStore.ready().catch(() => { }); });
+            // vodStore.ready() adds the unique keys the VOD upserts rely on (and removes duplicate episodes first).
+            // The callback fires once every statement above has run, so all tables exist: a statement queued
+            // here directly can be prepared before the CREATE TABLE ahead of it has executed (fresh databases).
+            db.run('SELECT 1', () => {
+                vodStore.ready().catch(() => { });
+                ORPHAN_CLEANUP_SQL.forEach((sql) => {
+                    db.run(sql, (cleanupErr) => {
+                        if (cleanupErr) console.error(`[DB] Orphan cleanup failed (${sql}):`, cleanupErr.message);
+                    });
+                });
+                // Nothing is streaming right after a start, so 'playing' rows are left over from a crash or restart.
+                // The real end is unknown, so they are closed with zero length.
+                db.run("UPDATE stream_history SET status = 'stopped', end_time = start_time, duration_seconds = 0 WHERE status = 'playing'", (reconcileErr) => {
+                    if (reconcileErr) console.error('[DB] Could not close stale stream_history rows:', reconcileErr.message);
+                });
+            });
 
             // --- DVR Job Loading, Scheduling and Restart Recovery ---
             console.log('[DVR] Checking and recovering pending/active DVR jobs from database...');
@@ -3664,7 +3677,7 @@ app.delete('/api/data', requireAuth, requireAdmin, (req, res) => {
         });
 
         console.log('[API_RESET] Wiping all database tables...');
-        const tables = ['stream_history', 'dvr_recordings', 'dvr_jobs', 'notification_deliveries', 'notifications', 'push_subscriptions', 'multiview_layouts', 'user_settings', 'users', 'sessions'];
+        const tables = ['stream_history', 'dvr_recordings', 'dvr_jobs', 'notification_deliveries', 'notifications', 'push_subscriptions', 'multiview_layouts', 'user_settings', 'watch_progress', 'provider_episode_relations', 'provider_series_relations', 'provider_movie_relations', 'episodes', 'series', 'movies', 'vod_categories', 'users', 'sessions'];
         db.serialize(() => {
             tables.forEach(table => {
                 db.run(`DELETE FROM ${table}`, (err) => {
@@ -6361,6 +6374,15 @@ detectHardwareAcceleration().then(() => {
 
         schedule.scheduleJob('0 2 * * *', autoDeleteOldRecordings);
         console.log('[DVR_STORAGE] Scheduled daily cleanup of old recordings.');
+
+        // stream_history and notifications were never pruned. Set STREAM_HISTORY_RETENTION_DAYS=0 to keep history forever.
+        schedule.scheduleJob('15 2 * * *', () => {
+            const cutoff = (days) => new Date(Date.now() - days * 86400000).toISOString();
+            const onError = (err) => { if (err) console.error('[DB] Nightly prune failed:', err.message); };
+            const historyDays = parseInt(process.env.STREAM_HISTORY_RETENTION_DAYS ?? '90', 10);
+            if (historyDays > 0) db.run('DELETE FROM stream_history WHERE start_time < ?', [cutoff(historyDays)], onError);
+            db.run('DELETE FROM notifications WHERE notificationTime < ?', [cutoff(30)], onError); // their deliveries go with them
+        });
 
         // Keep the query planner's statistics fresh (cheap; only re-analyzes tables that changed a lot).
         schedule.scheduleJob('30 2 * * *', () => db.run('PRAGMA optimize'));
