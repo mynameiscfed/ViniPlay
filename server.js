@@ -2029,9 +2029,15 @@ async function mergeEpg(req, settings, liveChannels, onlyIds, failedSources) {
 
 // Processing writes the merged files, so runs must not overlap (a timer, a manual
 // refresh and the startup pass could otherwise interleave their writes).
+let queuedSourceRuns = 0; // runs started or waiting; > 0 means a new run has to wait its turn
 function runSourceProcessing(req, onlyIds, keepStoredVod) {
+    if (queuedSourceRuns > 0) {
+        console.log('[PROCESS] Another refresh is still running; this one is queued behind it.');
+        sendProcessingStatus(req, 'Another refresh is still running. This one will start when it finishes.', 'info');
+    }
+    queuedSourceRuns++;
     const run = sourceProcessing.then(() => processAndMergeSources(req, onlyIds, keepStoredVod));
-    sourceProcessing = run.catch(() => { });
+    sourceProcessing = run.catch(() => { }).finally(() => { queuedSourceRuns--; });
     return run;
 }
 
