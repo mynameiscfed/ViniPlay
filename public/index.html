@@ -45,15 +45,14 @@
     <link rel="stylesheet" href="/css/player.css?v=1">
     <link rel="stylesheet" href="/css/tv.css?v=1">
 
-    <script src="https://cdn.jsdelivr.net/npm/mpegts.js/dist/mpegts.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.8.2/dist/mpegts.js" integrity="sha384-sQp+4cJv0jChNCYvgy6W0RSfQZB/w6d3ZTDoIBlY4Uorfw4PLS56T2yM2z47bSkl" crossorigin="anonymous"></script>
     <!-- Hls.js for Live DVR Timeshift / Chase Play -->
-    <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/fuse.js/dist/fuse.min.js"></script>
-    <!-- Google Cast Framework -->
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js" integrity="sha384-9v3HcdYrO3D+OPDTjZ40RXocgE4GtXVCd3/mCS62JsM93JXgI1afJVuwjFvsu6ni" crossorigin="anonymous"></script>
+    <!-- Google Cast Framework (Google's loader is dynamic, so it cannot carry an SRI hash) -->
     <script src="https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1"></script>
     <!-- Gridstack.js for Multi-View -->
-    <link href="https://cdn.jsdelivr.net/npm/gridstack@10.1.2/dist/gridstack.min.css" rel="stylesheet" />
-    <script src="https://cdn.jsdelivr.net/npm/gridstack@10.1.2/dist/gridstack-all.js"></script>
+    <link href="https://cdn.jsdelivr.net/npm/gridstack@10.1.2/dist/gridstack.min.css" rel="stylesheet" integrity="sha384-3466xzONp5jWI9wRY4i5C4LQqPF7wQiNl2TPqqWNEKMxqleN1p3y+uCjs5rObTFv" crossorigin="anonymous" />
+    <script src="https://cdn.jsdelivr.net/npm/gridstack@10.1.2/dist/gridstack-all.js" integrity="sha384-6IelLg5vJ9FDli+2FiM5mdHxGkb5pvYCGXlIN9Tqlv6ufE1DNgZkrqeIz/me4Phs" crossorigin="anonymous"></script>
 </head>
 
 <body class="h-screen">
@@ -887,9 +886,14 @@
                         <p class="text-sm text-gray-400 mb-4">Channels the guide data doesn't reach can be assigned by hand,
                             or ViniPlay can suggest matches from their names.</p>
                         <div class="flex flex-wrap items-center gap-2 mb-3">
-                            <button type="button" class="chip" data-epg-filter="none" aria-pressed="true">No guide data</button>
-                            <button type="button" class="chip" data-epg-filter="manual" aria-pressed="false">Assigned by hand</button>
-                            <button type="button" class="chip" data-epg-filter="all" aria-pressed="false">All channels</button>
+                            <button type="button" class="chip" data-epg-filter="none" aria-pressed="true">No guide data <span class="n" data-epg-count="none"></span></button>
+                            <button type="button" class="chip" data-epg-filter="suggested" aria-pressed="false">Has a suggestion <span class="n" data-epg-count="suggested"></span></button>
+                            <button type="button" class="chip" data-epg-filter="manual" aria-pressed="false">Assigned by hand <span class="n" data-epg-count="manual"></span></button>
+                            <button type="button" class="chip" data-epg-filter="all" aria-pressed="false">All channels <span class="n" data-epg-count="all"></span></button>
+                            <select id="epg-map-source" aria-label="Source"
+                                class="bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm text-white"></select>
+                            <select id="epg-map-group" aria-label="Group"
+                                class="bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm text-white max-w-[16rem]"></select>
                             <input type="search" id="epg-map-search" placeholder="Filter channels..."
                                 class="flex-grow bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm text-white focus:ring-blue-500 focus:border-blue-500">
                             <label class="flex items-center gap-2 text-sm text-gray-300"
@@ -904,10 +908,18 @@
                             <button type="button" id="epg-map-accept-btn"
                                 class="hidden bg-green-600 hover:bg-green-700 disabled:bg-green-800 text-white text-sm font-bold py-1 px-3 rounded-md"></button>
                         </div>
-                        <div class="overflow-x-auto bg-gray-900/50 rounded-lg">
+                        <div id="epg-map-bulk" class="hidden flex flex-wrap items-center gap-2 mb-2 p-2 rounded-md bg-gray-700 text-sm text-white">
+                            <span id="epg-map-bulk-count" class="font-bold mr-auto"></span>
+                            <button type="button" data-bulk="accept" class="bg-green-600 hover:bg-green-700 disabled:bg-green-800 text-white font-bold py-1 px-3 rounded-md"></button>
+                            <button type="button" data-bulk="reject" class="bg-gray-600 hover:bg-gray-500 disabled:opacity-50 text-white font-bold py-1 px-3 rounded-md"></button>
+                            <button type="button" data-bulk="clear" class="bg-gray-600 hover:bg-gray-500 disabled:opacity-50 text-white font-bold py-1 px-3 rounded-md"></button>
+                            <button type="button" data-bulk="none" class="text-gray-300 hover:text-white py-1 px-2">Clear selection</button>
+                        </div>
+                        <div id="epg-map-scroll" class="overflow-auto bg-gray-900/50 rounded-lg" style="max-height:65vh">
                             <table class="min-w-full sources-table">
-                                <thead>
+                                <thead class="sticky top-0 z-10 bg-gray-800">
                                     <tr>
+                                        <th class="w-8"><input type="checkbox" id="epg-map-all" aria-label="Select every channel in this list"></th>
                                         <th>Channel</th>
                                         <th>Guide data</th>
                                         <th>Suggestion</th>
@@ -917,9 +929,6 @@
                                 <tbody id="epg-map-tbody"></tbody>
                             </table>
                         </div>
-                        <button type="button" id="epg-map-more-btn"
-                            class="hidden mt-3 bg-gray-700 hover:bg-gray-600 text-white text-sm font-bold py-2 px-4 rounded-md">Show
-                            more</button>
                     </div>
 
                     <div class="bg-gray-800 p-4 sm:p-6 rounded-xl shadow-lg">

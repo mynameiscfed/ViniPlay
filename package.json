@@ -23,7 +23,6 @@
     "connect-sqlite3": "^0.9.16",
     "dotenv": "^16.4.5",
     "xml-js": "^1.6.11",
-    "fuse.js": "^7.1.0",
     "web-push": "^3.6.7",
     "node-schedule": "^2.1.1",
     "diskusage": "^1.2.0",

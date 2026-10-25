@@ -112,6 +112,68 @@ function blockedReason(address) {
     return null;
 }
 
+// Addresses that are never a legitimate IPTV stream or source: the server itself and
+// link-local (cloud metadata). Private LAN ranges stay allowed because self-hosted IPTV
+// sources commonly live there.
+const alwaysBlockedRanges = new net.BlockList();
+[
+    ['0.0.0.0', 8],          // "this" network
+    ['127.0.0.0', 8],        // loopback
+    ['169.254.0.0', 16],     // link-local, incl. cloud metadata 169.254.169.254
+    ['::', 128],             // unspecified
+    ['::1', 128],            // loopback
+    ['fe80::', 10],          // link-local
+].forEach(([addr, prefix]) => alwaysBlockedRanges.addSubnet(addr, prefix, net.isIP(addr) === 6 ? 'ipv6' : 'ipv4'));
+
+const LOCAL_HOST_NAMES = new Set(['localhost', 'metadata', 'metadata.google.internal', 'instance-data']);
+
+/** Reason string when an address must never be used as a stream/source target, else null. */
+function alwaysBlockedReason(address) {
+    let ip = address;
+    let family = net.isIP(ip);
+    if (family === 6) {
+        const mapped = unmapIPv4(ip);
+        if (mapped) {
+            ip = mapped;
+            family = 4;
+        }
+    }
+    if (family === 0) return 'not a valid IP address';
+    return alwaysBlockedRanges.check(ip, family === 4 ? 'ipv4' : 'ipv6')
+        ? 'loopback, link-local or metadata address'
+        : null;
+}
+
+/**
+ * Validates a URL handed to ffmpeg/ffprobe (streams, VOD probing, source fetches).
+ * Blocks the server itself and cloud metadata endpoints, but keeps private LAN ranges
+ * allowed: that is where self-hosted IPTV sources usually live.
+ *
+ * shortcut: DNS names are not resolved here, so a hostname that resolves to loopback can
+ * still reach it; ffmpeg resolves the name itself and its lookup cannot be pinned.
+ * Upgrade to an address-pinned fetch if untrusted users ever control stream URLs.
+ * @returns {URL}
+ */
+function assertSafeStreamUrl(rawUrl) {
+    let parsed;
+    try {
+        parsed = new URL(rawUrl);
+    } catch (e) {
+        throw new SsrfBlockedError('Invalid URL.');
+    }
+    const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
+    if (!hostname) throw new SsrfBlockedError('URL has no host.');
+    const lower = hostname.toLowerCase();
+    if (LOCAL_HOST_NAMES.has(lower) || lower.endsWith('.localhost')) {
+        throw new SsrfBlockedError(`Refusing to fetch ${hostname}: local address.`);
+    }
+    if (net.isIP(hostname)) {
+        const reason = alwaysBlockedReason(hostname);
+        if (reason) throw new SsrfBlockedError(`Refusing to fetch ${hostname}: ${reason}.`);
+    }
+    return parsed;
+}
+
 /**
  * dns.lookup replacement for http(s).request that refuses to connect to blocked addresses.
  */
@@ -207,4 +269,4 @@ function safeGet(rawUrl, options = {}) {
     });
 }
 
-module.exports = { safeGet, assertSafeUrl, blockedReason, isExemptHost, SsrfBlockedError };
+module.exports = { safeGet, assertSafeUrl, assertSafeStreamUrl, alwaysBlockedReason, blockedReason, isExemptHost, SsrfBlockedError };

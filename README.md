@@ -74,7 +74,7 @@ ViniPlay is designed for easy deployment using Docker.
     
 ### Method 1: Using `docker-compose` (Recommended)
 
-1.  **Create Project Files:** Create a directory for your ViniPlay setup and add a `docker-compose.yml` and a `.env` file.
+1.  **Create Project Files:** Create a directory for your ViniPlay setup and add a `docker-compose.yml` and a `.env` file. If you cloned the repository, copy the example first: `cp .env.example .env`.
     
     -   `docker-compose.yml`:
         
@@ -94,7 +94,7 @@ ViniPlay is designed for easy deployment using Docker.
         
         ```
         
-    -   `.env`:
+    -   `.env` (copy `.env.example` and edit):
         
         ```
         # Replace this with a long, random, and secret string
@@ -102,8 +102,8 @@ ViniPlay is designed for easy deployment using Docker.
         
         ```
         
-        > **Security Note:** Your `SESSION_SECRET` should be a long, random string to properly secure user sessions.
-    
+        > **Security Note:** Your `SESSION_SECRET` should be a long, random string. If it is missing, too short, or still the example placeholder, ViniPlay generates a random secret and stores it in `/data/session-secret` (mode `0600`). Keep `.env` out of version control; it is ignored by git.
+
 2.  **Build and Run the Container:**
     
     ```
@@ -141,7 +141,7 @@ Foreign keys are enforced, so deleting a user also removes their DVR jobs, notif
     
     ```
     
-2.  **Run the Container:** Create a volume directory (`mkdir viniplay-data`) and a `.env` file first. Then run the container:
+2.  **Run the Container:** Create a volume directory (`mkdir viniplay-data`) and a `.env` file first (`cp .env.example .env`, then edit it). Then run the container:
     
     ```
     docker run -d \
@@ -167,7 +167,7 @@ To run the same checks locally: `npm test` (JavaScript syntax check) and `npm ru
 
 ### First-Time Setup
 
-Once the container is running, open your browser and navigate to `http://localhost:8998`. You will be prompted to create your initial **admin account**. After creating the admin account, you can log in and start configuring your sources in the **Settings** tab.
+Once the container is running, open your browser and navigate to `http://localhost:8998`. You will be prompted to create your initial **admin account**. Passwords must be at least 12 characters, and repeated failed logins from one address are temporarily blocked. After creating the admin account, you can log in and start configuring your sources in the **Settings** tab.
 
 ---
 ## 🔧 Configuration
@@ -219,7 +219,7 @@ The project is organized into a Node.js backend and a modular vanilla JavaScript
 ├── Dockerfile                       # Docker build instructions
 ├── docker-compose.yml               # Docker Compose configuration
 ├── package.json                     # Node.js dependencies
-└── .env                             # Environment variables (e.g., SESSION_SECRET)
+└── .env.example                     # Environment variables template (copy to .env)
 
 ```
 
