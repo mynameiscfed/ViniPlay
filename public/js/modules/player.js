@@ -13,6 +13,7 @@ import { ICONS } from './icons.js'; // NEW: Import ICONS
 import { getCodecName } from './codecs.js'; // NEW: Import codec utility
 import { sendTelemetry, tracePlayerAction } from './telemetry.js';
 import { nowNext, escapeHtml } from './utils.js';
+import { showBar, hideBar, fmt } from './bar.js';
 
 let streamInfoInterval = null; // Interval to update stream stats
 let currentLocalStreamUrl = null; // ADDED: Track the original URL of the currently playing local stream
@@ -37,7 +38,6 @@ const MAX_RETRIES = 3;
 let retryTimeout = null;
 
 // --- Player extras ---
-let liveRewindUpdateInterval = null;
 let sleepTimer = null;
 let currentRecordJob = null;
 let playerFallbackUsed = false;
@@ -729,21 +729,14 @@ export const stopAndCleanupPlayer = async () => { // MODIFIED: Made function asy
     playerFallbackUsed = false;
     currentChannelInfo = null;
     currentRecordJob = null;
-    if (liveRewindUpdateInterval) {
-        clearInterval(liveRewindUpdateInterval);
-        liveRewindUpdateInterval = null;
-    }
     if (sleepTimer) {
         clearTimeout(sleepTimer);
         sleepTimer = null;
     }
     const recordBtn = document.getElementById('record-current-btn');
     if (recordBtn) recordBtn.classList.add('hidden');
-    const liveEdgeBtn = document.getElementById('player-live-edge-btn');
-    if (liveEdgeBtn) liveEdgeBtn.classList.add('hidden');
     document.getElementById('audio-track-btn')?.classList.add('hidden');
-    const overlay = document.getElementById('timeshift-controls-overlay');
-    if (overlay) overlay.classList.add('hidden');
+    hideBar();
     document.dispatchEvent(new CustomEvent('playerstop'));
 
 
@@ -790,27 +783,11 @@ export const stopAndCleanupPlayer = async () => { // MODIFIED: Made function asy
         appState.shakaPlayer = null;
     }
 
-    // Hide timeshift controls overlay if visible
-    const timeshiftOverlay = document.getElementById('timeshift-controls-overlay') || UIElements.timeshiftControlsOverlay;
-    if (timeshiftOverlay) {
-        timeshiftOverlay.classList.add('hidden');
-    }
-
-    // Hide VOD controls overlay if visible
-    const vodOverlay = document.getElementById('vod-controls-overlay');
-    if (vodOverlay) {
-        vodOverlay.classList.add('hidden');
-    }
-    if (vodTimeUpdateInterval) {
-        clearInterval(vodTimeUpdateInterval);
-        vodTimeUpdateInterval = null;
-    }
     if (seekDebounceTimeout) {
         clearTimeout(seekDebounceTimeout);
         seekDebounceTimeout = null;
     }
     pendingSeekTarget = null;
-    isVodSeeking = false;
 
     // Stop active timeshift session on server if running
     if (appState.activeTimeshiftJobId) {
@@ -911,17 +888,6 @@ function updateStreamInfo() {
     UIElements.streamInfoAudio.textContent = `A Codec: ${getCodecName(audioCodec)}`;
 }
 
-
-function hidePlayerOverlays() {
-    document.getElementById('timeshift-controls-overlay')?.classList.add('hidden');
-    const vodOverlay = document.getElementById('vod-controls-overlay');
-    if (vodOverlay) vodOverlay.classList.add('hidden');
-}
-
-function updateLiveButtons() {
-    const liveBtn = document.getElementById('player-live-edge-btn');
-    if (liveBtn) liveBtn.classList.toggle('hidden', !currentChannelInfo?.channelId);
-}
 
 const REC_STATES = { idle: ['Record', 'Record current programme'], scheduled: ['Scheduled', 'Cancel scheduled recording'], recording: ['REC', 'Stop recording'] };
 
@@ -1024,62 +990,6 @@ export function jumpToLive() {
     }
 }
 
-function setupLiveRewindControls() {
-    const overlay = document.getElementById('timeshift-controls-overlay');
-    if (!overlay) return;
-    overlay.classList.remove('hidden');
-
-    const video = UIElements.videoElement;
-    const progressBar = document.getElementById('timeshift-progress-bar');
-    const currentTimeEl = document.getElementById('timeshift-current-time');
-    const totalTimeEl = document.getElementById('timeshift-total-time');
-    const liveEdgeBtn = document.getElementById('timeshift-live-edge-btn');
-    const liveDot = document.getElementById('timeshift-live-dot');
-    const playPauseBtn = document.getElementById('timeshift-play-pause-btn');
-    const rewind15Btn = document.getElementById('timeshift-rewind-15-btn');
-    const forward15Btn = document.getElementById('timeshift-forward-15-btn');
-    let seeking = false;
-
-    const total = () => {
-        try {
-            return video.seekable.length ? video.seekable.end(video.seekable.length - 1) : 0;
-        } catch (e) {
-            return 0;
-        }
-    };
-    if (progressBar) {
-        progressBar.oninput = (e) => {
-            seeking = true;
-            if (currentTimeEl) currentTimeEl.textContent = formatTimeSeconds(parseFloat(e.target.value));
-        };
-        progressBar.onchange = (e) => {
-            seeking = false;
-            video.currentTime = Math.max(0, parseFloat(e.target.value));
-        };
-    }
-    if (liveEdgeBtn) liveEdgeBtn.onclick = () => jumpToLive();
-    if (rewind15Btn) rewind15Btn.onclick = () => { video.currentTime = Math.max(0, video.currentTime - 15); };
-    if (forward15Btn) forward15Btn.onclick = () => { video.currentTime = Math.min(total(), video.currentTime + 15); };
-    if (playPauseBtn) playPauseBtn.onclick = () => { video.paused ? video.play().catch(() => {}) : video.pause(); };
-
-    if (liveRewindUpdateInterval) clearInterval(liveRewindUpdateInterval);
-    liveRewindUpdateInterval = setInterval(() => {
-        if (!currentChannelInfo?.channelId) return;
-        const end = total();
-        const current = video.currentTime || 0;
-        if (totalTimeEl) totalTimeEl.textContent = end ? formatTimeSeconds(end) : '--:--';
-        if (currentTimeEl && !seeking) currentTimeEl.textContent = formatTimeSeconds(current);
-        if (progressBar && !seeking && end > 0) {
-            progressBar.max = end;
-            progressBar.value = Math.min(end, current);
-        }
-        const nearLive = end > 5 && end - current < 8;
-        if (liveDot) liveDot.className = `w-2 h-2 rounded-full ${nearLive ? 'bg-white animate-pulse' : 'bg-gray-400'} inline-block`;
-        if (liveEdgeBtn) liveEdgeBtn.className = `ml-1 px-2.5 py-1 text-xs font-bold rounded-md ${nearLive ? 'bg-red-600 text-white' : 'bg-gray-700 text-gray-300'} transition-colors flex items-center gap-1.5 flex-shrink-0 cursor-pointer`;
-        if (playPauseBtn) playPauseBtn.innerHTML = video.paused ? ICONS.play : ICONS.pause;
-    }, 500);
-}
-
 async function playLiveRewind(url, name, channelId, logo, profileId) {
     const streamUrl = `/api/livebuffer/${encodeURIComponent(channelId)}/stream.m3u8?_t=${Date.now()}`;
     currentStreamUrlToPlay = streamUrl;
@@ -1109,28 +1019,21 @@ async function playLiveRewind(url, name, channelId, logo, profileId) {
     updateMediaSession(name, logo);
     requestScreenWakeLock();
     openModal(UIElements.videoModal);
-    UIElements.videoElement.controls = false;
     document.getElementById('audio-track-btn')?.classList.add('hidden');
-    setupLiveRewindControls();
+    showBar({ live: true, seekable: true, goLive: jumpToLive });
     refreshPlayerRecordState();
-    updateLiveButtons();
     setPrimaryPlayerButtons(true);
 
     let fellBack = false;
     const fallback = () => {
         if (fellBack || !currentChannelInfo || String(currentChannelInfo.channelId) !== String(channelId)) return;
         fellBack = true;
-        if (liveRewindUpdateInterval) {
-            clearInterval(liveRewindUpdateInterval);
-            liveRewindUpdateInterval = null;
-        }
-        document.getElementById('timeshift-controls-overlay')?.classList.add('hidden');
+        hideBar();
         if (appState.hlsPlayer) {
             try { appState.hlsPlayer.destroy(); } catch (e) { }
             appState.hlsPlayer = null;
         }
         showNotification('Live rewind is unavailable. Playing live.', true, 3000);
-        UIElements.videoElement.controls = true;
         playChannel(url, name, channelId, true, profileId);
     };
 
@@ -1242,13 +1145,8 @@ export const playChannel = async (url, name, channelId, forceLive = false, profi
         clearInterval(streamInfoInterval);
         streamInfoInterval = null;
     }
-    if (liveRewindUpdateInterval) {
-        clearInterval(liveRewindUpdateInterval);
-        liveRewindUpdateInterval = null;
-    }
-    hidePlayerOverlays();
+    hideBar();
     setActiveMediaTracking(null);
-    UIElements.videoElement.controls = true;
     UIElements.videoElement.playbackRate = 1;
     if (isAudioOnly) toggleAudioOnly(false);
 
@@ -1319,8 +1217,8 @@ export const playChannel = async (url, name, channelId, forceLive = false, profi
         requestScreenWakeLock();
         appState.player.attachMediaElement(UIElements.videoElement);
         appState.player.load();
+        showBar({ live: true, goLive: jumpToLive });
         refreshPlayerRecordState();
-        updateLiveButtons();
         setPrimaryPlayerButtons(true);
         if (supportsAudioSelection) document.getElementById('audio-track-btn')?.classList.remove('hidden');
 
@@ -1430,6 +1328,7 @@ export const playRecordingOrDirectVideo = async (url, title, logo = '', isVod = 
     UIElements.videoModal?.classList.remove('pip-active');
     openModal(UIElements.videoModal);
     requestScreenWakeLock();
+    showBar({ seekable: true });
     setPrimaryPlayerButtons(false);
     refreshPlayerRecordState();
 
@@ -1443,38 +1342,20 @@ export const playRecordingOrDirectVideo = async (url, title, logo = '', isVod = 
 
 // State tracking for transcoded VOD seeking via -ss on /stream
 let currentVodTranscodeSession = null;
-let vodTimeUpdateInterval = null;
-let isVodSeeking = false;
 let pendingSeekTarget = null;
 let seekDebounceTimeout = null;
-
-function formatTimeSeconds(seconds) {
-    const s = Math.max(0, Math.floor(seconds));
-    const hrs = Math.floor(s / 3600);
-    const mins = Math.floor((s % 3600) / 60);
-    const secs = s % 60;
-    if (hrs > 0) {
-        return `${hrs}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-    }
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
-}
 
 export function seekVodRelative(delta) {
     if (!currentVodTranscodeSession) return;
     const curElapsed = UIElements.videoElement?.currentTime || 0;
-    const baseTime = pendingSeekTarget !== null 
-        ? pendingSeekTarget 
+    const baseTime = pendingSeekTarget !== null
+        ? pendingSeekTarget
         : (currentVodTranscodeSession.currentSeekTime + curElapsed);
-    
+
     const maxTime = currentVodTranscodeSession.duration || 86400;
     pendingSeekTarget = Math.max(0, Math.min(maxTime, baseTime + delta));
-    
-    const currentTimeEl = document.getElementById('vod-current-time');
-    const progressBar = document.getElementById('vod-progress-bar');
-    if (currentTimeEl) currentTimeEl.textContent = formatTimeSeconds(pendingSeekTarget);
-    if (progressBar) progressBar.value = pendingSeekTarget;
 
-    showNotification(`Seeking to ${formatTimeSeconds(pendingSeekTarget)}...`, false, 1200);
+    showNotification(`Seeking to ${fmt(pendingSeekTarget)}...`, false, 1200);
 
     if (seekDebounceTimeout) clearTimeout(seekDebounceTimeout);
     seekDebounceTimeout = setTimeout(() => {
@@ -1503,136 +1384,18 @@ export function performVodSeek(targetTime) {
     playVOD(session.url, session.title, session.logo, safeTarget, session.duration, mediaInfo, true);
 }
 
-function updateVodControlsUI() {
-    const video = UIElements.videoElement;
-    if (!video || !currentVodTranscodeSession) return;
-
-    if (isVodSeeking || pendingSeekTarget !== null) return;
-
-    const curElapsed = video.currentTime || 0;
-    const curTotalTime = currentVodTranscodeSession.currentSeekTime + curElapsed;
-
-    const currentTimeEl = document.getElementById('vod-current-time');
-    const totalTimeEl = document.getElementById('vod-total-time');
-    const progressBar = document.getElementById('vod-progress-bar');
-    const playPauseBtn = document.getElementById('vod-play-pause-btn');
-
-    if (currentTimeEl) currentTimeEl.textContent = formatTimeSeconds(curTotalTime);
-    
-    const duration = currentVodTranscodeSession.duration;
-    if (duration && duration > 0) {
-        if (progressBar) {
-            progressBar.max = duration;
-            progressBar.value = Math.min(duration, curTotalTime);
-        }
-        if (totalTimeEl) totalTimeEl.textContent = formatTimeSeconds(duration);
-    } else {
-        if (progressBar) {
-            progressBar.max = Math.max(curTotalTime + 60, parseFloat(progressBar.max) || 100);
-            progressBar.value = curTotalTime;
-        }
-        if (totalTimeEl) totalTimeEl.textContent = '--:--';
-    }
-
-    if (playPauseBtn) {
-        playPauseBtn.innerHTML = video.paused ? ICONS.play : ICONS.pause;
-    }
-}
-
-function setupVodControlsOverlay(profileName) {
-    const overlay = document.getElementById('vod-controls-overlay');
-    if (!overlay) return;
-
-    overlay.classList.remove('hidden');
-
-    const progressBar = document.getElementById('vod-progress-bar');
-    const currentTimeEl = document.getElementById('vod-current-time');
-    const totalTimeEl = document.getElementById('vod-total-time');
-    const playPauseBtn = document.getElementById('vod-play-pause-btn');
-    const rewind60Btn = document.getElementById('vod-rewind-60-btn');
-    const rewind15Btn = document.getElementById('vod-rewind-15-btn');
-    const forward15Btn = document.getElementById('vod-forward-15-btn');
-    const forward60Btn = document.getElementById('vod-forward-60-btn');
-    const volumeBtn = document.getElementById('vod-volume-btn');
-    const volumeBar = document.getElementById('vod-volume-bar');
-    const fullscreenBtn = document.getElementById('vod-fullscreen-btn');
-    const profileBadge = document.getElementById('vod-profile-badge');
-
-    if (profileBadge) profileBadge.textContent = profileName || 'Transcoding';
-
-    const initialSeek = currentVodTranscodeSession?.currentSeekTime || 0;
-    const initialDur = currentVodTranscodeSession?.duration || 0;
-
-    if (currentTimeEl) currentTimeEl.textContent = formatTimeSeconds(initialSeek);
-    if (totalTimeEl) totalTimeEl.textContent = initialDur > 0 ? formatTimeSeconds(initialDur) : '--:--';
-    if (progressBar) {
-        progressBar.min = 0;
-        progressBar.max = initialDur > 0 ? initialDur : Math.max(100, initialSeek + 60);
-        progressBar.value = initialSeek;
-    }
-
-    if (playPauseBtn) {
-        playPauseBtn.innerHTML = ICONS.pause;
-        playPauseBtn.onclick = () => {
-            if (UIElements.videoElement) {
-                if (UIElements.videoElement.paused) UIElements.videoElement.play();
-                else UIElements.videoElement.pause();
-                playPauseBtn.innerHTML = UIElements.videoElement.paused ? ICONS.play : ICONS.pause;
-            }
-        };
-    }
-
-    if (rewind60Btn) rewind60Btn.onclick = () => seekVodRelative(-60);
-    if (rewind15Btn) rewind15Btn.onclick = () => seekVodRelative(-15);
-    if (forward15Btn) forward15Btn.onclick = () => seekVodRelative(15);
-    if (forward60Btn) forward60Btn.onclick = () => seekVodRelative(60);
-
-    if (progressBar) {
-        progressBar.oninput = (e) => {
-            isVodSeeking = true;
-            if (currentTimeEl) currentTimeEl.textContent = formatTimeSeconds(parseFloat(e.target.value));
-        };
-        progressBar.onchange = (e) => {
-            isVodSeeking = false;
-            const targetSec = parseFloat(e.target.value);
-            performVodSeek(targetSec);
-        };
-    }
-
-    if (volumeBar && UIElements.videoElement) {
-        volumeBar.value = UIElements.videoElement.volume;
-        volumeBar.oninput = (e) => {
-            const val = parseFloat(e.target.value);
-            UIElements.videoElement.volume = val;
-            UIElements.videoElement.muted = val === 0;
-            localStorage.setItem('iptvPlayerVolume', val);
-        };
-    }
-
-    if (volumeBtn && UIElements.videoElement) {
-        volumeBtn.onclick = () => {
-            UIElements.videoElement.muted = !UIElements.videoElement.muted;
-            if (volumeBar) {
-                volumeBar.value = UIElements.videoElement.muted ? 0 : UIElements.videoElement.volume;
-            }
-        };
-    }
-
-    if (fullscreenBtn) {
-        fullscreenBtn.onclick = () => {
-            const fsBtn = document.getElementById('player-fullscreen-btn');
-            if (fsBtn) fsBtn.click();
-        };
-    }
-
-    // Start interval
-    if (vodTimeUpdateInterval) clearInterval(vodTimeUpdateInterval);
-    vodTimeUpdateInterval = setInterval(updateVodControlsUI, 500);
-}
+// How the bar reads a transcoded movie: the stream restarts at an offset, so time is that offset plus what has played since.
+const vodBar = {
+    seekable: true,
+    position: () => pendingSeekTarget ?? ((currentVodTranscodeSession?.currentSeekTime || 0) + (UIElements.videoElement?.currentTime || 0)),
+    total: () => currentVodTranscodeSession?.duration || 0,
+    seek: performVodSeek,
+    skip: seekVodRelative,
+};
 
 /**
- * Probes the total duration of a VOD file in the background (when not already known)
- * and updates the transcoded VOD scrubber once it is available.
+ * Probes the total duration of a VOD file in the background (when not already known);
+ * the bar picks it up on its next tick.
  */
 function probeVodDuration(url, title) {
     if (!currentVodTranscodeSession || currentVodTranscodeSession.duration) return;
@@ -1642,10 +1405,6 @@ function probeVodDuration(url, title) {
             if (data && data.duration && currentVodTranscodeSession && currentVodTranscodeSession.url === url) {
                 currentVodTranscodeSession.duration = data.duration;
                 if (currentActiveMedia) currentActiveMedia.duration = data.duration;
-                const totalTimeEl = document.getElementById('vod-total-time');
-                const progressBar = document.getElementById('vod-progress-bar');
-                if (totalTimeEl) totalTimeEl.textContent = formatTimeSeconds(data.duration);
-                if (progressBar) progressBar.max = data.duration;
                 console.log(`[VOD_PLAYER] Probed duration for "${title}": ${data.duration}s`);
             }
         })
@@ -1679,15 +1438,11 @@ export const playVOD = async (url, title, logo = '', startTime = 0, knownDuratio
     const userAgentId = settings.activeUserAgentId;
     const profile = (settings.streamProfiles || []).find(p => p.id === profileId);
 
-    // Hide VOD controls overlay if not transcoding
-    const vodOverlay = document.getElementById('vod-controls-overlay');
-
     // --- DIRECT PLAY / REDIRECT LOGIC ---
     // If Direct Play is explicitly enabled OR the active profile is 'redirect' (no transcoding),
     // always use native HTML5 <video> playback. Never pass direct MKV/MP4 files into mpegts.js.
     if (useDirectPlay || !profile || profile.command === 'redirect') {
         currentVodTranscodeSession = null;
-        if (vodOverlay) vodOverlay.classList.add('hidden');
         await playRecordingOrDirectVideo(url, title, logo, true, startTime, mediaInfo);
         return;
     }
@@ -1725,8 +1480,8 @@ export const playVOD = async (url, title, logo = '', startTime = 0, knownDuratio
     logToPlayerConsole(`Final stream URL: ${streamUrlToPlay}`);
 
     // If profile outputs MP4 container (fMP4), play via the native video element. The piped fMP4
-    // has no duration or byte ranges, so the native controls cannot seek: use the VOD overlay,
-    // which restarts FFmpeg at the requested offset (-ss) just like the MPEG-TS path.
+    // has no duration or byte ranges, so the video element cannot seek: the bar
+    // restarts FFmpeg at the requested offset (-ss) just like the MPEG-TS path.
     if (profile.command && profile.command.includes('-f mp4')) {
         console.log(`[VOD_PLAYER] Profile uses fMP4. Playing via native video element: ${streamUrlToPlay}`);
         if (mediaInfo) {
@@ -1739,7 +1494,6 @@ export const playVOD = async (url, title, logo = '', startTime = 0, knownDuratio
         if (refreshBtn) refreshBtn.classList.add('hidden');
 
         const video = UIElements.videoElement;
-        video.controls = false;
         video.src = streamUrlToPlay;
         video.load();
         video.volume = parseFloat(localStorage.getItem('iptvPlayerVolume') || 0.5);
@@ -1748,9 +1502,9 @@ export const playVOD = async (url, title, logo = '', startTime = 0, knownDuratio
         UIElements.videoModal?.classList.remove('pip-active');
         openModal(UIElements.videoModal);
         requestScreenWakeLock();
+        showBar(vodBar);
         setPrimaryPlayerButtons(false);
         refreshPlayerRecordState();
-        setupVodControlsOverlay(profile.name);
         probeVodDuration(url, title);
 
         try {
@@ -1807,17 +1561,12 @@ export const playVOD = async (url, title, logo = '', startTime = 0, knownDuratio
             currentChannelInfo = { url, name: title, channelId: null, logo };
             updateMediaSession(title, logo);
             requestScreenWakeLock();
+            showBar(vodBar);
             setPrimaryPlayerButtons(false);
             refreshPlayerRecordState();
             if (UIElements.videoElement) {
-                UIElements.videoElement.controls = false;
                 UIElements.videoElement.playbackRate = parseFloat(localStorage.getItem('iptvPlaybackRate') || '1');
             }
-
-            // Hide native controls so our VOD overlay takes over without "LIVE" scrubber locking
-
-            // Setup and display VOD controls overlay
-            setupVodControlsOverlay(profile.name);
 
             probeVodDuration(url, title);
 
@@ -1989,11 +1738,13 @@ function updateSubtitleTrackList() {
     if (!textTracks || textTracks.length === 0) {
         console.log('[SUBTITLES] No subtitle tracks found, hiding button');
         btnEl?.classList.add('hidden');
+        document.getElementById('pb-cc')?.classList.add('hidden');
         return;
     }
 
     console.log('[SUBTITLES] Subtitle tracks found! Showing button and populating menu');
     btnEl?.classList.remove('hidden');
+    document.getElementById('pb-cc')?.classList.remove('hidden');
     if (!listEl) return;
 
     listEl.innerHTML = '';
@@ -2096,8 +1847,6 @@ export function cycleSleepTimer() {
 
 function setPrimaryPlayerButtons(isLive) {
     UIElements.videoModal?.classList.toggle('is-live', isLive);
-    const liveBtn = document.getElementById('player-live-edge-btn');
-    if (liveBtn) liveBtn.classList.toggle('hidden', !isLive);
     const speedBtn = document.getElementById('player-speed-btn');
     if (speedBtn) speedBtn.classList.toggle('hidden', isLive);
     const autoplayBtn = document.getElementById('player-autoplay-btn');
@@ -2164,10 +1913,10 @@ export function setupPlayerEventListeners() {
 
     const recordBtn = document.getElementById('record-current-btn');
     if (recordBtn) bindTap(recordBtn, toggleCurrentRecording);
-    const liveEdgeBtn = document.getElementById('player-live-edge-btn');
-    if (liveEdgeBtn) bindTap(liveEdgeBtn, jumpToLive);
     const speedBtn = document.getElementById('player-speed-btn');
     if (speedBtn) bindTap(speedBtn, () => { document.getElementById('player-more-options-menu')?.classList.add('hidden'); cyclePlaybackSpeed(); });
+    bindTap(document.getElementById('pb-speed'), cyclePlaybackSpeed);
+    bindTap(document.getElementById('pb-cc'), () => document.getElementById('subtitle-track-btn').click());
     const sleepBtn = document.getElementById('player-sleep-btn');
     if (sleepBtn) bindTap(sleepBtn, () => { document.getElementById('player-more-options-menu')?.classList.add('hidden'); cycleSleepTimer(); });
     const autoplayBtn = document.getElementById('player-autoplay-btn');
@@ -2178,8 +1927,8 @@ export function setupPlayerEventListeners() {
         setPrimaryPlayerButtons(false);
     });
 
-    // On phones the header drops Refresh, PiP and Jump to live; their menu rows press the same buttons.
-    [['menu-pip-btn', 'pip-btn'], ['menu-refresh-btn', 'refresh-stream-btn'], ['menu-live-btn', 'player-live-edge-btn']].forEach(([row, button]) => {
+    // On phones the header drops Refresh and PiP; their menu rows press the same buttons.
+    [['menu-pip-btn', 'pip-btn'], ['menu-refresh-btn', 'refresh-stream-btn']].forEach(([row, button]) => {
         bindTap(document.getElementById(row), () => {
             document.getElementById('player-more-options-menu')?.classList.add('hidden');
             document.getElementById(button)?.click();
@@ -2206,27 +1955,6 @@ export function setupPlayerEventListeners() {
         document.addEventListener('click', (e) => {
             if (!moreOptionsBtn.contains(e.target) && !moreOptionsMenu.contains(e.target)) {
                 moreOptionsMenu.classList.add('hidden');
-            }
-        });
-
-        // Seek transcoded VOD on ArrowLeft/Right (osd.js closes the menu on Back)
-        document.addEventListener('keydown', (e) => {
-            // Keyboard seeking for transcoded VOD streams via -ss
-            if (currentVodTranscodeSession && UIElements.videoModal && !UIElements.videoModal.classList.contains('hidden')) {
-                // Ignore if typing in an input (except if it's the vod-progress-bar)
-                if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName) && document.activeElement?.id !== 'vod-progress-bar') return;
-
-                if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
-                    e.preventDefault();
-                    const delta = (e.shiftKey ? 60 : 15) * (e.key === 'ArrowRight' ? 1 : -1);
-                    seekVodRelative(delta);
-                } else if (e.key === ' ' || e.code === 'Space') {
-                    e.preventDefault();
-                    if (UIElements.videoElement) {
-                        if (UIElements.videoElement.paused) UIElements.videoElement.play();
-                        else UIElements.videoElement.pause();
-                    }
-                }
             }
         });
     }

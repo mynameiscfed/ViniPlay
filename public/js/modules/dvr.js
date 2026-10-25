@@ -13,6 +13,7 @@ import { populateChannelSelector } from './multiview.js';
 import { ICONS } from './icons.js';
 import { escapeHtml } from './utils.js';
 import { stopAndCleanupPlayer, playRecordingOrDirectVideo, setActiveMediaTracking } from './player.js';
+import { showBar } from './bar.js';
 
 /**
  * Initializes the DVR page by fetching all required data from the backend.
@@ -159,26 +160,7 @@ async function loadStorageInfo() {
 }
 
 /**
- * Plays an in-progress recording using the main mpegts.js player.
- * @param {object} job - The DVR job object that is currently recording.
- */
-let timeshiftUpdateInterval = null;
-let isUserSeeking = false;
-
-function formatTimeshiftTime(seconds) {
-    if (isNaN(seconds) || seconds < 0) seconds = 0;
-    const totalSecs = Math.floor(seconds);
-    const hrs = Math.floor(totalSecs / 3600);
-    const mins = Math.floor((totalSecs % 3600) / 60);
-    const secs = totalSecs % 60;
-    if (hrs > 0) {
-        return `${hrs}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-    }
-    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-}
-
-/**
- * Plays an in-progress recording using Hls.js with custom timeshift seekbar controls.
+ * Plays an in-progress recording with Hls.js and the control bar.
  * @param {object} job - The DVR job object that is currently recording.
  */
 async function playTimeshiftStream(job, startTime = 0) {
@@ -221,41 +203,6 @@ async function playTimeshiftStream(job, startTime = 0) {
     videoTitle.textContent = `${job.programTitle} (Timeshift)`;
 
     appState.activeTimeshiftJobId = job.id;
-
-    // Hide native controls so our timeshift overlay takes over without interference
-    videoElement.controls = false;
-
-    const overlay = document.getElementById('timeshift-controls-overlay') || UIElements.timeshiftControlsOverlay;
-    if (overlay) {
-        overlay.classList.remove('hidden');
-    }
-
-    const progressBar = document.getElementById('timeshift-progress-bar') || UIElements.timeshiftProgressBar;
-    const currentTimeEl = document.getElementById('timeshift-current-time') || UIElements.timeshiftCurrentTime;
-    const totalTimeEl = document.getElementById('timeshift-total-time') || UIElements.timeshiftTotalTime;
-    const liveEdgeBtn = document.getElementById('timeshift-live-edge-btn') || UIElements.timeshiftLiveEdgeBtn;
-    const liveDot = document.getElementById('timeshift-live-dot') || UIElements.timeshiftLiveDot;
-    const playPauseBtn = document.getElementById('timeshift-play-pause-btn') || UIElements.timeshiftPlayPauseBtn;
-    const rewind15Btn = document.getElementById('timeshift-rewind-15-btn') || UIElements.timeshiftRewind15Btn;
-    const forward15Btn = document.getElementById('timeshift-forward-15-btn') || UIElements.timeshiftForward15Btn;
-
-    if (progressBar) {
-        progressBar.value = seekTarget;
-        progressBar.max = Math.max(100, seekTarget);
-    }
-    if (currentTimeEl) currentTimeEl.textContent = formatTimeshiftTime(seekTarget);
-    if (totalTimeEl) totalTimeEl.textContent = '00:00';
-
-    const getTotalDuration = (hlsInstance) => {
-        let dur = 0;
-        if (videoElement.seekable && videoElement.seekable.length > 0) {
-            dur = videoElement.seekable.end(videoElement.seekable.length - 1);
-        }
-        if ((!dur || isNaN(dur) || dur === Infinity) && hlsInstance?.levels && hlsInstance.levels[hlsInstance.currentLevel]) {
-            dur = hlsInstance.levels[hlsInstance.currentLevel].details?.totalduration || 0;
-        }
-        return (dur && !isNaN(dur) && dur !== Infinity) ? dur : (videoElement.currentTime || 0);
-    };
 
     if (window.Hls && Hls.isSupported()) {
         try {
@@ -310,83 +257,7 @@ async function playTimeshiftStream(job, startTime = 0) {
                 }
             });
 
-            // Start UI updater
-            if (timeshiftUpdateInterval) clearInterval(timeshiftUpdateInterval);
-            timeshiftUpdateInterval = setInterval(() => {
-                if (!appState.activeTimeshiftJobId) {
-                    clearInterval(timeshiftUpdateInterval);
-                    timeshiftUpdateInterval = null;
-                    return;
-                }
-                const total = getTotalDuration(hls);
-                const cur = videoElement.currentTime || 0;
-
-                if (totalTimeEl) totalTimeEl.textContent = formatTimeshiftTime(total);
-                if (currentTimeEl && !isUserSeeking) currentTimeEl.textContent = formatTimeshiftTime(cur);
-
-                if (progressBar && !isUserSeeking) {
-                    progressBar.max = Math.max(1, total);
-                    progressBar.value = cur;
-                }
-
-                // Check if user is at the live edge (within 8 seconds of latest segment)
-                const isNearLive = total > 5 && (total - cur) < 8;
-                if (liveDot && liveEdgeBtn) {
-                    if (isNearLive) {
-                        liveDot.className = 'w-2 h-2 rounded-full bg-white animate-pulse inline-block';
-                        liveEdgeBtn.className = 'ml-1 px-2.5 py-1 text-xs font-bold rounded-md bg-red-600 text-white transition-colors flex items-center gap-1.5 flex-shrink-0 cursor-pointer';
-                    } else {
-                        liveDot.className = 'w-2 h-2 rounded-full bg-gray-400 inline-block';
-                        liveEdgeBtn.className = 'ml-1 px-2.5 py-1 text-xs font-bold rounded-md bg-gray-700 text-gray-300 hover:bg-red-600 hover:text-white transition-colors flex items-center gap-1.5 flex-shrink-0 cursor-pointer';
-                    }
-                }
-
-                if (playPauseBtn) {
-                    playPauseBtn.innerHTML = videoElement.paused ? ICONS.play : ICONS.pause;
-                }
-            }, 250);
-
-            // Scrubber interaction
-            if (progressBar) {
-                progressBar.oninput = (e) => {
-                    isUserSeeking = true;
-                    if (currentTimeEl) currentTimeEl.textContent = formatTimeshiftTime(parseFloat(e.target.value));
-                };
-                progressBar.onchange = (e) => {
-                    isUserSeeking = false;
-                    const targetSec = parseFloat(e.target.value);
-                    videoElement.currentTime = targetSec;
-                };
-            }
-
-            if (rewind15Btn) {
-                rewind15Btn.onclick = () => {
-                    videoElement.currentTime = Math.max(0, (videoElement.currentTime || 0) - 15);
-                };
-            }
-
-            if (forward15Btn) {
-                forward15Btn.onclick = () => {
-                    const total = getTotalDuration(hls);
-                    videoElement.currentTime = Math.min(total, (videoElement.currentTime || 0) + 15);
-                };
-            }
-
-            if (liveEdgeBtn) {
-                liveEdgeBtn.onclick = () => {
-                    const total = getTotalDuration(hls);
-                    if (total > 2) {
-                        videoElement.currentTime = total - 2;
-                    }
-                };
-            }
-
-            if (playPauseBtn) {
-                playPauseBtn.onclick = () => {
-                    if (videoElement.paused) videoElement.play();
-                    else videoElement.pause();
-                };
-            }
+            showBar({ live: true, seekable: true });
 
         } catch (err) {
             console.error('[HLS_TIMESHIFT] Setup error:', err);
@@ -400,8 +271,6 @@ async function playTimeshiftStream(job, startTime = 0) {
             contentId: String(job.id),
             title: job.programTitle
         });
-        if (overlay) overlay.classList.add('hidden');
-        videoElement.controls = true;
         videoElement.src = streamUrl;
         openModal(playerModal);
         const applySeek = () => {

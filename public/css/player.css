@@ -92,11 +92,10 @@
     gap: .5em;
 }
 
-/* Header, card and the rewind and movie bars fade out together when nothing has moved (see osd.js). */
+/* Header, card and the control bar fade out together when nothing has moved (see osd.js). */
 #video-modal.osd-idle #video-modal-header,
 #video-modal.osd-idle #player-osd,
-#video-modal.osd-idle #timeshift-controls-overlay,
-#video-modal.osd-idle #vod-controls-overlay {
+#video-modal.osd-idle #player-bar {
     opacity: 0;
     pointer-events: none;
 }
@@ -144,11 +143,220 @@
     display: none;
 }
 
+/* ---------- The one control bar ---------- */
+#player-bar {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 30;
+    padding: 2.6em 1.25em .9em;
+    background: linear-gradient(transparent, rgba(0, 0, 0, .85) 60%);
+    color: #fff;
+    transition: opacity .25s;
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+#player-bar.hidden {
+    display: none;
+}
+
+.pb-scrub,
+.pb-row,
+.pb-grp {
+    display: flex;
+    align-items: center;
+}
+
+.pb-scrub {
+    gap: .8em;
+}
+
+.pb-row {
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: .4em .8em;
+    margin-top: .35em;
+}
+
+.pb-grp {
+    gap: .5em;
+}
+
+.pb-grp:last-child {
+    margin-left: auto;
+}
+
+.pb-t {
+    flex: none;
+    min-width: 3.4em;
+    color: rgba(255, 255, 255, .85);
+    font: 600 .88em var(--f-mono);
+    font-variant-numeric: tabular-nums;
+}
+
+#pb-total {
+    color: rgba(255, 255, 255, .55);
+    text-align: right;
+}
+
+/* What a stream cannot do leaves the bar (see bar.js): no scrubber on plain live, no Live pill on a movie. */
+#player-bar:not(.is-seekable) #pb-time,
+#player-bar:not(.is-seekable) #pb-seek,
+#player-bar:not(.is-seekable) #pb-total,
+#player-bar:not(.is-seekable) .pb-skip,
+#player-bar:not(.is-live) #pb-live {
+    display: none;
+}
+
+#player-bar:not(.is-seekable) .pb-scrub {
+    justify-content: flex-end;
+}
+
+#pb-live {
+    flex: none;
+    height: 2em;
+    padding: 0 .9em;
+    border: 0;
+    background: rgba(255, 255, 255, .2);
+    color: #fff;
+    font-size: .8em;
+    cursor: pointer;
+}
+
+#pb-live.pill-live {
+    background: var(--pk);
+    color: var(--on-pk);
+}
+
+.pb-skip {
+    font: 700 .85em var(--f-ui);
+}
+
+/* The round buttons are dark glass in the header; on the bar's dark gradient they need a lighter fill to show. */
+#player-bar .pbtn {
+    background: rgba(255, 255, 255, .14);
+}
+
+#player-bar .pbtn:hover {
+    background: rgba(255, 255, 255, .26);
+}
+
+#player-bar .pbtn.pb-main {
+    width: 3.2em;
+    height: 3.2em;
+    background: var(--cy);
+    color: var(--on);
+}
+
+#player-bar .pbtn.pb-main:hover {
+    background: var(--cy);
+    filter: brightness(1.12);
+}
+
+.pbtn:disabled {
+    opacity: .4;
+    cursor: default;
+}
+
+.pb-chip {
+    display: none;
+    flex: none;
+    align-items: center;
+    height: 2.2em;
+    padding: 0 .9em;
+    border: 1px solid rgba(255, 255, 255, .24);
+    border-radius: 999px;
+    background: rgba(0, 0, 0, .5);
+    color: #fff;
+    font: 700 .85em var(--f-ui);
+    cursor: pointer;
+    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
+}
+
+.pb-chip.on {
+    border-color: var(--cy);
+    background: var(--tint-cy);
+    color: var(--cy);
+}
+
+#player-bar.is-seekable:not(.is-live) #pb-speed {
+    display: inline-flex;
+}
+
+#player-bar input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 1.8em;
+    margin: 0;
+    padding: 0;
+    background: transparent;
+    cursor: pointer;
+}
+
+#player-bar input[type="range"]:disabled {
+    opacity: .4;
+    cursor: default;
+}
+
+#player-bar input[type="range"]::-webkit-slider-runnable-track {
+    height: .38em;
+    border-radius: 1em;
+    background: linear-gradient(to right, var(--cy) var(--p, 0%), rgba(255, 255, 255, .28) var(--p, 0%));
+}
+
+#player-bar input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 1.05em;
+    height: 1.05em;
+    margin-top: -.335em;
+    border: 0;
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 0 0 .2em rgba(0, 0, 0, .25);
+}
+
+#player-bar input[type="range"]::-moz-range-track {
+    height: .38em;
+    border-radius: 1em;
+    background: rgba(255, 255, 255, .28);
+}
+
+#player-bar input[type="range"]::-moz-range-progress {
+    height: .38em;
+    border-radius: 1em;
+    background: var(--cy);
+}
+
+#player-bar input[type="range"]::-moz-range-thumb {
+    width: 1.05em;
+    height: 1.05em;
+    border: 0;
+    border-radius: 50%;
+    background: #fff;
+}
+
+#pb-volume {
+    flex: none !important;
+    width: 6em;
+}
+
+/* The track menus open above the bar. */
+#video-modal #audio-track-menu,
+#video-modal #subtitle-track-menu {
+    bottom: 8em;
+    right: 1.25em;
+}
+
 /* ---------- Now/next card ---------- */
 #player-osd {
     position: absolute;
     left: 1.5em;
-    bottom: 5em;
+    bottom: 9em;
     z-index: 30;
     display: flex;
     align-items: center;
@@ -352,8 +560,19 @@ html.tv #player-osd {
     left: 3.5vw;
 }
 
-/* A TV has no picture-in-picture. */
-html.tv #pip-btn {
+html.tv #player-bar {
+    padding-right: 3.5vw;
+    padding-left: 3.5vw;
+}
+
+/* The scrubber keeps its own height; the page-wide TV rule would make every input a slab. */
+html.tv #player-bar input[type="range"] {
+    min-height: 0;
+}
+
+/* A TV has no picture-in-picture and is already full screen. */
+html.tv #pip-btn,
+html.tv #player-fullscreen-btn {
     display: none;
 }
 
@@ -362,7 +581,18 @@ html.tv #pip-btn {
     #player-osd {
         right: 1em;
         left: 1em;
-        bottom: 4.6em;
+        bottom: 9.4em;
+    }
+
+    #player-bar {
+        padding-right: .9em;
+        padding-left: .9em;
+    }
+
+    /* Phones have hardware volume keys. */
+    #pb-mute,
+    #pb-volume {
+        display: none;
     }
 
     #video-modal #video-modal-header {
@@ -373,10 +603,9 @@ html.tv #pip-btn {
         font-size: 1.05em !important;
     }
 
-    /* Eight header buttons pushed Close off a 360px screen; these three move into the menu. */
+    /* Eight header buttons pushed Close off a 360px screen; these two move into the menu. */
     #refresh-stream-btn,
-    #pip-btn,
-    #player-live-edge-btn {
+    #pip-btn {
         display: none;
     }
 

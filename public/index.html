@@ -42,7 +42,7 @@
     <link rel="stylesheet" href="/css/guide.css?v=5">
     <link rel="stylesheet" href="/css/home.css?v=6">
     <link rel="stylesheet" href="/css/legacy.css?v=7">
-    <link rel="stylesheet" href="/css/player.css?v=2">
+    <link rel="stylesheet" href="/css/player.css?v=3">
     <link rel="stylesheet" href="/css/tv.css?v=1">
 
     <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.8.2/dist/mpegts.js" integrity="sha384-sQp+4cJv0jChNCYvgy6W0RSfQZB/w6d3ZTDoIBlY4Uorfw4PLS56T2yM2z47bSkl" crossorigin="anonymous"></script>
@@ -1474,22 +1474,11 @@
                         <span data-icon="rec"></span>
                         <span data-rec-state>Record</span>
                     </button>
-                    <!-- Jump back to the live edge -->
-                    <button id="player-live-edge-btn" type="button" class="pbtn hidden"
-                        title="Jump to live">
-                        <span data-icon="bolt"></span>
-                    </button>
                     <!-- 2. Picture-in-Picture -->
                     <button id="pip-btn" type="button" class="pbtn"
                         title="Picture-in-Picture">
                         <span data-icon="pip"></span>
                     </button>
-                    <!-- 3. Container Fullscreen Button -->
-                    <button id="player-fullscreen-btn" type="button" class="pbtn"
-                        title="Toggle Fullscreen">
-                        <span data-icon="fullscreen"></span>
-                    </button>
-
                     <!-- 4. More Options Dropdown Trigger -->
                     <div class="relative flex-shrink-0">
                         <button id="player-more-options-btn" type="button" class="pbtn"
@@ -1502,17 +1491,6 @@
                             class="hidden absolute right-0 top-full mt-2 w-72 sm:w-80 max-w-[calc(100vw-32px)] max-h-[min(380px,80vh)] overflow-y-auto custom-scrollbar bg-gray-900/95 backdrop-blur-xl border border-gray-700/80 rounded-xl shadow-2xl p-1.5 z-50 transition-all duration-150 flex flex-col gap-0.5">
 
                             <!-- Phones only: header buttons that moved here (see player.css) -->
-                            <button id="menu-live-btn"
-                                class="pm-phone pm-live w-full flex items-center gap-3 px-3 py-2.5 text-left text-gray-300 hover:text-white hover:bg-gray-800/80 transition-colors rounded-lg group cursor-pointer"
-                                title="Jump to live">
-                                <span class="p-1.5 rounded-md bg-gray-800/80 group-hover:bg-gray-700 text-gray-400 group-hover:text-white transition-colors flex-shrink-0">
-                                    <span data-icon="bolt"></span>
-                                </span>
-                                <div class="flex flex-col flex-1 min-w-0">
-                                    <span class="text-sm font-medium leading-snug">Jump to Live</span>
-                                    <span class="text-xs text-gray-400 leading-tight">Skip ahead to what is on now</span>
-                                </div>
-                            </button>
                             <button id="menu-refresh-btn"
                                 class="pm-phone pm-live w-full flex items-center gap-3 px-3 py-2.5 text-left text-gray-300 hover:text-white hover:bg-gray-800/80 transition-colors rounded-lg group cursor-pointer"
                                 title="Refresh Stream">
@@ -1768,115 +1746,28 @@
                     <p id="stream-info-audio"></p>
                 </div>
 
-                <!-- NEW: Live DVR Timeshift Controls Overlay with Scrubber & Quick Seek -->
-                <div id="timeshift-controls-overlay"
-                    class="hidden absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/95 via-black/80 to-transparent px-4 py-3 z-30 transition-opacity duration-300 pointer-events-auto select-none">
-                    <div class="flex flex-col gap-1.5 w-full">
-                        <!-- Scrubber / Timeline Bar -->
-                        <div class="flex items-center gap-3 w-full">
-                            <span id="timeshift-current-time" class="text-xs font-mono font-medium text-white min-w-[48px]">00:00</span>
-                            <div class="relative flex-grow flex items-center py-1 group">
-                                <input type="range" id="timeshift-progress-bar" min="0" max="100" value="0" step="0.1"
-                                    class="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-500 hover:accent-blue-400 transition-all">
-                            </div>
-                            <span id="timeshift-total-time" class="text-xs font-mono font-medium text-gray-400 min-w-[48px] text-right">00:00</span>
-                            <button id="timeshift-live-edge-btn" type="button"
-                                class="ml-1 px-2.5 py-1 text-xs font-bold rounded-md bg-gray-700 text-gray-300 hover:bg-red-600 hover:text-white transition-colors flex items-center gap-1.5 flex-shrink-0 cursor-pointer"
-                                title="Jump to live edge">
-                                <span id="timeshift-live-dot" class="w-2 h-2 rounded-full bg-gray-400 inline-block"></span>
-                                <span>LIVE</span>
-                            </button>
-                        </div>
-                        <!-- Quick Seek & Play Controls -->
-                        <div class="flex items-center justify-between">
-                            <div class="flex items-center gap-2">
-                                <button id="timeshift-play-pause-btn" type="button"
-                                    class="text-white hover:text-blue-400 p-1.5 rounded-md hover:bg-white/10 transition-colors cursor-pointer"
-                                    title="Play / Pause">
-                                    <span data-icon="play" class="w-5 h-5"></span>
-                                </button>
-                                <button id="timeshift-rewind-15-btn" type="button"
-                                    class="text-gray-300 hover:text-white px-2.5 py-1 text-xs font-medium rounded-md hover:bg-white/10 border border-gray-600 transition-colors flex items-center gap-1 cursor-pointer"
-                                    title="Rewind 15 seconds">
-                                    -15s
-                                </button>
-                                <button id="timeshift-forward-15-btn" type="button"
-                                    class="text-gray-300 hover:text-white px-2.5 py-1 text-xs font-medium rounded-md hover:bg-white/10 border border-gray-600 transition-colors flex items-center gap-1 cursor-pointer"
-                                    title="Forward 15 seconds">
-                                    +15s
-                                </button>
-                                <span id="timeshift-status-text" class="text-xs text-blue-400 font-medium ml-2">Timeshift Playing</span>
-                            </div>
-                            <div class="text-xs text-gray-400 flex items-center gap-1.5">
-                                <span class="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
-                                <span>Live DVR Chase Play</span>
-                            </div>
-                        </div>
+                <!-- The one control bar. Every mode (live, rewind, movie, episode, recording) uses it; bar.js draws what the stream can do. -->
+                <div id="player-bar" class="hidden" role="group" aria-label="Playback controls">
+                    <div class="pb-scrub">
+                        <span id="pb-time" class="pb-t">0:00</span>
+                        <input type="range" id="pb-seek" min="0" max="100" step="1" value="0" aria-label="Seek">
+                        <span id="pb-total" class="pb-t">--:--</span>
+                        <button id="pb-live" type="button" class="pill pill-live" title="Jump to live (L)"><span class="dot"></span>Live</button>
                     </div>
-                </div>
-
-                <!-- NEW: Transcoded VOD Controls Overlay with Scrubber & Quick Seek -->
-                <div id="vod-controls-overlay"
-                    class="hidden absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/95 via-black/80 to-transparent px-4 py-3 z-30 transition-opacity duration-300 pointer-events-auto select-none">
-                    <div class="flex flex-col gap-1.5 w-full">
-                        <!-- Scrubber / Timeline Bar -->
-                        <div class="flex items-center gap-3 w-full">
-                            <span id="vod-current-time" class="text-xs font-mono font-medium text-white min-w-[52px]">00:00</span>
-                            <div class="relative flex-grow flex items-center py-1 group">
-                                <input type="range" id="vod-progress-bar" min="0" max="100" value="0" step="1"
-                                    class="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-500 hover:accent-blue-400 transition-all">
-                            </div>
-                            <span id="vod-total-time" class="text-xs font-mono font-medium text-gray-400 min-w-[52px] text-right">--:--</span>
+                    <div class="pb-row">
+                        <div class="pb-grp">
+                            <button id="pb-prev" type="button" class="pbtn hidden" title="Previous channel (Page Up)"><span data-icon="prev"></span></button>
+                            <button id="pb-back" type="button" class="pbtn pb-skip" title="Back 15 seconds (Left)">&minus;15</button>
+                            <button id="pb-play" type="button" class="pbtn pb-main" title="Play / Pause (Space)"></button>
+                            <button id="pb-fwd" type="button" class="pbtn pb-skip" title="Forward 15 seconds (Right)">+15</button>
+                            <button id="pb-next" type="button" class="pbtn hidden" title="Next channel (Page Down)"><span data-icon="next"></span></button>
+                            <button id="pb-speed" type="button" class="pb-chip hidden" title="Playback speed"></button>
                         </div>
-                        <!-- Quick Seek & Play Controls -->
-                        <div class="flex items-center justify-between">
-                            <div class="flex items-center gap-1.5 sm:gap-2">
-                                <button id="vod-play-pause-btn" type="button"
-                                    class="text-white hover:text-blue-400 p-1.5 rounded-md hover:bg-white/10 transition-colors cursor-pointer"
-                                    title="Play / Pause">
-                                    <span data-icon="play" class="w-5 h-5"></span>
-                                </button>
-                                <button id="vod-rewind-60-btn" type="button"
-                                    class="hidden sm:flex text-gray-300 hover:text-white px-2 py-1 text-xs font-medium rounded-md hover:bg-white/10 border border-gray-600 transition-colors items-center gap-1 cursor-pointer"
-                                    title="Rewind 60 seconds">
-                                    -60s
-                                </button>
-                                <button id="vod-rewind-15-btn" type="button"
-                                    class="text-gray-300 hover:text-white px-2 py-1 text-xs font-medium rounded-md hover:bg-white/10 border border-gray-600 transition-colors flex items-center gap-1 cursor-pointer"
-                                    title="Rewind 15 seconds">
-                                    -15s
-                                </button>
-                                <button id="vod-forward-15-btn" type="button"
-                                    class="text-gray-300 hover:text-white px-2 py-1 text-xs font-medium rounded-md hover:bg-white/10 border border-gray-600 transition-colors flex items-center gap-1 cursor-pointer"
-                                    title="Forward 15 seconds">
-                                    +15s
-                                </button>
-                                <button id="vod-forward-60-btn" type="button"
-                                    class="hidden sm:flex text-gray-300 hover:text-white px-2 py-1 text-xs font-medium rounded-md hover:bg-white/10 border border-gray-600 transition-colors items-center gap-1 cursor-pointer"
-                                    title="Forward 60 seconds">
-                                    +60s
-                                </button>
-                                <!-- Volume Control -->
-                                <div class="hidden sm:flex items-center gap-1 ml-1 text-gray-300 hover:text-white">
-                                    <button id="vod-volume-btn" type="button" class="p-1 rounded hover:bg-white/10 transition-colors cursor-pointer" title="Mute / Unmute">
-                                        <span data-icon="audio" class="w-4 h-4"></span>
-                                    </button>
-                                    <input type="range" id="vod-volume-bar" min="0" max="1" step="0.05" value="1"
-                                        class="w-14 sm:w-16 h-1.5 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-500 hover:accent-blue-400 transition-all">
-                                </div>
-                                <span id="vod-status-text" class="text-xs text-blue-400 font-medium ml-2 hidden md:inline">Transcoded VOD</span>
-                            </div>
-                            <div class="flex items-center gap-2">
-                                <div class="text-xs text-gray-400 flex items-center gap-1.5">
-                                    <span class="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse"></span>
-                                    <span id="vod-profile-badge" class="truncate max-w-[120px] sm:max-w-[200px]">Transcoding</span>
-                                </div>
-                                <button id="vod-fullscreen-btn" type="button"
-                                    class="text-gray-300 hover:text-white p-1 rounded hover:bg-white/10 transition-colors cursor-pointer"
-                                    title="Fullscreen">
-                                    <span data-icon="fullscreen" class="w-4 h-4"></span>
-                                </button>
-                            </div>
+                        <div class="pb-grp">
+                            <button id="pb-mute" type="button" class="pbtn" title="Mute (M)"></button>
+                            <input type="range" id="pb-volume" min="0" max="1" step="0.05" value="1" aria-label="Volume">
+                            <button id="pb-cc" type="button" class="pbtn hidden" title="Subtitles (C)"><span data-icon="subtitles"></span></button>
+                            <button id="player-fullscreen-btn" type="button" class="pbtn" title="Fullscreen (F)"><span data-icon="fullscreen"></span></button>
                         </div>
                     </div>
                 </div>
