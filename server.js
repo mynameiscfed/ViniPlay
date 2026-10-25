@@ -31,7 +31,8 @@ const zlib = require('zlib');
 const { pipeline } = require('stream');
 const { pipeline: pipelineAsync } = require('stream/promises');
 const { forEachProgramme, forEachChannel } = require('./epgStream');
-const { buildTargets, createSuggester, bestMatch } = require('./epgMatch');
+const { buildTargets, createSuggester, bestMatch, CONFIDENT } = require('./epgMatch');
+const { pickWithLlm } = require('./epgLlm');
 const webpush = require('web-push');
 const schedule = require('node-schedule');
 const disk = require('diskusage');
@@ -3337,20 +3338,44 @@ app.get('/api/epg/channels', requireAuth, requireAdmin, (req, res) => {
 
 // Best guess per channel. Saves nothing: the admin reviews and accepts through PUT /api/epg/overrides.
 // Capped per call (a search is a few ms): the client sends big lists in batches so the server stays responsive.
+// With `llm`, channels the name search is not sure about are put to a small model on OpenRouter, choosing among
+// the search's own top candidates. Only those channel and guide names leave the server.
 const MAX_SUGGEST_BATCH = 300;
-app.post('/api/epg/suggest', requireAuth, requireAdmin, (req, res) => {
-    const { channelIds } = req.body || {};
+const AI_CONFIDENCE = 0.8; // a model's pick has no score: shown, but never part of "accept all confident"
+app.post('/api/epg/suggest', requireAuth, requireAdmin, async (req, res) => {
+    const { channelIds, llm } = req.body || {};
     if (!Array.isArray(channelIds) || channelIds.length > MAX_SUGGEST_BATCH) {
         return res.status(400).json({ error: `channelIds must be a list of at most ${MAX_SUGGEST_BATCH}.` });
     }
-    const wanted = new Set(channelIds);
-    const suggestions = [];
-    for (const { id, displayName } of readChannels() || []) {
-        if (!wanted.has(id)) continue;
-        const best = bestMatch(suggestEpg, displayName);
-        if (best) suggestions.push({ channelId: id, epgId: best.id, names: best.names, sample: best.sample, confidence: best.confidence, via: 'name' });
+    const apiKey = process.env.OPENROUTER_API_KEY;
+    const model = process.env.EPG_LLM_MODEL;
+    if (llm && !(apiKey && model)) {
+        return res.status(400).json({ error: 'AI matching is not set up: set OPENROUTER_API_KEY and EPG_LLM_MODEL on the server.' });
     }
-    res.json({ suggestions });
+    const wanted = new Set(channelIds);
+    const suggestions = new Map(); // channel id -> suggestion
+    const ask = []; // for the model
+    for (const { id, displayName, group } of (readChannels() || []).filter(c => wanted.has(c.id))) {
+        const best = bestMatch(suggestEpg, displayName);
+        if (best) {
+            suggestions.set(id, { channelId: id, epgId: best.id, names: best.names, sample: best.sample, confidence: best.confidence, confident: best.confidence >= CONFIDENT, via: 'name' });
+        }
+        const candidates = suggestEpg(displayName, 10);
+        if (llm && candidates.length && !suggestions.get(id)?.confident) ask.push({ id, name: displayName, group, candidates });
+    }
+    try {
+        const picks = ask.length ? await pickWithLlm(ask, { apiKey, model }) : [];
+        ask.forEach(({ id, candidates }, i) => {
+            if (picks[i] === undefined) return; // no usable answer: keep the name-based suggestion
+            const pick = candidates.find(c => c.id === picks[i]);
+            if (!pick) suggestions.delete(id); // the model judged that none of them is the same channel
+            else suggestions.set(id, { channelId: id, epgId: pick.id, names: pick.names, sample: pick.sample, confidence: AI_CONFIDENCE, confident: false, via: 'ai' });
+        });
+    } catch (error) {
+        console.error('[API] AI matching failed:', error.message);
+        return res.status(502).json({ error: `AI matching failed: ${error.message}` });
+    }
+    res.json({ suggestions: [...suggestions.values()] });
 });
 
 // {set: {channelId: xmltvId}, clear: [channelId]}. Re-merges the guides (not the playlists) so it shows at once.

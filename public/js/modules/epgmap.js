@@ -6,18 +6,18 @@
 
 import { appState, guideState } from './state.js';
 import { apiFetch, fetchConfig } from './api.js';
-import { openModal, closeModal, showNotification } from './ui.js';
+import { openModal, closeModal, showNotification, showConfirm } from './ui.js';
 import { escapeHtml } from './utils.js';
 import { ICONS } from './icons.js';
 
 const $ = (id) => document.getElementById(id);
 const PAGE_SIZE = 200; // rows drawn at once; thousands of rows would freeze the page
 const BATCH = 300; // channels per suggest request, the server's limit
-const CONFIDENT = 0.9; // suggestions at or above this can be accepted in one click
+const AI_BATCH = 50; // each AI request waits on the model, so keep it well inside proxy timeouts
 
 let filter = 'none'; // 'none' (no guide data) | 'manual' | 'all'
 let shown = PAGE_SIZE;
-let suggestions = new Map(); // channel id -> {epgId, names, sample, confidence, via}
+let suggestions = new Map(); // channel id -> {epgId, names, sample, confidence, confident, via}
 let assigning = null; // the channel open in the assign modal
 let searchSeq = 0; // drops the answer of a search that was overtaken by a newer one
 
@@ -41,7 +41,7 @@ const guideCell = (ch) => {
 };
 
 const suggestionCell = (s) => s
-    ? `<div>${escapeHtml(s.names[0] || s.epgId)} <span class="text-xs text-gray-500">${Math.round(s.confidence * 100)}%</span></div>` +
+    ? `<div>${escapeHtml(s.names[0] || s.epgId)} <span class="text-xs text-gray-500">${s.via === 'ai' ? 'AI' : `${Math.round(s.confidence * 100)}%`}</span></div>` +
       `<div class="text-xs text-gray-500">${escapeHtml(s.epgId)}${s.sample ? ` · e.g. ${escapeHtml(s.sample)}` : ''}</div>`
     : '';
 
@@ -69,7 +69,7 @@ export function renderEpgMap() {
     $('epg-map-more-btn').classList.toggle('hidden', rows.length <= shown);
     $('epg-map-summary').textContent = `${without} of ${guideState.channels.length} channels have no guide data.`;
     document.querySelectorAll('[data-epg-filter]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.epgFilter === filter)));
-    const confident = [...suggestions.values()].filter((s) => s.confidence >= CONFIDENT).length;
+    const confident = [...suggestions.values()].filter((s) => s.confident).length;
     $('epg-map-accept-btn').classList.toggle('hidden', !confident);
     $('epg-map-accept-btn').textContent = `Accept ${confident} confident match${confident === 1 ? '' : 'es'}`;
 }
@@ -96,24 +96,30 @@ async function whileBusy(work) {
     try { await work(); } finally { controls.forEach((c) => { c.disabled = false; }); }
 }
 
-async function suggest() {
+async function fetchSuggestions(ids, useAi) {
+    const size = useAi ? AI_BATCH : BATCH;
+    const summary = $('epg-map-summary');
+    suggestions = new Map();
+    for (let i = 0; i < ids.length; i += size) {
+        summary.textContent = `Matching channels... ${Math.min(i + size, ids.length)} of ${ids.length}`;
+        const res = await apiFetch('/api/epg/suggest', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ channelIds: ids.slice(i, i + size), llm: useAi }),
+        });
+        if (!res) break;
+        (await res.json()).suggestions.forEach((s) => suggestions.set(s.channelId, s));
+    }
+    shown = PAGE_SIZE;
+    renderEpgMap();
+    showNotification(`${suggestions.size} suggestion${suggestions.size === 1 ? '' : 's'} for ${ids.length} channels without guide data.`);
+}
+
+function suggest() {
     const ids = guideState.channels.filter((ch) => status(ch) === 'none').map((ch) => ch.id);
     if (!ids.length) return showNotification('Every channel already has guide data.');
-    const summary = $('epg-map-summary');
-    await whileBusy(async () => {
-        suggestions = new Map();
-        for (let i = 0; i < ids.length; i += BATCH) {
-            summary.textContent = `Matching channels... ${Math.min(i + BATCH, ids.length)} of ${ids.length}`;
-            const res = await apiFetch('/api/epg/suggest', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ channelIds: ids.slice(i, i + BATCH) }),
-            });
-            if (!res) break;
-            (await res.json()).suggestions.forEach((s) => suggestions.set(s.channelId, s));
-        }
-        shown = PAGE_SIZE;
-        renderEpgMap();
-        showNotification(`${suggestions.size} suggestion${suggestions.size === 1 ? '' : 's'} for ${ids.length} channels without guide data.`);
-    });
+    const useAi = $('epg-map-ai').checked;
+    const run = () => whileBusy(() => fetchSuggestions(ids, useAi));
+    if (!useAi) return run();
+    showConfirm('Ask AI?', `The names of up to ${ids.length} channels without guide data, with the closest guide channel names, will be sent to OpenRouter.`, run);
 }
 
 // --- Assign modal ---
@@ -154,7 +160,7 @@ export function setupEpgMap() {
     $('epg-map-auto-btn').addEventListener('click', suggest);
     $('epg-map-accept-btn').addEventListener('click', () => whileBusy(async () => {
         const set = {};
-        suggestions.forEach((s, id) => { if (s.confidence >= CONFIDENT) set[id] = s.epgId; });
+        suggestions.forEach((s, id) => { if (s.confident) set[id] = s.epgId; });
         await apply(set);
     }));
 

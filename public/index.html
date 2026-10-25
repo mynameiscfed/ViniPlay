@@ -884,6 +884,9 @@
                             <button type="button" class="chip" data-epg-filter="all" aria-pressed="false">All channels</button>
                             <input type="search" id="epg-map-search" placeholder="Filter channels..."
                                 class="flex-grow bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm text-white focus:ring-blue-500 focus:border-blue-500">
+                            <label class="flex items-center gap-2 text-sm text-gray-300"
+                                title="Sends channel names to OpenRouter; needs OPENROUTER_API_KEY and EPG_LLM_MODEL on the server">
+                                <input type="checkbox" id="epg-map-ai"> Also ask AI</label>
                             <button type="button" id="epg-map-auto-btn"
                                 class="bg-blue-600 hover:bg-blue-700 disabled:bg-blue-800 text-white text-sm font-bold py-2 px-3 rounded-md">Suggest
                                 matches</button>

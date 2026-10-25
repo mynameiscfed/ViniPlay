@@ -4,6 +4,7 @@
 // become suggestions (createSuggester): a wrong guess on screen is cheap, a wrong silent assignment is not.
 
 const MIN_CONFIDENCE = 0.3; // below this a suggestion is noise
+const CONFIDENT = 0.9; // at or above this a suggestion may be accepted in bulk
 
 // Playlist providers decorate names; none of these tell two channels apart.
 const NOISE = new Set(['hd', 'fhd', 'uhd', 'sd', '4k', 'hevc', 'h264', 'h265', 'raw', '50fps', '60fps', 'backup']);
@@ -96,4 +97,4 @@ function bestMatch(suggest, name) {
     return second && best.confidence - second.confidence < 0.05 ? { ...best, confidence: best.confidence - 0.2 } : best;
 }
 
-module.exports = { normalizeName, nameKey, buildTargets, createSuggester, bestMatch };
+module.exports = { normalizeName, nameKey, buildTargets, createSuggester, bestMatch, CONFIDENT };

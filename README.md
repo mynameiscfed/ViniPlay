@@ -49,6 +49,7 @@ The server-side backend resolves common CORS and browser compatibility issues by
  - 🔔 **Push Notifications**: Set reminders for upcoming programs and receive push notifications in your browser, even when the app is closed.
  - ⚙️ **Powerful Transcoding - even with GPUs**: The backend uses FFMPEG to process streams, ensuring compatibility across all modern browsers and devices. Create custom stream profiles to tailor transcoding settings. GPU transcoding supported. (Nvidia, InterlQSV and Vaapi)
  - 📂 **Flexible Source Management**: Add M3U and EPG sources from either local files, XC code and remote URLs. Set automatic refresh intervals for URL-based sources to keep your guide data fresh.
+ - 🧭 **EPG matching and manual fixes**: Channels get guide data by `tvg-id`, then by normalised name ("US: ESPN2 HD" finds "ESPN 2"). In **Settings → Channel EPG**, admins can see channels with no guide data, pick a guide channel by hand, review suggested matches, and optionally ask an AI about the hard ones.
  - 🚀 **High Performance UI**: The frontend is built with performance in mind, using UI virtualization for the guide and efficient state management to ensure a fast and responsive experience.
  - 🐳 **Dockerized Deployment**: The entire application is packaged in a single Docker container for simple, one-command deployment using Docker or Docker Compose.
  - ▶️ **Picture-in-Picture**: Pop out the player to keep watching while you work on other things.
@@ -172,6 +173,7 @@ All configuration is done via the web interface in the **Settings** tab.
 
 -   **Data Sources:** Add your M3U and EPG sources from remote URLs, XC Codes, uploaded files.
 -   **Processing:** A new source is downloaded and merged as soon as you add it. Use the refresh button on a source's row to refresh just that source, or **Process Sources & View Guide** to download, parse, and merge all of them.
+-   **Channel EPG (Admin):** Lists channels with no guide data. **Suggest matches** proposes guide channels by name; accept or dismiss each, or accept all confident ones at once. The pencil picks a guide channel by hand, and your choice always wins over automatic matching. Run **Process Sources** once after upgrading so the list of guide channels exists. Tick **Also ask AI** to put the doubtful channels to a small model on [OpenRouter](https://openrouter.ai): set `OPENROUTER_API_KEY` and `EPG_LLM_MODEL` (an OpenRouter model slug) in `.env`. Only channel and guide-channel names are sent, and the model can only choose among matches ViniPlay already found.
 -   **Player Settings:** Manage User-Agent strings and define `ffmpeg` stream profiles.
 -   **User Management (Admin):** Admins can create, edit, and delete user accounts.
 
@@ -190,6 +192,7 @@ The project is organized into a Node.js backend and a modular vanilla JavaScript
 │   │       ├── auth.js              # Authentication flow
 │   │       ├── cast.js              # Google Cast logic
 │   │       ├── dvr.js               # DVR logic
+│   │       ├── epgmap.js            # Settings > Channel EPG: manual and suggested EPG matches
 │   │       ├── focus.js             # Keyboard and remote-control navigation
 │   │       ├── guide.js             # TV Guide logic & rendering
 │   │       ├── home.js              # Home page
