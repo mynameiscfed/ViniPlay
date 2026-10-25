@@ -3663,7 +3663,7 @@ app.put('/api/epg/ai', requireAuth, requireAdmin, (req, res) => {
 // OpenRouter's own model list, with prices, for the model picker.
 app.get('/api/epg/ai/models', requireAuth, requireAdmin, async (req, res) => {
     try {
-        res.json(searchModels(await listModels(), req.query.q));
+        res.json(searchModels(await listModels(), req.query.q, req.query.all ? Infinity : 50));
     } catch (error) {
         res.status(502).json({ error: `Could not load OpenRouter's model list: ${error.message}` });
     }
