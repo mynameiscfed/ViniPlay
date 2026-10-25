@@ -90,11 +90,22 @@ function buildTargets({ channels, overrides = {}, epgChannels }) {
     const epgById = new Map(epgChannels.map((c) => [c.id, c]));
     const epgIds = new Set(epgById.keys());
     const idsByName = new Map();
+    // First-token index of the same normalized names. The prefix search below only scans the bucket for the
+    // query's first token; scanning every guide channel per playlist channel was O(n*m) normalizeName calls
+    // and pinned the CPU on big guides.
+    const byFirst = new Map(); // first token -> {channelId, tokens}[]
     const index = (key, id) => { if (key) idsByName.set(key, (idsByName.get(key) || new Set()).add(id)); };
     for (const { id, names } of epgChannels) {
-        for (const n of names) index(nameKey(n), id);
         // The id slug is often cleaner than the display-name ("arryadia.ma" vs "AR-SP| MA ARRYADIA TNT").
-        index(nameKey(id.replace(/\.[a-z]{2,3}$/i, '')), id);
+        for (const n of new Set([...names, id.replace(/\.[a-z]{2,3}$/i, '')])) {
+            const key = nameKey(n);
+            index(key, id);
+            const tokens = normalizeName(n).split(' ').filter(Boolean);
+            if (!tokens.length) continue;
+            const bucket = byFirst.get(tokens[0]);
+            if (bucket) bucket.push({ channelId: id, tokens });
+            else byFirst.set(tokens[0], [{ channelId: id, tokens }]);
+        }
     }
     const targets = new Map();
     const add = (xmltvId, channelId) => targets.set(xmltvId, [...(targets.get(xmltvId) || []), channelId]);
@@ -107,12 +118,10 @@ function buildTargets({ channels, overrides = {}, epgChannels }) {
         const base = normalizeName(name).split(' ').filter(Boolean);
         if (!base.length) return null;
         const cand = new Set();
-        for (const c of epgChannels) {
-            for (const n of [...c.names, c.id.replace(/\.[a-z]{2,3}$/i, '')]) {
-                const t = normalizeName(n).split(' ').filter(Boolean);
-                if (t.length > base.length && base.every((w, j) => t[j] === w) && t.slice(base.length).every((w) => REGIONS.has(w) || NOISE.has(w) || w.startsWith('+'))) {
-                    cand.add(c.id); break;
-                }
+        for (const { channelId, tokens } of (byFirst.get(base[0]) || [])) {
+            if (tokens.length > base.length && base.every((w, j) => tokens[j] === w)
+                && tokens.slice(base.length).every((w) => REGIONS.has(w) || NOISE.has(w) || w.startsWith('+'))) {
+                cand.add(channelId);
             }
         }
         if (cand.size === 1) return [...cand][0];
