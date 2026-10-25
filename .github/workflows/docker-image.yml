@@ -116,6 +116,16 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Report image size
+        run: |
+          {
+            echo "### Image size (linux/amd64)"
+            echo '```'
+            docker image ls "$SMOKE_IMAGE" --format 'unpacked: {{.Size}}'
+            docker save "$SMOKE_IMAGE" | gzip -1 | wc -c | awk '{ printf "compressed (approx. registry size): %.0f MB\n", $1/1e6 }'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Container smoke test
         run: bash test/container-smoke.sh "$SMOKE_IMAGE"
 
