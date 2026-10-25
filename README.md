@@ -196,3 +196,7 @@ ViniPlay is licensed under **CC BY-NC-SA 4.0**:
 - **SA**: Share alike if you remix.
 
 For full license details, see [LICENSE](https://creativecommons.org/licenses/by-nc-sa/4.0/).
+
+### Reverse proxies and `TRUST_PROXY`
+
+ViniPlay ignores `X-Forwarded-For` unless you set `TRUST_PROXY` (same values as Express's `trust proxy`, e.g. `1` for one proxy hop). Without it, requests carrying a forwarded header are never treated as local-network for unauthenticated `/stream` access. Set it if you run behind Nginx, Traefik, or Cloudflare and want the real client IP in logs and local-network detection.

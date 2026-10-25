@@ -695,7 +695,7 @@ export const updateUIFromSettings = async () => {
         const browserOffset = Math.round(-(new Date().getTimezoneOffset() / 60));
         settings.timezoneOffset = browserOffset;
         console.log(`[SETTINGS] First-run timezone detection. Setting to browser offset: ${browserOffset} and saving.`);
-        saveGlobalSetting({ timezoneOffset: browserOffset });
+        if (appState.currentUser?.isAdmin) saveGlobalSetting({ timezoneOffset: browserOffset }); // global setting: admin-only on the server
         localStorage.setItem('vini_timezone_auto_set', 'true');
     } else {
         settings.timezoneOffset = settings.timezoneOffset ?? Math.round(-(new Date().getTimezoneOffset() / 60));
