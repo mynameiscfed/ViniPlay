@@ -1777,7 +1777,7 @@ function fetchUrlContent(url, options = {}, asStream = false) { // asStream reso
     }
     return new Promise((resolve, reject) => {
         const protocol = url.startsWith('https') ? https : http;
-        const TIMEOUT_DURATION = 60000;
+        const TIMEOUT_DURATION = 180000;
         console.log(`[FETCH] Attempting to fetch URL content from ${safeUrlForLog(url)} (Timeout: ${TIMEOUT_DURATION / 1000}s)`);
 
         const request = protocol.get(url, { timeout: TIMEOUT_DURATION, ...options }, (res) => { // <-- MODIFIED
