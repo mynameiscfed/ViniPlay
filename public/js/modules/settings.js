@@ -688,14 +688,77 @@ const renderSourceTable = (sourceType) => {
  * MODIFIED: Removed redundant admin checks as this page is now admin-only.
  */
 /** Chips at the top of Settings that jump to each visible section. */
+// Settings is split into pages. Each card joins the page that lists its heading; anything unlisted goes to System.
+const SETTINGS_PAGES = [
+    ['overview', 'Overview', []],
+    ['sources', 'Sources', ['Guide Data Sources']],
+    ['channels', 'Channels & guide', ['Channel EPG', 'AI Matching']],
+    ['playback', 'Players & profiles', ['Player Settings', 'Chromecast Settings']],
+    ['recording', 'Recording', ['DVR Settings', 'Storage Management']],
+    ['users', 'Users', ['User Management']],
+    ['system', 'System', []],
+];
+const headingText = (h) => h.textContent.replace(/\s+/g, ' ').trim();
+const pageOfHeading = (text) => (SETTINGS_PAGES.find(([, , heads]) => heads.includes(text)) || SETTINGS_PAGES[6])[0];
+const settingsCards = () => [...document.querySelectorAll('#page-settings h2')].map((h) => ({ h, card: h.closest('.rounded-xl'), page: pageOfHeading(headingText(h)) })).filter((c) => c.card);
+let settingsPage = (() => { try { return localStorage.getItem('viniplay.settingsPage') || 'overview'; } catch { return 'overview'; } })();
+
+/** Every settings card as a search target for the palette. */
+export const settingsSearchIndex = () => settingsCards().map(({ h, page }) => ({ title: headingText(h), page, pageLabel: SETTINGS_PAGES.find((p) => p[0] === page)[1] }));
+
+export const showSettingsPage = (page, headingTitle) => {
+    settingsPage = SETTINGS_PAGES.some((p) => p[0] === page) ? page : 'overview';
+    try { localStorage.setItem('viniplay.settingsPage', settingsPage); } catch { /* private mode: page is not remembered */ }
+    settingsCards().forEach(({ card, page: p }) => { card.dataset.settingsPage = p; card.hidden = p !== settingsPage; });
+    document.getElementById('settings-overview').hidden = settingsPage !== 'overview';
+    document.querySelectorAll('#settings-nav [data-page]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.page === settingsPage)));
+    if (settingsPage === 'overview') renderSettingsOverview();
+    const target = headingTitle && settingsCards().find((c) => headingText(c.h) === headingTitle);
+    const scroller = document.getElementById('page-settings');
+    scroller.scrollTop = target ? scroller.scrollTop + target.card.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 16 : 0;
+};
+
+function renderSettingsOverview() {
+    const box = document.getElementById('settings-overview');
+    const sources = [...(guideState.settings.m3uSources || []), ...(guideState.settings.epgSources || [])];
+    const failing = sources.filter((src) => /failed|not found/i.test(src.statusMessage || ''));
+    const overrides = guideState.settings.epgOverrides || {};
+    const channels = guideState.channels || [];
+    const noGuide = channels.filter((ch) => !overrides[ch.id] && !guideState.programs?.[ch.id]?.length).length;
+    const attention = [
+        noGuide && [`${noGuide.toLocaleString()} channel${noGuide === 1 ? ' has' : 's have'} no guide data`, 'The guide shows them as empty rows.', 'channels', 'Review channels'],
+        ...failing.map((src) => [`${src.name} failed to refresh`, src.statusMessage, 'sources', 'Fix source']),
+    ].filter(Boolean);
+    const status = {
+        sources: `${sources.length} source${sources.length === 1 ? '' : 's'}${failing.length ? `, ${failing.length} failing` : ''}`,
+        channels: `${(channels.length - noGuide).toLocaleString()} of ${channels.length.toLocaleString()} channels have guide data`,
+        playback: 'Stream, user agent and Chromecast profiles',
+        recording: 'Recording profile, padding and storage',
+        users: 'Accounts, roles and source access',
+        system: 'Timezone, logs, backup and reset',
+    };
+    box.innerHTML = `<h2 class="sr-only">Overview</h2>${attention.map(([title, detail, page, label]) => `
+        <div class="flex flex-wrap items-center gap-3 rounded-xl p-4 mb-3" style="background:var(--tint-am);border:1px solid rgb(var(--c-am) / .4)">
+            <div class="flex-grow min-w-0"><div class="font-bold text-white">${escapeHtml(title)}</div><div class="text-sm text-gray-400">${escapeHtml(detail)}</div></div>
+            <button type="button" class="chip" data-page="${page}">${label}</button>
+        </div>`).join('')}
+        <div class="grid gap-3" style="grid-template-columns:repeat(auto-fill,minmax(15rem,1fr))">${SETTINGS_PAGES.slice(1).map(([key, label]) => `
+            <button type="button" class="text-left bg-gray-800 hover:bg-gray-700 rounded-xl p-4" data-page="${key}">
+                <div class="font-bold text-white">${label}</div><div class="text-sm text-gray-400 mt-1">${escapeHtml(status[key])}</div>
+            </button>`).join('')}</div>`;
+}
+
 export const renderSettingsNav = () => {
     const nav = document.getElementById('settings-nav');
-    const heads = [...document.querySelectorAll('#page-settings h2')].filter(h => h.offsetParent);
-    nav.innerHTML = heads.map((h, i) => `<button type="button" class="chip" data-i="${i}">${escapeHtml(h.textContent.trim())}</button>`).join('');
-    nav.onclick = (e) => {
-        const chip = e.target.closest('[data-i]');
-        if (chip) heads[chip.dataset.i].scrollIntoView({ block: 'start', behavior: 'smooth' });
+    if (!document.getElementById('settings-overview')) nav.insertAdjacentHTML('afterend', '<section id="settings-overview" aria-label="Overview"></section>');
+    nav.innerHTML = SETTINGS_PAGES.map(([key, label]) => `<button type="button" class="chip" data-page="${key}">${label}</button>`).join('');
+    const go = (e) => {
+        const b = e.target.closest('[data-page]');
+        if (b) showSettingsPage(b.dataset.page);
     };
+    nav.onclick = go;
+    document.getElementById('settings-overview').onclick = go;
+    showSettingsPage(settingsPage);
 };
 
 export const updateUIFromSettings = async () => {

@@ -4,11 +4,12 @@
  * shows as you type. Enter takes the first result, which filters the guide when channels match.
  */
 
-import { guideState } from './state.js';
+import { appState, guideState } from './state.js';
 import { playChannel } from './player.js';
 import { navigate } from './ui.js';
 import { findMatches, applyGuideSearch, openProgramDetails, progData } from './guide.js';
 import { formatTimeWithOffset, escapeHtml } from './utils.js';
+import { settingsSearchIndex, showSettingsPage } from './settings.js';
 
 const MAX_CHANNELS = 6;
 const MAX_PROGRAMS = 8;
@@ -59,6 +60,14 @@ const renderResults = () => {
             return `<button type="button" class="pr" data-program="${i}"><span class="t">${escapeHtml(prog.title)}<br><small>${escapeHtml(channel.displayName || channel.name)}</small></span>${live ? '<span class="pill pill-live">Live</span>' : `<small>${dayLabel(start)}${formatTimeWithOffset(start, offset)}</small>`}</button>`;
         }).join('');
     }
+    const words = term.toLowerCase().split(/\s+/);
+    const settings = appState.currentUser?.isAdmin
+        ? settingsSearchIndex().filter((x) => words.every((w) => `${x.title} ${x.pageLabel}`.toLowerCase().includes(w)))
+        : [];
+    if (settings.length) {
+        html += `<div class="eyebrow">Settings · ${settings.length}</div>`;
+        html += settings.map((x) => `<button type="button" class="pr" data-settings-page="${x.page}" data-settings-title="${escapeHtml(x.title)}"><span class="t">${escapeHtml(x.title)}</span><small>${escapeHtml(x.pageLabel)}</small></button>`).join('');
+    }
     results.innerHTML = html || '<div class="palette-empty">Nothing matches that.</div>';
 };
 
@@ -106,7 +115,10 @@ export function setupPalette() {
             return;
         }
         closePalette();
-        if (row.dataset.channel) {
+        if (row.dataset.settingsPage) {
+            navigate('/settings');
+            showSettingsPage(row.dataset.settingsPage, row.dataset.settingsTitle);
+        } else if (row.dataset.channel) {
             const channel = guideState.channels.find(c => c.id === row.dataset.channel);
             playChannel(channel.url, channel.displayName || channel.name, channel.id);
         } else {
