@@ -650,42 +650,44 @@
             /* hover:bg-gray-700 */
         }
 
+        /* One row per group with a checkbox drawn in CSS, so the existing
+           click-toggles-.selected handlers keep working. */
         .group-filter-item {
-            background-color: rgb(var(--g-700));
-            /* bg-gray-700 */
-            padding: 0.75rem;
-            /* p-3 */
-            border-radius: 0.375rem;
-            /* rounded-md */
-            border: 1px solid rgb(var(--g-600));
-            /* border-gray-600 */
-            cursor: pointer;
-            transition: all 0.2s;
-            align-self: start;
-            /* Aligns item to the top of its grid cell */
-            min-height: 4.5rem;
-            /* Ensures a minimum height for all items */
             display: flex;
-            /* Added display flex for vertical centering if needed, though align-self:start might be enough */
             align-items: center;
-            /* Vertically center content within the min-height */
-            justify-content: center;
-            /* Horizontally center content */
-            text-align: center;
-            /* Center text for wrapping */
+            gap: 0.75rem;
+            padding: 0.5rem 0.75rem;
+            border-radius: 0.375rem;
+            border: 1px solid transparent;
+            border-bottom-color: rgb(var(--g-700));
+            cursor: pointer;
+            user-select: none;
+            transition: background-color 0.15s;
+        }
+
+        .group-filter-item::before {
+            content: '';
+            flex: none;
+            width: 1.125rem;
+            height: 1.125rem;
+            border-radius: 0.25rem;
+            border: 2px solid rgb(var(--g-600));
+            box-sizing: border-box;
         }
 
         .group-filter-item.selected {
-            background-color: var(--cy);
-            /* bg-blue-600 */
+            background-color: color-mix(in srgb, var(--cy) 18%, transparent);
             border-color: var(--cy);
-            /* border-blue-500 */
-            color: var(--tx);
+            font-weight: 600;
+        }
+
+        .group-filter-item.selected::before {
+            background: var(--cy) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3.5 8.5l3 3 6-7'/%3E%3C/svg%3E") center / 100% no-repeat;
+            border-color: var(--cy);
         }
 
         .group-filter-item:not(.selected):hover {
-            background-color: rgb(var(--g-600));
-            /* hover:bg-gray-600 */
+            background-color: rgb(var(--g-700));
         }
 
         /* --- NEW: VOD Details Modal Styles --- */
