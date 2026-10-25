@@ -7,7 +7,7 @@ require('dotenv').config();
 const express = require('express');
 const crypto = require('crypto');
 const { spawn, exec, execFile } = require('child_process');
-const { safeGet, assertSafeUrl, SsrfBlockedError } = require('./ssrfGuard');
+const { safeGet, assertSafeUrl, assertSafeStreamUrl, SsrfBlockedError } = require('./ssrfGuard');
 const http = require('http');
 const https = require('https');
 const fs = require('fs');
@@ -20,6 +20,7 @@ const sqlite3 = require('sqlite3').verbose();
 const SQLiteStore = require('connect-sqlite3')(session);
 const { configureConnection, INDEX_DDL, ORPHAN_CLEANUP_SQL } = require('./dbConfig');
 const { throttleSessionTouch } = require('./sessionTouch');
+const { createLoginLimiter } = require('./loginRateLimit');
 const { createUserCache } = require('./userCache');
 const { createVodStore } = require('./vodStore');
 const { createLibraryCache } = require('./vodLibraryCache');
@@ -49,6 +50,17 @@ const activeRedirectStreams = new Map(); // Tracks live redirect streams for the
 const app = express();
 const port = 8998;
 
+// Headers that cost nothing and close a few browser-side holes. The CSP deliberately
+// only covers framing/base/plugins: the app still ships inline handlers and CDN scripts,
+// so a resource CSP would need a larger frontend change.
+app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Content-Security-Policy', "frame-ancestors 'none'; base-uri 'self'; object-src 'none'");
+    next();
+});
+
 // Only trust X-Forwarded-For when the operator explicitly says a reverse proxy sits in front.
 // TRUST_PROXY accepts anything Express's 'trust proxy' does (e.g. "1", "loopback", "10.0.0.5").
 // Unset = forwarded headers are ignored and req.ip is the real socket address.
@@ -57,6 +69,29 @@ if (TRUST_PROXY) {
     app.set('trust proxy', /^\d+$/.test(TRUST_PROXY) ? parseInt(TRUST_PROXY, 10) : TRUST_PROXY);
 }
 const saltRounds = 10;
+const MIN_PASSWORD_LENGTH = 12;
+const passwordProblem = (password) => (
+    typeof password !== 'string' || password.length < MIN_PASSWORD_LENGTH
+        ? `Password must be at least ${MIN_PASSWORD_LENGTH} characters.`
+        : null
+);
+// Compared against when the username does not exist, so a missing user takes as long as a
+// wrong password. Without it, response time tells an attacker which usernames are real.
+const DUMMY_PASSWORD_HASH = bcrypt.hashSync(crypto.randomBytes(16).toString('hex'), saltRounds);
+const loginLimiter = createLoginLimiter();
+
+// A URL can carry provider credentials in its path or query. Log only the origin.
+const safeUrlForLog = (value) => {
+    try {
+        return new URL(value).origin;
+    } catch (e) {
+        return '[invalid url]';
+    }
+};
+
+// Stable, non-reversible stream identity. Also used inside activeStreamProcesses keys, so
+// the provider URL (and its credentials) never lands in a log line or the admin activity feed.
+const streamUrlKey = (url) => crypto.createHash('sha256').update(String(url)).digest('hex').slice(0, 32);
 // Initialize global variables at the top-level scope
 let notificationCheckInterval = null;
 const sourceRefreshTimers = new Map();
@@ -126,6 +161,11 @@ const SOURCES_DIR = path.join(DATA_DIR, 'sources');
 const RAW_CACHE_DIR = path.join(SOURCES_DIR, 'raw_cache');
 const IMAGE_CACHE_DIR = path.join(DATA_DIR, 'image_cache'); // NEW: VOD poster image cache
 const IMAGE_PROXY_MAX_BYTES = 10 * 1024 * 1024; // Largest poster/logo the image proxy will fetch
+// SVG is deliberately absent: it can carry script and would run on our origin.
+const IMAGE_PROXY_TYPES = new Set([
+    'image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/avif', 'image/bmp', 'image/x-icon', 'image/vnd.microsoft.icon',
+]);
+const IMAGE_CACHE_MAX_FILES = 2000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const DB_PATH = path.join(DATA_DIR, 'viniplay.db');
 const LIVE_CHANNELS_M3U_PATH = path.join(DATA_DIR, 'live_channels.m3u'); // Renamed
@@ -160,26 +200,9 @@ const suggestEpg = (name, k) => {
 
 console.log(`[INIT] Application starting. Data directory: ${DATA_DIR}, Public directory: ${PUBLIC_DIR}`);
 
-// --- Automatic VAPID Key Generation ---
-let vapidKeys = {};
-try {
-    if (fs.existsSync(VAPID_KEYS_PATH)) {
-        console.log('[Push] Loading existing VAPID keys...');
-        vapidKeys = JSON.parse(fs.readFileSync(VAPID_KEYS_PATH, 'utf-8'));
-    } else {
-        console.log('[Push] VAPID keys not found. Generating new keys...');
-        vapidKeys = webpush.generateVAPIDKeys();
-        fs.writeFileSync(VAPID_KEYS_PATH, JSON.stringify(vapidKeys, null, 2));
-        console.log('[Push] New VAPID keys generated and saved.');
-    }
-    const vapidContactEmail = process.env.VAPID_CONTACT_EMAIL || 'mailto:admin@example.com';
-    console.log(`[Push] Setting VAPID contact to: ${vapidContactEmail}`);
-    webpush.setVapidDetails(vapidContactEmail, vapidKeys.publicKey, vapidKeys.privateKey);
-} catch (error) {
-    console.error('[Push] FATAL: Could not load or generate VAPID keys.', error);
-}
-
-// Ensure the data and dvr directories exist.
+// Ensure the data and dvr directories exist before anything writes to them (VAPID keys,
+// the session secret, the database). Docker creates /data as a volume; a bare `npm start`
+// does not.
 try {
     if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
     if (!fs.existsSync(PUBLIC_DIR)) fs.mkdirSync(PUBLIC_DIR, { recursive: true });
@@ -194,6 +217,25 @@ try {
     process.exit(1);
 }
 
+// --- Automatic VAPID Key Generation ---
+let vapidKeys = {};
+try {
+    if (fs.existsSync(VAPID_KEYS_PATH)) {
+        console.log('[Push] Loading existing VAPID keys...');
+        vapidKeys = JSON.parse(fs.readFileSync(VAPID_KEYS_PATH, 'utf-8'));
+        try { fs.chmodSync(VAPID_KEYS_PATH, 0o600); } catch (e) { /* best effort */ }
+    } else {
+        console.log('[Push] VAPID keys not found. Generating new keys...');
+        vapidKeys = webpush.generateVAPIDKeys();
+        fs.writeFileSync(VAPID_KEYS_PATH, JSON.stringify(vapidKeys, null, 2), { mode: 0o600 });
+        console.log('[Push] New VAPID keys generated and saved.');
+    }
+    const vapidContactEmail = process.env.VAPID_CONTACT_EMAIL || 'mailto:admin@example.com';
+    console.log(`[Push] Setting VAPID contact to: ${vapidContactEmail}`);
+    webpush.setVapidDetails(vapidContactEmail, vapidKeys.publicKey, vapidKeys.privateKey);
+} catch (error) {
+    console.error('[Push] FATAL: Could not load or generate VAPID keys.', error);
+}
 
 // --- Database Setup ---
 // Resolves to the journal mode in effect once the main connection is configured. The
@@ -217,7 +259,10 @@ const db = new sqlite3.Database(DB_PATH, (err) => {
                 } else {
                     db.run("ALTER TABLE users ADD COLUMN canUseDvr INTEGER DEFAULT 0", () => { });
                     db.run("ALTER TABLE users ADD COLUMN allowed_sources TEXT", () => { });
-                    db.run("UPDATE users SET allowed_sources = NULL WHERE allowed_sources = '{}' OR isAdmin = 1 OR id = 1", () => { });
+                    // Admins bypass source filtering entirely, so their stored whitelist is
+                    // irrelevant. Do NOT clear '{}': an empty whitelist now means "no sources",
+                    // and turning it into NULL on boot would grant full access by accident.
+                    db.run("UPDATE users SET allowed_sources = NULL WHERE isAdmin = 1", () => { });
                 }
             });
             db.run(`CREATE TABLE IF NOT EXISTS user_settings (user_id INTEGER NOT NULL, key TEXT NOT NULL, value TEXT, FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE, PRIMARY KEY (user_id, key))`);
@@ -539,6 +584,28 @@ app.use(express.static(PUBLIC_DIR, {
         }
     }
 }));
+
+// CSRF: SameSite=Lax (below) is the main defence. This also rejects a state-changing
+// request whose Origin names another site. Requests without an Origin (curl, native
+// clients) are left alone, as they do not carry a browser session automatically.
+app.use((req, res, next) => {
+    if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
+    const origin = req.get('origin');
+    if (!origin) return next();
+    let originHost;
+    try {
+        originHost = new URL(origin).host;
+    } catch (e) {
+        return res.status(403).json({ error: 'Invalid Origin header.' });
+    }
+    const forwardedHost = TRUST_PROXY ? String(req.get('x-forwarded-host') || '').split(',')[0].trim() : '';
+    const expectedHost = forwardedHost || req.get('host');
+    if (originHost !== expectedHost) {
+        return res.status(403).json({ error: 'Cross-origin request blocked.' });
+    }
+    next();
+});
+
 app.use(bodyParser.json({ limit: '2mb' })); // the default 100kb is too small for accepting thousands of EPG matches at once
 app.use(bodyParser.urlencoded({ extended: true }));
 
@@ -602,28 +669,57 @@ function saveSettings(settings) {
 }
 
 // --- Session Management ---
-let sessionSecret = process.env.SESSION_SECRET;
+// The secret never lives in settings.json: that file is sent to every user by /api/config
+// and included in settings backups. A weak or missing SESSION_SECRET is replaced with a
+// random secret persisted under /data, so a default install does not run on a public value.
+const SESSION_SECRET_PATH = path.join(DATA_DIR, 'session-secret');
+const isWeakSecret = (value) => (
+    typeof value !== 'string'
+    || value.trim().length < 32
+    || /replace_this|your_super_secret|changeme/i.test(value)
+);
 
-if (!sessionSecret) {
-    console.log('[SECURITY] SESSION_SECRET not found in environment. Checking settings.json...');
-    let settings = getSettings();
-    if (settings.generatedSessionSecret) {
-        console.log('[SECURITY] Found existing session secret in settings.json.');
-        sessionSecret = settings.generatedSessionSecret;
-    } else {
-        console.log('[SECURITY] No secret in settings.json. Generating a new one...');
-        sessionSecret = crypto.randomBytes(64).toString('hex');
-        settings.generatedSessionSecret = sessionSecret;
-        saveSettings(settings);
-        console.log('[SECURITY] New session secret generated and saved to settings.json.');
+function resolveSessionSecret() {
+    const fromEnv = process.env.SESSION_SECRET;
+    let legacy = '';
+    try {
+        const settings = getSettings();
+        if (settings.generatedSessionSecret) {
+            legacy = settings.generatedSessionSecret;
+            delete settings.generatedSessionSecret;
+            writeSettings(settings);
+            console.log('[SECURITY] Removed the legacy session secret from settings.json.');
+        }
+    } catch (e) {
+        console.error('[SECURITY] Could not migrate the legacy session secret:', e.message);
     }
-} else {
-    console.log('[SECURITY] Loaded SESSION_SECRET from environment variable.');
+    if (fromEnv && !isWeakSecret(fromEnv)) {
+        console.log('[SECURITY] Loaded SESSION_SECRET from environment variable.');
+        return fromEnv;
+    }
+    if (fromEnv) {
+        console.warn('[SECURITY] Ignoring weak or default SESSION_SECRET from the environment.');
+    }
+    try {
+        let secret = legacy;
+        if (isWeakSecret(secret) && fs.existsSync(SESSION_SECRET_PATH)) {
+            secret = fs.readFileSync(SESSION_SECRET_PATH, 'utf-8').trim();
+        }
+        if (!isWeakSecret(secret)) {
+            try { fs.chmodSync(SESSION_SECRET_PATH, 0o600); } catch (e) { /* best effort */ }
+            return secret;
+        }
+        secret = crypto.randomBytes(64).toString('hex');
+        writeFileAtomic(SESSION_SECRET_PATH, secret, 0o600);
+        console.log(`[SECURITY] Generated a session secret and saved it to ${SESSION_SECRET_PATH}.`);
+        return secret;
+    } catch (e) {
+        console.error('[SECURITY] Could not read or write the session secret file, using an in-memory secret:', e.message);
+        return crypto.randomBytes(64).toString('hex');
+    }
 }
 
-if (sessionSecret.includes('replace_this')) {
-    console.warn('[SECURITY] Using a weak or default SESSION_SECRET. Please replace it.');
-}
+const sessionSecret = resolveSessionSecret();
 
 // connect-sqlite3 opens its own connection to viniplay.db. Give it the same busy timeout
 // (and synchronous=NORMAL once WAL is confirmed) so session writes do not fail with
@@ -638,7 +734,12 @@ app.use(
         secret: sessionSecret,
         resave: false,
         saveUninitialized: false,
-        cookie: { maxAge: 30 * 24 * 60 * 60 * 1000, httpOnly: true, secure: process.env.NODE_ENV === 'production' },
+        cookie: {
+            maxAge: 30 * 24 * 60 * 60 * 1000,
+            httpOnly: true,
+            sameSite: 'lax',
+            secure: 'auto',
+        },
     })
 );
 
@@ -650,7 +751,8 @@ app.use((req, res, next) => {
         return next();
     }
     const user_info = req.session.userId ? `User ID: ${req.session.userId}, Admin: ${req.session.isAdmin}, DVR: ${req.session.canUseDvr}` : 'No session';
-    console.log(`[HTTP_TRACE] ${req.method} ${req.originalUrl} - IP: ${req.clientIp} - Session: [${user_info}]`);
+    // Path only: query strings on /stream carry provider usernames and passwords.
+    console.log(`[HTTP_TRACE] ${req.method} ${req.path} - IP: ${req.clientIp} - Session: [${user_info}]`);
     next();
 });
 
@@ -698,11 +800,23 @@ const requireDvrAccess = (req, res, next) => {
     return res.status(403).json({ error: 'DVR access required.' });
 };
 
-// *** FIX: DVR Playback Access ***
-// Removed `requireDvrAccess` from this route. Now, any authenticated user can access
-// the /dvr directory to play back recorded files. The API endpoints for creating
-// and managing recordings remain protected by `requireDvrAccess`.
-app.use('/dvr', requireAuth, express.static(DVR_DIR));
+// Recordings are private: only the owner (or an admin) may fetch the file. The lookup also
+// replaces express.static here so a filename cannot point outside the recordings directory.
+app.get('/dvr/:file', requireAuth, (req, res) => {
+    if (req.params.file !== path.basename(req.params.file)) {
+        return res.status(400).send('Invalid file name.');
+    }
+    const filePath = path.join(DVR_DIR, req.params.file);
+    const query = req.session.isAdmin
+        ? "SELECT filePath FROM dvr_recordings WHERE filePath = ?"
+        : "SELECT filePath FROM dvr_recordings WHERE filePath = ? AND user_id = ?";
+    const params = req.session.isAdmin ? [filePath] : [filePath, req.session.userId];
+    db.get(query, params, (err, recording) => {
+        if (err) return res.status(500).send('Could not look up the recording.');
+        if (!recording) return res.status(404).send('Recording not found.');
+        res.sendFile(recording.filePath);
+    });
+});
 
 // --- Helper Functions ---
 /**
@@ -1456,19 +1570,30 @@ async function triggerVodRefreshForProvider(provider, sendStatus = () => { }) {
 // ... existing helper functions (fetchUrlContent, parseEpgTime, processAndMergeSources) remain the same ...
 
 function fetchUrlContent(url, options = {}, asStream = false) { // asStream resolves with the response stream, unread
+    try {
+        assertSafeStreamUrl(url);
+    } catch (err) {
+        return Promise.reject(err);
+    }
     return new Promise((resolve, reject) => {
         const protocol = url.startsWith('https') ? https : http;
         const TIMEOUT_DURATION = 60000;
-        console.log(`[FETCH] Attempting to fetch URL content: ${url} (Timeout: ${TIMEOUT_DURATION / 1000}s)`);
+        console.log(`[FETCH] Attempting to fetch URL content from ${safeUrlForLog(url)} (Timeout: ${TIMEOUT_DURATION / 1000}s)`);
 
         const request = protocol.get(url, { timeout: TIMEOUT_DURATION, ...options }, (res) => { // <-- MODIFIED
             if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-                console.log(`[FETCH] Redirecting to: ${res.headers.location}`);
+                let nextUrl;
+                try {
+                    nextUrl = new URL(res.headers.location, url).href;
+                } catch (e) {
+                    return reject(new Error('Invalid redirect location.'));
+                }
+                console.log(`[FETCH] Redirecting to: ${safeUrlForLog(nextUrl)}`);
                 request.abort();
-                return fetchUrlContent(new URL(res.headers.location, url).href, options, asStream).then(resolve, reject);
+                return fetchUrlContent(nextUrl, options, asStream).then(resolve, reject);
             }
             if (res.statusCode !== 200) {
-                console.error(`[FETCH] Failed to fetch ${url}: Status Code ${res.statusCode}`);
+                console.error(`[FETCH] Failed to fetch ${safeUrlForLog(url)}: Status Code ${res.statusCode}`);
                 return reject(new Error(`Failed to fetch: Status Code ${res.statusCode}`));
             }
 
@@ -1478,20 +1603,20 @@ function fetchUrlContent(url, options = {}, asStream = false) { // asStream reso
             res.setEncoding('utf8');
             res.on('data', (chunk) => { data += chunk; });
             res.on('end', () => {
-                console.log(`[FETCH] Successfully fetched content from: ${url}`);
+                console.log(`[FETCH] Successfully fetched content from: ${safeUrlForLog(url)}`);
                 resolve(data);
             });
         });
 
         request.on('timeout', () => {
             request.destroy();
-            const timeoutError = new Error(`Request to ${url} timed out after ${TIMEOUT_DURATION / 1000} seconds.`);
+            const timeoutError = new Error(`Request to ${safeUrlForLog(url)} timed out after ${TIMEOUT_DURATION / 1000} seconds.`);
             console.error(`[FETCH] ${timeoutError.message}`);
             reject(timeoutError);
         });
 
         request.on('error', (err) => {
-            console.error(`[FETCH] Network error fetching ${url}: ${err.message}`);
+            console.error(`[FETCH] Network error fetching ${safeUrlForLog(url)}: ${err.message}`);
             reject(err);
         });
     });
@@ -1760,12 +1885,12 @@ async function processAndMergeSources(req, onlyIds) {
                 try {
                     sendProcessingStatus(req, ` -> Fetching live categories from XC server...`, 'info');
                     const liveCategoriesUrl = `${server}/player_api.php?username=${username}&password=${password}&action=get_live_categories`;
-                    console.log(`[M3U] Constructed XC Categories URL for "${source.name}": ${liveCategoriesUrl}`);
+                    console.log(`[M3U] Fetching live categories from XC source "${source.name}".`);
                     const liveCategoriesResponse = await fetchUrlContent(liveCategoriesUrl, m3uFetchOptions);
                     const liveCategories = JSON.parse(liveCategoriesResponse);
 
                     sendProcessingStatus(req, ` -> Fetching live streams from XC server...`, 'info');
-                    console.log(`[M3U] Constructed XC Streams URL for "${source.name}": ${liveCategoriesUrl}`);
+                    console.log(`[M3U] Fetching live streams from XC source "${source.name}".`);
                     const liveStreamsResponse = await fetchUrlContent(liveStreamsUrl, m3uFetchOptions);
                     const liveStreams = JSON.parse(liveStreamsResponse);
 
@@ -1942,69 +2067,117 @@ async function processAndMergeSources(req, onlyIds) {
 // ... existing helper functions ...
 
 // --- Authentication API Endpoints ---
+// Regenerates the session ID on login, so an ID an attacker knew before login cannot
+// become the authenticated session (session fixation).
+function startUserSession(req, user, callback) {
+    req.session.regenerate((err) => {
+        if (err) return callback(err);
+        req.session.userId = user.id;
+        req.session.username = user.username;
+        req.session.isAdmin = user.isAdmin === 1 || user.isAdmin === true;
+        req.session.canUseDvr = user.canUseDvr === 1 || user.canUseDvr === true;
+        callback(null);
+    });
+}
+
+// Drops every stored session for a user after a password change or account deletion.
+// connect-sqlite3 keeps the data as JSON, so filter in JS rather than guessing its schema.
+function destroyUserSessions(userId, exceptSid) {
+    sessionStore.db.all("SELECT sid, sess FROM sessions", (err, rows) => {
+        if (err || !rows) return;
+        rows.forEach((row) => {
+            if (exceptSid && row.sid === exceptSid) return;
+            try {
+                if (String(JSON.parse(row.sess).userId) === String(userId)) {
+                    sessionStore.destroy(row.sid, () => { });
+                }
+            } catch (e) { /* ignore a malformed session row */ }
+        });
+    });
+}
+
 app.get('/api/auth/needs-setup', (req, res) => {
     console.log('[AUTH_API] Received request for /api/auth/needs-setup');
-    db.get("SELECT COUNT(*) as count FROM users WHERE isAdmin = 1", [], (err, row) => {
+    db.get("SELECT COUNT(*) as count FROM users", [], (err, row) => {
         if (err) {
-            console.error('[AUTH_API] Error checking admin user count:', err.message);
-            return res.status(500).json({ error: err.message });
+            console.error('[AUTH_API] Error checking user count:', err.message);
+            return res.status(500).json({ error: 'Could not check the setup state.' });
         }
         const needsSetup = row.count === 0;
-        console.log(`[AUTH_API] Admin user count: ${row.count}. Needs setup: ${needsSetup}`);
+        console.log(`[AUTH_API] User count: ${row.count}. Needs setup: ${needsSetup}`);
         res.json({ needsSetup });
     });
 });
 
 app.post('/api/auth/setup-admin', (req, res) => {
     console.log('[AUTH_API] Received request for /api/auth/setup-admin');
-    db.get("SELECT COUNT(*) as count FROM users", [], (err, row) => {
+    const { username, password } = req.body || {};
+    if (typeof username !== 'string' || !username.trim()) {
+        return res.status(400).json({ error: 'A username is required.' });
+    }
+    const problem = passwordProblem(password);
+    if (problem) {
+        console.warn('[AUTH_API] Admin setup failed:', problem);
+        return res.status(400).json({ error: problem });
+    }
+
+    bcrypt.hash(password, saltRounds, (err, hash) => {
         if (err) {
-            console.error('[AUTH_API] Error checking user count during admin setup:', err.message);
-            return res.status(500).json({ error: err.message });
+            console.error('[AUTH_API] Error hashing password during admin setup:', err);
+            return res.status(500).json({ error: 'Error hashing password.' });
         }
-        if (row.count > 0) {
-            console.warn('[AUTH_API] Setup attempted but users already exist. Denying setup.');
-            return res.status(403).json({ error: "Setup has already been completed." });
-        }
-
-        const { username, password } = req.body;
-        if (!username || !password) {
-            console.warn('[AUTH_API] Admin setup failed: Username and/or password missing.');
-            return res.status(400).json({ error: "Username and password are required." });
-        }
-
-        bcrypt.hash(password, saltRounds, (err, hash) => {
-            if (err) {
-                console.error('[AUTH_API] Error hashing password during admin setup:', err);
-                return res.status(500).json({ error: 'Error hashing password.' });
-            }
-            db.run("INSERT INTO users (username, password, isAdmin, canUseDvr) VALUES (?, ?, 1, 1)", [username, hash], function (err) {
+        // One statement: concurrent first-run requests cannot both see an empty table.
+        db.run(
+            `INSERT INTO users (username, password, isAdmin, canUseDvr)
+             SELECT ?, ?, 1, 1 WHERE NOT EXISTS (SELECT 1 FROM users)`,
+            [username.trim(), hash],
+            function (err) {
                 if (err) {
                     console.error('[AUTH_API] Error inserting admin user:', err.message);
-                    return res.status(500).json({ error: err.message });
+                    return res.status(500).json({ error: 'Could not create the admin account.' });
                 }
-                req.session.userId = this.lastID;
-                req.session.username = username;
-                req.session.isAdmin = true;
-                req.session.canUseDvr = true;
-                console.log(`[AUTH_API] Admin user "${username}" created successfully (ID: ${this.lastID}). Session set.`);
-                res.json({ success: true, user: { id: this.lastID, username: req.session.username, isAdmin: req.session.isAdmin, canUseDvr: req.session.canUseDvr } });
-            });
-        });
+                if (this.changes === 0) {
+                    console.warn('[AUTH_API] Setup attempted but users already exist. Denying setup.');
+                    return res.status(403).json({ error: 'Setup has already been completed.' });
+                }
+                const userId = this.lastID;
+                console.log(`[AUTH_API] Admin user "${username}" created successfully (ID: ${userId}).`);
+                startUserSession(req, { id: userId, username: username.trim(), isAdmin: 1, canUseDvr: 1 }, (sessionErr) => {
+                    if (sessionErr) {
+                        console.error('[AUTH_API] Error starting the admin session:', sessionErr);
+                        return res.status(500).json({ error: 'Admin created, but the session could not be started. Please log in.' });
+                    }
+                    res.json({ success: true, user: { id: userId, username: username.trim(), isAdmin: true, canUseDvr: true } });
+                });
+            }
+        );
     });
 });
 
 app.post('/api/auth/login', (req, res) => {
     console.log('[AUTH_API] Received request for /api/auth/login');
-    const { username, password } = req.body;
+    const { username, password } = req.body || {};
+    if (typeof username !== 'string' || typeof password !== 'string') {
+        return res.status(400).json({ error: 'Username and password are required.' });
+    }
+    const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
+    const retryAfter = loginLimiter.check(clientIp, username);
+    if (retryAfter > 0) {
+        res.setHeader('Retry-After', String(retryAfter));
+        console.warn(`[AUTH_API] Login rate limit hit for ${clientIp}.`);
+        return res.status(429).json({ error: 'Too many login attempts. Try again later.' });
+    }
+
     db.get("SELECT * FROM users WHERE username = ?", [username], (err, user) => {
         if (err) {
             console.error('[AUTH_API] Error querying user during login:', err.message);
-            return res.status(500).json({ error: err.message });
+            return res.status(500).json({ error: 'Authentication error.' });
         }
         if (!user) {
-            console.warn(`[AUTH_API] Login failed for username "${username}": User not found.`);
-            return res.status(401).json({ error: "Invalid username or password." });
+            loginLimiter.fail(clientIp, username);
+            console.warn('[AUTH_API] Login failed: user not found.');
+            // Same bcrypt cost as a real check, so timing does not reveal valid usernames.
+            return bcrypt.compare(password, DUMMY_PASSWORD_HASH, () => res.status(401).json({ error: "Invalid username or password." }));
         }
 
         bcrypt.compare(password, user.password, (err, result) => {
@@ -2012,20 +2185,23 @@ app.post('/api/auth/login', (req, res) => {
                 console.error('[AUTH_API] Error comparing password hash:', err);
                 return res.status(500).json({ error: 'Authentication error.' });
             }
-            if (result) {
-                req.session.userId = user.id;
-                req.session.username = user.username;
-                req.session.isAdmin = user.isAdmin === 1;
-                req.session.canUseDvr = user.canUseDvr === 1;
-                console.log(`[AUTH_API] User "${username}" (ID: ${user.id}) logged in successfully. Session set.`);
+            if (!result) {
+                loginLimiter.fail(clientIp, username);
+                console.warn('[AUTH_API] Login failed: incorrect password.');
+                return res.status(401).json({ error: "Invalid username or password." });
+            }
+            loginLimiter.success(clientIp, username);
+            startUserSession(req, user, (sessionErr) => {
+                if (sessionErr) {
+                    console.error('[AUTH_API] Error starting the user session:', sessionErr);
+                    return res.status(500).json({ error: 'Authentication error.' });
+                }
+                console.log(`[AUTH_API] User "${user.username}" (ID: ${user.id}) logged in successfully.`);
                 res.json({
                     success: true,
                     user: { id: user.id, username: user.username, isAdmin: user.isAdmin === 1, canUseDvr: user.canUseDvr === 1 }
                 });
-            } else {
-                console.warn(`[AUTH_API] Login failed for username "${username}": Incorrect password.`);
-                res.status(401).json({ error: "Invalid username or password." });
-            }
+            });
         });
     });
 });
@@ -2150,7 +2326,7 @@ app.post('/api/sources/fetch-groups', requireAuth, requireAdmin, async (req, res
 });
 
 app.get('/api/auth/status', (req, res) => {
-    console.log(`[AUTH_API] GET /api/auth/status - Checking session ID: ${req.sessionID}`);
+    console.log('[AUTH_API] GET /api/auth/status');
     if (req.session && req.session.userId) {
         console.log(`[AUTH_API_STATUS] Valid session found for user "${req.session.username}" (ID: ${req.session.userId}). Responding with isLoggedIn: true.`);
         res.json({ isLoggedIn: true, user: { id: req.session.userId, username: req.session.username, isAdmin: req.session.isAdmin, canUseDvr: req.session.canUseDvr } });
@@ -2160,24 +2336,28 @@ app.get('/api/auth/status', (req, res) => {
     }
 });
 // ... existing User Management API Endpoints ...
-app.get('/api/users', requireAdmin, (req, res) => {
+app.get('/api/users', requireAuth, requireAdmin, (req, res) => {
     console.log('[USER_API] Fetching all users.');
     db.all("SELECT id, username, isAdmin, canUseDvr, allowed_sources FROM users ORDER BY username", [], (err, rows) => {
         if (err) {
             console.error('[USER_API] Error fetching users:', err.message);
-            return res.status(500).json({ error: err.message });
+            return res.status(500).json({ error: 'Could not load users.' });
         }
         console.log(`[USER_API] Found ${rows.length} users.`);
         res.json(rows);
     });
 });
 
-app.post('/api/users', requireAdmin, (req, res) => {
+app.post('/api/users', requireAuth, requireAdmin, (req, res) => {
     console.log('[USER_API] Adding new user.');
     const { username, password, isAdmin, canUseDvr, allowed_sources } = req.body;
-    if (!username || !password) {
-        console.warn('[USER_API] Add user failed: Username and/or password missing.');
-        return res.status(400).json({ error: "Username and password are required." });
+    if (!username) {
+        console.warn('[USER_API] Add user failed: Username missing.');
+        return res.status(400).json({ error: "Username is required." });
+    }
+    const problem = passwordProblem(password);
+    if (problem) {
+        return res.status(400).json({ error: problem });
     }
 
     bcrypt.hash(password, saltRounds, (err, hash) => {
@@ -2197,10 +2377,15 @@ app.post('/api/users', requireAdmin, (req, res) => {
     });
 });
 
-app.put('/api/users/:id', requireAdmin, (req, res) => {
+app.put('/api/users/:id', requireAuth, requireAdmin, (req, res) => {
     const { id } = req.params;
     const { username, password, isAdmin, canUseDvr, allowed_sources } = req.body;
     console.log(`[USER_API] Updating user ID: ${id}. Username: ${username}, IsAdmin: ${isAdmin}, CanUseDvr: ${canUseDvr}`);
+
+    if (password) {
+        const problem = passwordProblem(password);
+        if (problem) return res.status(400).json({ error: problem });
+    }
 
     const allowedSourcesStr = allowed_sources ? JSON.stringify(allowed_sources) : null;
 
@@ -2214,7 +2399,7 @@ app.put('/api/users/:id', requireAdmin, (req, res) => {
                 db.run("UPDATE users SET username = ?, password = ?, isAdmin = ?, canUseDvr = ?, allowed_sources = ? WHERE id = ?", [username, hash, isAdmin ? 1 : 0, canUseDvr ? 1 : 0, allowedSourcesStr, id], (err) => {
                     if (err) {
                         console.error(`[USER_API] Error updating user ${id} with new password:`, err.message);
-                        return res.status(500).json({ error: err.message });
+                        return res.status(500).json({ error: 'Could not update user.' });
                     }
                     if (req.session.userId == id) {
                         req.session.username = username;
@@ -2223,6 +2408,7 @@ app.put('/api/users/:id', requireAdmin, (req, res) => {
                         console.log(`[USER_API] Current user's session (ID: ${id}) updated.`);
                     }
                     userCache.invalidate(id);
+                    if (password) destroyUserSessions(id, req.sessionID);
                     console.log(`[USER_API] User ${id} updated successfully (with password change).`);
                     res.json({ success: true });
                 });
@@ -2231,7 +2417,7 @@ app.put('/api/users/:id', requireAdmin, (req, res) => {
             db.run("UPDATE users SET username = ?, isAdmin = ?, canUseDvr = ?, allowed_sources = ? WHERE id = ?", [username, isAdmin ? 1 : 0, canUseDvr ? 1 : 0, allowedSourcesStr, id], (err) => {
                 if (err) {
                     console.error(`[USER_API] Error updating user ${id} without password change:`, err.message);
-                    return res.status(500).json({ error: err.message });
+                    return res.status(500).json({ error: 'Could not update user.' });
                 }
                 if (req.session.userId == id) {
                     req.session.username = username;
@@ -2251,7 +2437,7 @@ app.put('/api/users/:id', requireAdmin, (req, res) => {
         db.get("SELECT COUNT(*) as count FROM users WHERE isAdmin = 1", [], (err, row) => {
             if (err) {
                 console.error('[USER_API] Error checking admin count for demotion:', err.message);
-                return res.status(500).json({ error: err.message });
+                return res.status(500).json({ error: 'Could not update user.' });
             }
             if (row.count <= 1) {
                 console.warn(`[USER_API] Cannot demote user ${id}: They are the last administrator.`);
@@ -2265,7 +2451,7 @@ app.put('/api/users/:id', requireAdmin, (req, res) => {
 });
 
 // MODIFIED: User deletion now terminates active streams and forces logout.
-app.delete('/api/users/:id', requireAdmin, (req, res) => {
+app.delete('/api/users/:id', requireAuth, requireAdmin, (req, res) => {
     const idToDelete = parseInt(req.params.id, 10);
     console.log(`[USER_API] Deleting user ID: ${idToDelete}`);
     if (req.session.userId == idToDelete) {
@@ -2297,21 +2483,33 @@ app.delete('/api/users/:id', requireAdmin, (req, res) => {
     db.run("DELETE FROM users WHERE id = ?", idToDelete, function (err) {
         if (err) {
             console.error(`[USER_API] Error deleting user ${idToDelete}:`, err.message);
-            return res.status(500).json({ error: err.message });
+            return res.status(500).json({ error: 'Could not delete user.' });
         }
         if (this.changes === 0) {
             console.warn(`[USER_API] User ${idToDelete} not found for deletion.`);
             return res.status(404).json({ error: 'User not found.' });
         }
         userCache.invalidate(idToDelete);
+        destroyUserSessions(idToDelete);
         console.log(`[USER_API] User ${idToDelete} deleted successfully from database.`);
         res.json({ success: true });
     });
 });
 // --- Protected IPTV API Endpoints ---
 // The EPG arrives as ready-made JSON text, so it is spliced into the response instead of being serialized again.
-const sendConfig = (req, res, config, epgJson = 'null') =>
-    sendJson(req, res, Buffer.from(`${JSON.stringify(config).slice(0, -1)},"epgContent":${epgJson}}`));
+const sendConfig = (req, res, config, epgJson = 'null') => {
+    const settings = { ...config.settings };
+    // Never send the session secret, even to an admin. It is also no longer stored here.
+    delete settings.generatedSessionSecret;
+    if (!req.session.isAdmin) {
+        // Provider credentials and source URLs are needed only by the admin settings page.
+        const stripSourceSecrets = (list) => (list || []).map(({ xc_data, url, path, ...source }) => source);
+        settings.m3uSources = stripSourceSecrets(settings.m3uSources);
+        settings.epgSources = stripSourceSecrets(settings.epgSources);
+    }
+    const body = { ...config, settings };
+    sendJson(req, res, Buffer.from(`${JSON.stringify(body).slice(0, -1)},"epgContent":${epgJson}}`));
+};
 
 app.get('/api/config', requireAuth, async (req, res) => {
     try {
@@ -2326,8 +2524,8 @@ app.get('/api/config', requireAuth, async (req, res) => {
         try {
             const user = await userCache.get(req.session.userId);
             if (user) {
-                console.log(`[DEBUG_API_CONFIG] Fetching config for UserID: ${req.session.userId} (Session: ${req.sessionID})`);
-                if (user.isAdmin || req.session.isAdmin || user.id === 1 || req.session.userId === 1) {
+                console.log(`[DEBUG_API_CONFIG] Fetching config for UserID: ${req.session.userId}`);
+                if (user.isAdmin === 1) {
                     allowedSources = null;
                     console.log(`[DEBUG_API_CONFIG] User '${user.username}' is admin (full source access).`);
                 } else if (user.allowed_sources) {
@@ -2337,17 +2535,23 @@ app.get('/api/config', requireAuth, async (req, res) => {
                             allowedSources = parsed;
                             console.log(`[DEBUG_API_CONFIG] DB allowed_sources for user '${user.username}':`, JSON.stringify(allowedSources, null, 2));
                         } else {
-                            allowedSources = null;
+                            // An empty whitelist means no sources, not every source. Null
+                            // (the column was never set) keeps the legacy full-access rule.
+                            allowedSources = {};
                         }
                     } catch (e) {
-                        allowedSources = null;
+                        allowedSources = {};
                     }
                 } else {
                     console.log(`[DEBUG_API_CONFIG] No allowed_sources found for user '${user.username}' (admin/full access).`);
                 }
+            } else {
+                allowedSources = {};
             }
         } catch (dbErr) {
             console.error("[API] Error fetching user permissions:", dbErr);
+            // Fail closed: if the permission row cannot be read, show no sources.
+            allowedSources = {};
         }
 
         // LOAD M3U
@@ -2427,24 +2631,22 @@ app.get('/api/config', requireAuth, async (req, res) => {
             ? `[API] No merged EPG JSON file found at ${LIVE_EPG_JSON_PATH}.`
             : `[API] Loaded${allowedSources ? ' and FILTERED' : ''} EPG content from ${LIVE_EPG_JSON_PATH}.`);
 
-        // --- NEW: Load VOD Files (Legacy) ---
-        // VOD filtering is complex here as it uses legacy JSON files. 
-        // We will assume VOD is handled by the new /api/vod/library endpoint properly.
-        // But to be safe, we can clear these if legacy mode is active and user is restricted.
-        // For now, loading as is, but frontend uses the library endpoint.
-
-        if (fs.existsSync(VOD_MOVIES_JSON_PATH)) {
-            // ... legacy code kept simple
-            try {
-                config.vodMovies = JSON.parse(fs.readFileSync(VOD_MOVIES_JSON_PATH, 'utf-8'));
-            } catch (e) { }
+        // --- Legacy VOD files ---
+        // The new /api/vod/library endpoint filters by provider. These files carry no
+        // permission data, so restricted users do not get them at all.
+        if (!allowedSources) {
+            if (fs.existsSync(VOD_MOVIES_JSON_PATH)) {
+                try {
+                    config.vodMovies = JSON.parse(fs.readFileSync(VOD_MOVIES_JSON_PATH, 'utf-8'));
+                } catch (e) { }
+            }
+            if (fs.existsSync(VOD_SERIES_JSON_PATH)) {
+                try {
+                    config.vodSeries = JSON.parse(fs.readFileSync(VOD_SERIES_JSON_PATH, 'utf-8'));
+                } catch (e) { }
+            }
         }
-        if (fs.existsSync(VOD_SERIES_JSON_PATH)) {
-            try {
-                config.vodSeries = JSON.parse(fs.readFileSync(VOD_SERIES_JSON_PATH, 'utf-8'));
-            } catch (e) { }
-        }
-        // --- END NEW VOD ---
+        // --- END Legacy VOD ---
 
         db.all(`SELECT key, value FROM user_settings WHERE user_id = ?`, [req.session.userId], (err, rows) => {
             if (err) {
@@ -2599,11 +2801,15 @@ app.get('/api/vod/library', requireAuth, async (req, res) => {
         let allowedSources = null;
         try {
             const user = await userCache.get(req.session.userId);
-            if (user && user.allowed_sources) {
+            if (user && user.isAdmin !== 1 && user.allowed_sources) {
                 allowedSources = JSON.parse(user.allowed_sources);
+            } else if (!user) {
+                allowedSources = {};
             }
         } catch (dbErr) {
             console.error("[API_VOD] Error fetching user permissions:", dbErr);
+            // Fail closed: broken permission data must not grant the whole library.
+            allowedSources = {};
         }
 
         // 1. Get active XC providers from settings
@@ -2702,6 +2908,11 @@ app.get('/api/vod/duration', requireAuth, async (req, res) => {
         return res.status(400).json({ error: "Missing required 'url' parameter" });
     }
     try {
+        assertSafeStreamUrl(url);
+    } catch (err) {
+        return res.status(400).json({ error: 'URL is not allowed.' });
+    }
+    try {
         const settings = getSettings();
         const activeUserAgent = settings.userAgents.find(ua => ua.id === settings.activeUserAgentId)?.value || 'VLC/3.0.20 (Linux; x86_64)';
         const duration = await getStreamDurationSeconds(url, activeUserAgent);
@@ -2738,36 +2949,28 @@ app.get('/api/vod/series/:seriesId', requireAuth, async (req, res) => {
         let episodesToReturn = existingEpisodes;
         const needsEpisodeFetch = existingEpisodes.length === 0 || existingEpisodes.some(ep => !ep.duration && !ep.duration_secs);
 
+        // Permission is checked before anything is returned, cached episodes or not.
+        // An empty whitelist means no providers; a missing column keeps legacy full access.
+        const relation = await dbGet(db, "SELECT provider_id, external_series_id FROM provider_series_relations WHERE series_id = ? LIMIT 1", [numericSeriesId]);
+        let allowedSources = null;
+        try {
+            const user = await userCache.get(req.session.userId);
+            if (user && user.isAdmin !== 1 && user.allowed_sources) allowedSources = JSON.parse(user.allowed_sources);
+            else if (!user) allowedSources = {};
+        } catch (dbErr) {
+            console.error("[API_VOD] Error checking user permissions:", dbErr);
+            return res.status(500).json({ error: "Could not check access to this series." });
+        }
+        if (allowedSources && !(relation && allowedSources[relation.provider_id]?.allowed)) {
+            console.warn(`[API_VOD_SERIES] Access denied for user ${req.session.username} to provider ${relation ? relation.provider_id : '(none)'}`);
+            return res.status(403).json({ error: "Access denied to this series." });
+        }
+
         // 3. If no episodes in DB or missing metadata, fetch from XC API and save/update
         if (needsEpisodeFetch) {
             console.log(`[API_VOD_SERIES] Fetching details and episode metadata from provider for Series ID ${numericSeriesId}...`);
 
-            // Find the provider details for this series
-            const relation = await dbGet(db, "SELECT provider_id, external_series_id FROM provider_series_relations WHERE series_id = ? LIMIT 1", [numericSeriesId]);
             if (relation) {
-                // CHECK PERMISSIONS
-                let permitted = true;
-                try {
-                    const user = await userCache.get(req.session.userId);
-                    if (user && user.allowed_sources) {
-                        const allowedSources = JSON.parse(user.allowed_sources);
-                        if (allowedSources[relation.provider_id] && !allowedSources[relation.provider_id].allowed) {
-                            console.warn(`[API_VOD_SERIES] Access denied for user ${req.session.username} to provider ${relation.provider_id}`);
-                            permitted = false;
-                        }
-                        if (!allowedSources[relation.provider_id]) {
-                            console.warn(`[API_VOD_SERIES] Access denied (not in list) for user ${req.session.username} to provider ${relation.provider_id}`);
-                            permitted = false;
-                        }
-                    }
-                } catch (dbErr) {
-                    console.error("[API_VOD] Error checking user permissions:", dbErr);
-                }
-
-                if (!permitted && existingEpisodes.length === 0) {
-                    return res.status(403).json({ error: "Access denied to this series." });
-                }
-
                 const settings = getSettings();
                 const providerConfig = settings.m3uSources.find(s => s.id === relation.provider_id);
                 if (providerConfig && providerConfig.type === 'xc' && providerConfig.xc_data) {
@@ -2850,7 +3053,7 @@ app.get('/api/vod/series/:seriesId', requireAuth, async (req, res) => {
         // 4. Build the response structure
         const seasons = new Map();
         const settings = getSettings();
-        const activeXcProviders = settings.m3uSources.filter(s => s.isActive && s.type === 'xc');
+        const activeXcProviders = settings.m3uSources.filter(s => s.isActive && s.type === 'xc' && (!allowedSources || allowedSources[s.id]?.allowed));
         const providerMap = new Map();
         activeXcProviders.forEach(p => {
             try {
@@ -2932,7 +3135,8 @@ const upload = multer({
         filename: (req, file, cb) => {
             cb(null, `${file.fieldname}-${Date.now()}${path.extname(file.originalname)}`);
         }
-    })
+    }),
+    limits: { fileSize: 50 * 1024 * 1024, files: 1 },
 });
 
 
@@ -3944,12 +4148,12 @@ function allowLocalOrAuth(req, res, next) {
         const tokenData = activeCastTokens.get(castToken);
 
         if (!tokenData) {
-            console.warn(`[STREAM_AUTH] Invalid cast token: ${castToken.substring(0, 8)}...`);
+            console.warn('[STREAM_AUTH] Invalid cast token.');
             return res.status(401).send('Invalid cast token');
         }
 
         if (tokenData.expiresAt < Date.now()) {
-            console.warn(`[STREAM_AUTH] Expired cast token: ${castToken.substring(0, 8)}...`);
+            console.warn('[STREAM_AUTH] Expired cast token.');
             activeCastTokens.delete(castToken);
             return res.status(401).send('Expired cast token');
         }
@@ -4007,8 +4211,20 @@ app.get('/stream', allowLocalOrAuth, async (req, res) => {
     const seekSec = parseFloat(seekParam);
     const isSeek = seekParam !== undefined && !isNaN(seekSec);
 
+    if (!streamUrl) return res.status(400).send('Error: `url` query parameter is required.');
+    if (!isAllowedStreamUrl(streamUrl)) {
+        console.warn(`[STREAM] Rejected stream URL with unsupported protocol: ${safeUrlForLog(streamUrl)}`);
+        return res.status(400).send('Error: unsupported stream URL protocol.');
+    }
+    try {
+        assertSafeStreamUrl(streamUrl);
+    } catch (err) {
+        console.warn(`[STREAM] Rejected stream URL: ${err.message}`);
+        return res.status(400).send('Error: stream URL is not allowed.');
+    }
+
     // Include profileId and seek offset in stream key so seeked streams don't collide with position 0
-    const baseStreamKey = `${userId}::${streamUrl}::${profileId}`;
+    const baseStreamKey = `${userId}::${streamUrlKey(streamUrl)}::${profileId}`;
     const streamKey = isSeek ? `${baseStreamKey}::${Math.floor(seekSec)}` : baseStreamKey;
 
     // If seeking, terminate any existing stream for this user/URL to cleanly switch position
@@ -4045,12 +4261,7 @@ app.get('/stream', allowLocalOrAuth, async (req, res) => {
         return;
     }
 
-    console.log(`[STREAM] New request: URL=${streamUrl}, ProfileID=${profileId}, UserAgentID=${userAgentId}`);
-    if (!streamUrl) return res.status(400).send('Error: `url` query parameter is required.');
-    if (!isAllowedStreamUrl(streamUrl)) {
-        console.warn(`[STREAM] Rejected stream URL with unsupported protocol: ${streamUrl}`);
-        return res.status(400).send('Error: unsupported stream URL protocol.');
-    }
+    console.log(`[STREAM] New request: ProfileID=${profileId}, UserAgentID=${userAgentId}`);
 
     let settings = getSettings();
     // Check both streamProfiles and castProfiles arrays
@@ -4068,7 +4279,7 @@ app.get('/stream', allowLocalOrAuth, async (req, res) => {
     const isTranscoded = profile.command !== 'redirect';
 
     if (!isTranscoded) {
-        console.log(`[STREAM] Redirecting to stream URL: ${streamUrl}`);
+        console.log(`[STREAM] Redirecting to stream URL: ${safeUrlForLog(streamUrl)}`);
         return res.redirect(302, streamUrl);
     }
 
@@ -4119,7 +4330,7 @@ app.get('/stream', allowLocalOrAuth, async (req, res) => {
         clientUserAgent: userAgent.value
     }, settings.playerLogLevel);
 
-    console.log(`[STREAM] FFmpeg command args: ffmpeg ${args.join(' ')}`);
+    console.log(`[STREAM] Starting ffmpeg with profile "${profile.name}"`);
     const ffmpeg = spawn('ffmpeg', args);
 
     //-- ENHANCEMENT: Log richer stream start data to history.
@@ -4267,7 +4478,7 @@ app.post('/api/cast/generate-token', requireAuth, (req, res) => {
         // Auto-cleanup after expiry
         setTimeout(() => {
             activeCastTokens.delete(token);
-            console.log(`[CAST_TOKEN] Token expired and removed: ${token.substring(0, 8)}...`);
+            console.log('[CAST_TOKEN] Token expired and removed.');
         }, 5 * 60 * 1000);
 
         console.log(`[CAST_TOKEN] Generated token for user ${userId}, expires in 5 minutes`);
@@ -4292,7 +4503,7 @@ app.post('/api/stream/stop', requireAuth, (req, res) => {
 
     // If profileId is provided, construct the specific key and support seeked streams with timestamp suffix
     if (profileId) {
-        const fullKey = `${req.session.userId}::${streamUrl}::${profileId}`;
+        const fullKey = `${req.session.userId}::${streamUrlKey(streamUrl)}::${profileId}`;
         if (activeStreamProcesses.has(fullKey)) {
             streamKey = fullKey;
         } else {
@@ -4308,8 +4519,8 @@ app.post('/api/stream/stop', requireAuth, (req, res) => {
         }
     } else {
         // If no profileId, try to find a matching key for this user and URL
-        // The key format is either "userId::url" (old) or "userId::url::profileId" (new)
-        const partialKey = `${req.session.userId}::${streamUrl}`;
+        // The key format is either "userId::urlHash" (old) or "userId::urlHash::profileId" (new)
+        const partialKey = `${req.session.userId}::${streamUrlKey(streamUrl)}`;
 
         // Check for exact match first (legacy format or redirect)
         if (activeStreamProcesses.has(partialKey)) {
@@ -5093,8 +5304,8 @@ class DvrSupervisor {
         // that could cause tuner contention / cross-talk with IPTV proxies like Dispatcharr
         let hadConflictingStream = false;
         for (const [streamKey, streamInfo] of activeStreamProcesses.entries()) {
-            if (streamKey.includes(currentUrl)) {
-                console.log(`[DVR_SUPERVISOR][${this.job.id}] Found active conflicting stream for URL ${currentUrl}. Terminating to free upstream tuner.`);
+            if (streamKey.includes(streamUrlKey(currentUrl))) {
+                console.log(`[DVR_SUPERVISOR][${this.job.id}] Found active conflicting stream for ${safeUrlForLog(currentUrl)}. Terminating to free upstream tuner.`);
                 try {
                     streamInfo.process.kill('SIGKILL');
                     activeStreamProcesses.delete(streamKey);
@@ -5104,7 +5315,7 @@ class DvrSupervisor {
         }
         for (const [streamKey, redirectInfo] of activeRedirectStreams.entries()) {
             if (streamKey.includes(currentUrl)) {
-                console.log(`[DVR_SUPERVISOR][${this.job.id}] Found active conflicting redirect stream for URL ${currentUrl}. Closing.`);
+                console.log(`[DVR_SUPERVISOR][${this.job.id}] Found active conflicting redirect stream for ${safeUrlForLog(currentUrl)}. Closing.`);
                 activeRedirectStreams.delete(streamKey);
                 hadConflictingStream = true;
             }
@@ -5121,7 +5332,7 @@ class DvrSupervisor {
             filePath: this.isTs ? 'pipe:1' : this.fullFilePath
         }, this.settings.dvrLogLevel);
 
-        console.log(`[DVR_SUPERVISOR][${this.job.id}] Spawning FFmpeg (attempt ${this.retryCount + 1}/${this.maxRetries + 1}): ffmpeg ${args.join(' ')}`);
+        console.log(`[DVR_SUPERVISOR][${this.job.id}] Spawning FFmpeg (attempt ${this.retryCount + 1}/${this.maxRetries + 1}) with profile "${this.recProfile.name}".`);
 
         try {
             this.ffmpegProcess = spawn('ffmpeg', args);
@@ -5762,43 +5973,66 @@ app.get('/api/dvr/timeshift/:jobId/stream.m3u8', requireAuth, requireDvrAccess, 
 // Endpoint to serve segments (seg_*.ts) and stream.m3u8
 app.get('/api/dvr/timeshift/:jobId/:file', requireAuth, requireDvrAccess, (req, res) => {
     const { jobId, file } = req.params;
-    const session = activeTimeshiftSessions.get(jobId);
-    const sessionDir = session ? session.dir : path.join(DVR_DIR, '.timeshift', String(jobId));
+    const query = req.session.isAdmin
+        ? "SELECT id FROM dvr_jobs WHERE id = ?"
+        : "SELECT id FROM dvr_jobs WHERE id = ? AND user_id = ?";
+    const params = req.session.isAdmin ? [jobId] : [jobId, req.session.userId];
 
-    if (session) {
-        session.lastAccess = Date.now();
-    }
-
-    if (file === 'stream.m3u8') {
-        const playlistPath = path.join(sessionDir, 'stream.m3u8');
-        if (!fs.existsSync(playlistPath)) {
-            return res.status(404).send('Timeshift stream not found.');
+    db.get(query, params, (err, job) => {
+        if (err || !job) {
+            return res.status(404).send('Recording job not found or not authorized.');
         }
-        return sendFormattedTimeshiftPlaylist(playlistPath, res);
-    }
 
-    if (!/^seg_.*\.ts$/.test(file)) {
-        return res.status(400).send('Invalid segment filename.');
-    }
+        const session = activeTimeshiftSessions.get(jobId);
+        const sessionDir = session ? session.dir : path.join(DVR_DIR, '.timeshift', String(jobId));
 
-    const segPath = path.join(sessionDir, file);
-    if (!fs.existsSync(segPath)) {
-        return res.status(404).send('Segment not found.');
-    }
+        if (session) {
+            session.lastAccess = Date.now();
+        }
 
-    res.setHeader('Content-Type', 'video/mp2t');
-    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-    res.setHeader('Pragma', 'no-cache');
-    res.setHeader('Expires', '0');
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    fs.createReadStream(segPath).pipe(res);
+        if (file === 'stream.m3u8') {
+            const playlistPath = path.join(sessionDir, 'stream.m3u8');
+            if (!fs.existsSync(playlistPath)) {
+                return res.status(404).send('Timeshift stream not found.');
+            }
+            return sendFormattedTimeshiftPlaylist(playlistPath, res);
+        }
+
+        // No slashes: the previous `.*` let an encoded %2F walk out of the session directory.
+        if (!/^seg_[a-z0-9]+_\d+\.ts$/i.test(file)) {
+            return res.status(400).send('Invalid segment filename.');
+        }
+
+        const segPath = path.join(sessionDir, file);
+        if (path.dirname(segPath) !== sessionDir) {
+            return res.status(400).send('Invalid segment filename.');
+        }
+        if (!fs.existsSync(segPath)) {
+            return res.status(404).send('Segment not found.');
+        }
+
+        res.setHeader('Content-Type', 'video/mp2t');
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        fs.createReadStream(segPath).pipe(res);
+    });
 });
 
 // Endpoint to explicitly stop/clean up a timeshift session (stops processes, preserves directory)
 app.post('/api/dvr/timeshift/:jobId/stop', requireAuth, requireDvrAccess, (req, res) => {
     const { jobId } = req.params;
-    cleanupTimeshiftSession(jobId, false);
-    res.json({ success: true });
+    const query = req.session.isAdmin
+        ? "SELECT id FROM dvr_jobs WHERE id = ?"
+        : "SELECT id FROM dvr_jobs WHERE id = ? AND user_id = ?";
+    const params = req.session.isAdmin ? [jobId] : [jobId, req.session.userId];
+
+    db.get(query, params, (err, job) => {
+        if (err || !job) return res.status(404).json({ error: 'Recording job not found or not authorized.' });
+        cleanupTimeshiftSession(jobId, false);
+        res.json({ success: true });
+    });
 });
 
 // Legacy redirect for any old timeshift calls
@@ -5925,11 +6159,14 @@ app.get('/api/dvr/jobs', requireAuth, (req, res) => {
     }
 });
 
-// MODIFIED: Endpoint to show all completed recordings to everyone.
+// Completed recordings are private to their owner; admins see every user's.
 app.get('/api/dvr/recordings', requireAuth, (req, res) => {
-    // All authenticated users can see all completed recordings, with username
-    const query = "SELECT r.*, u.username FROM dvr_recordings r JOIN users u ON r.user_id = u.id ORDER BY r.startTime DESC";
-    db.all(query, [], (err, rows) => {
+    const base = "SELECT r.*, u.username FROM dvr_recordings r JOIN users u ON r.user_id = u.id";
+    const query = req.session.isAdmin
+        ? `${base} ORDER BY r.startTime DESC`
+        : `${base} WHERE r.user_id = ? ORDER BY r.startTime DESC`;
+    const params = req.session.isAdmin ? [] : [req.session.userId];
+    db.all(query, params, (err, rows) => {
         if (err) return res.status(500).json({ error: 'Failed to retrieve recordings.' });
         const recordingsWithFilename = rows.map(r => ({ ...r, filename: path.basename(r.filePath) }));
         res.json(recordingsWithFilename);
@@ -5939,9 +6176,13 @@ app.get('/api/dvr/recordings', requireAuth, (req, res) => {
 // Endpoint to on-demand remux a legacy .ts recording to seekable .mp4
 app.post('/api/dvr/recordings/:id/remux', requireAuth, requireDvrAccess, async (req, res) => {
     const recordingId = req.params.id;
-    db.get("SELECT * FROM dvr_recordings WHERE id = ?", [recordingId], async (err, recording) => {
+    const query = req.session.isAdmin
+        ? "SELECT * FROM dvr_recordings WHERE id = ?"
+        : "SELECT * FROM dvr_recordings WHERE id = ? AND user_id = ?";
+    const params = req.session.isAdmin ? [recordingId] : [recordingId, req.session.userId];
+    db.get(query, params, async (err, recording) => {
         if (err || !recording) {
-            return res.status(404).json({ error: 'Recording not found.' });
+            return res.status(404).json({ error: 'Recording not found or not authorized.' });
         }
         if (!recording.filePath.endsWith('.ts')) {
             return res.json({ success: true, filename: path.basename(recording.filePath), alreadyMp4: true });
@@ -6051,20 +6292,26 @@ app.delete('/api/dvr/recordings/all', requireAuth, requireDvrAccess, (req, res) 
 app.delete('/api/dvr/jobs/:id', requireAuth, requireDvrAccess, (req, res) => {
     const { id } = req.params;
     const jobId = parseInt(id, 10);
-    if (activeDvrJobs.has(jobId)) {
-        activeDvrJobs.get(jobId)?.cancel();
-        activeDvrJobs.delete(jobId);
-    }
-    stopRecording(jobId);
-    // MODIFIED: Admin can cancel any job, user can only cancel their own.
-    const query = req.session.isAdmin ? "UPDATE dvr_jobs SET status = 'cancelled' WHERE id = ?" : "UPDATE dvr_jobs SET status = 'cancelled' WHERE id = ? AND user_id = ?";
+    const query = req.session.isAdmin ? "SELECT id FROM dvr_jobs WHERE id = ?" : "SELECT id FROM dvr_jobs WHERE id = ? AND user_id = ?";
     const params = req.session.isAdmin ? [jobId] : [jobId, req.session.userId];
 
-    db.run(query, params, function (err) {
-        if (err) return res.status(500).json({ error: 'Could not cancel job.' });
-        if (this.changes === 0) return res.status(404).json({ error: 'Job not found or not authorized to cancel.' });
-        console.log(`[DVR_API] Cancelled job ${jobId}.`);
-        res.json({ success: true });
+    // Look the job up before touching any process: a user must not be able to stop
+    // another user's recording just by guessing its ID.
+    db.get(query, params, (err, job) => {
+        if (err) return res.status(500).json({ error: 'Could not look up the job.' });
+        if (!job) return res.status(404).json({ error: 'Job not found or not authorized to cancel.' });
+
+        if (activeDvrJobs.has(jobId)) {
+            activeDvrJobs.get(jobId)?.cancel();
+            activeDvrJobs.delete(jobId);
+        }
+        stopRecording(jobId);
+
+        db.run("UPDATE dvr_jobs SET status = 'cancelled' WHERE id = ?", [jobId], function (updateErr) {
+            if (updateErr) return res.status(500).json({ error: 'Could not cancel job.' });
+            console.log(`[DVR_API] Cancelled job ${jobId}.`);
+            res.json({ success: true });
+        });
     });
 });
 
@@ -6092,21 +6339,24 @@ app.delete('/api/dvr/recordings/:id', requireAuth, requireDvrAccess, (req, res) 
 app.post('/api/dvr/jobs/:id/stop', requireAuth, requireDvrAccess, (req, res) => {
     const { id } = req.params;
     const jobId = parseInt(id, 10);
-    console.log(`[DVR_API] Received request to stop recording for job ${jobId}.`);
-    stopRecording(jobId);
-
-    const actualEndTime = new Date().toISOString();
-    // MODIFIED: Admin can stop any job, user can only stop their own.
     const query = req.session.isAdmin
-        ? "UPDATE dvr_jobs SET status = 'completed', endTime = ? WHERE id = ?"
-        : "UPDATE dvr_jobs SET status = 'completed', endTime = ? WHERE id = ? AND user_id = ?";
-    const params = req.session.isAdmin ? [actualEndTime, jobId] : [actualEndTime, jobId, req.session.userId];
+        ? "SELECT id, user_id FROM dvr_jobs WHERE id = ?"
+        : "SELECT id, user_id FROM dvr_jobs WHERE id = ? AND user_id = ?";
+    const params = req.session.isAdmin ? [jobId] : [jobId, req.session.userId];
 
-    db.run(query, params, function (err) {
-        if (err) return res.status(500).json({ error: 'Could not update job status after stop.' });
-        if (this.changes === 0) return res.status(404).json({ error: 'Job not found or not authorized to stop.' });
-        broadcastDvrUpdate(req.session.userId, { jobId, status: 'completed', endTime: actualEndTime });
-        res.json({ success: true, endTime: actualEndTime });
+    db.get(query, params, (err, job) => {
+        if (err) return res.status(500).json({ error: 'Could not look up the job.' });
+        if (!job) return res.status(404).json({ error: 'Job not found or not authorized to stop.' });
+
+        console.log(`[DVR_API] Received request to stop recording for job ${jobId}.`);
+        stopRecording(jobId);
+
+        const actualEndTime = new Date().toISOString();
+        db.run("UPDATE dvr_jobs SET status = 'completed', endTime = ? WHERE id = ?", [actualEndTime, jobId], function (updateErr) {
+            if (updateErr) return res.status(500).json({ error: 'Could not update job status after stop.' });
+            broadcastDvrUpdate(job.user_id, { jobId, status: 'completed', endTime: actualEndTime });
+            res.json({ success: true, endTime: actualEndTime });
+        });
     });
 });
 
@@ -6200,7 +6450,7 @@ app.post('/api/validate-url', requireAuth, requireAdmin, async (req, res) => {
     if (!url) {
         return res.status(400).json({ error: 'URL is required.' });
     }
-    console.log(`[VALIDATE_URL] Testing URL: ${url}`);
+    console.log(`[VALIDATE_URL] Testing URL: ${safeUrlForLog(url)}`);
     try {
         // safeGet blocks non-http(s) schemes and internal/private addresses on every redirect hop.
         const { response } = await safeGet(url, { timeout: 30000 });
@@ -6240,6 +6490,27 @@ app.get('/api/public-ip', requireAuth, requireAdmin, (req, res) => {
 // --- Image Proxy Endpoint (for VOD posters) ---
 // Proxies HTTP/HTTPS images to avoid mixed content warnings
 // Now with server-side disk caching for performance
+// The proxy is open to every LAN device by design, so keep its disk use bounded.
+let lastImageCachePrune = 0;
+function pruneImageCache() {
+    if (Date.now() - lastImageCachePrune < 10 * 60 * 1000) return;
+    lastImageCachePrune = Date.now();
+    fs.readdir(IMAGE_CACHE_DIR, (err, files) => {
+        if (err || files.length <= IMAGE_CACHE_MAX_FILES) return;
+        const entries = [];
+        files.forEach((name) => {
+            try {
+                entries.push({ name, mtime: fs.statSync(path.join(IMAGE_CACHE_DIR, name)).mtimeMs });
+            } catch (e) { /* raced with another prune */ }
+        });
+        entries.sort((a, b) => a.mtime - b.mtime);
+        entries.slice(0, Math.max(0, entries.length - IMAGE_CACHE_MAX_FILES)).forEach(({ name }) => {
+            fs.unlink(path.join(IMAGE_CACHE_DIR, name), () => { });
+        });
+        console.log(`[IMAGE_PROXY] Cache pruned to ${IMAGE_CACHE_MAX_FILES} files.`);
+    });
+}
+
 app.get('/api/image-proxy', allowLocalOrAuth, (req, res) => {
     const imageUrl = req.query.url;
 
@@ -6251,7 +6522,7 @@ app.get('/api/image-proxy', allowLocalOrAuth, (req, res) => {
     try {
         assertSafeUrl(imageUrl);
     } catch (err) {
-        console.warn(`[IMAGE_PROXY] Blocked URL ${imageUrl}: ${err.message}`);
+        console.warn(`[IMAGE_PROXY] Blocked URL ${safeUrlForLog(imageUrl)}: ${err.message}`);
         return res.status(400).send('Invalid or disallowed URL');
     }
 
@@ -6264,43 +6535,50 @@ app.get('/api/image-proxy', allowLocalOrAuth, (req, res) => {
     if (fs.existsSync(cacheFilePath) && fs.existsSync(cacheMetaPath)) {
         try {
             const meta = JSON.parse(fs.readFileSync(cacheMetaPath, 'utf-8'));
-            console.log(`[IMAGE_PROXY] Serving from cache: ${imageUrl}`);
+            const cachedType = String(meta.contentType || '').split(';')[0].trim().toLowerCase();
+            if (!IMAGE_PROXY_TYPES.has(cachedType)) {
+                // An old cache entry from before SVG was blocked: drop it and fetch again.
+                fs.unlinkSync(cacheFilePath);
+                fs.unlinkSync(cacheMetaPath);
+            } else {
+                console.log(`[IMAGE_PROXY] Serving from cache: ${safeUrlForLog(imageUrl)}`);
 
-            // Set headers from cached metadata
-            res.setHeader('Content-Type', meta.contentType);
-            res.setHeader('Cache-Control', 'public, max-age=2592000'); // 30 days for cached images
-            res.setHeader('X-Cache', 'HIT');
+                // Set headers from cached metadata
+                res.setHeader('Content-Type', cachedType);
+                res.setHeader('Cache-Control', 'public, max-age=2592000'); // 30 days for cached images
+                res.setHeader('X-Cache', 'HIT');
 
-            // Stream cached file
-            const fileStream = fs.createReadStream(cacheFilePath);
-            fileStream.pipe(res);
+                // Stream cached file
+                const fileStream = fs.createReadStream(cacheFilePath);
+                fileStream.pipe(res);
 
-            fileStream.on('error', (err) => {
-                console.error(`[IMAGE_PROXY] Error reading cached file:`, err.message);
-                // If cache is corrupted, delete and fall through to fetch
-                try {
-                    fs.unlinkSync(cacheFilePath);
-                    fs.unlinkSync(cacheMetaPath);
-                } catch (e) { }
-                res.status(500).send('Cache read error');
-            });
+                fileStream.on('error', (err) => {
+                    console.error(`[IMAGE_PROXY] Error reading cached file:`, err.message);
+                    // If cache is corrupted, delete and fall through to fetch
+                    try {
+                        fs.unlinkSync(cacheFilePath);
+                        fs.unlinkSync(cacheMetaPath);
+                    } catch (e) { }
+                    res.status(500).send('Cache read error');
+                });
 
-            return;
+                return;
+            }
         } catch (err) {
             console.error(`[IMAGE_PROXY] Error reading cache metadata:`, err.message);
             // Fall through to fetch fresh
         }
     }
 
-    console.log(`[IMAGE_PROXY] Fetching and caching image: ${imageUrl}`);
+    console.log(`[IMAGE_PROXY] Fetching and caching image: ${safeUrlForLog(imageUrl)}`);
 
     safeGet(imageUrl, { timeout: 15000 }).then(({ response: imageRes }) => {
-        // Check if response is an image
-        const contentType = imageRes.headers['content-type'];
-        if (!contentType || !contentType.startsWith('image/')) {
-            console.error(`[IMAGE_PROXY] Invalid content type: ${contentType}`);
+        // Only raster images: SVG can execute script when opened directly.
+        const mime = String(imageRes.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+        if (!IMAGE_PROXY_TYPES.has(mime)) {
+            console.error(`[IMAGE_PROXY] Invalid content type: ${mime || '(none)'}`);
             imageRes.destroy();
-            return res.status(400).send('URL does not point to an image');
+            return res.status(400).send('URL does not point to a supported image');
         }
         const declaredLength = parseInt(imageRes.headers['content-length'], 10);
         if (declaredLength > IMAGE_PROXY_MAX_BYTES) {
@@ -6309,7 +6587,7 @@ app.get('/api/image-proxy', allowLocalOrAuth, (req, res) => {
         }
 
         // Set response headers
-        res.setHeader('Content-Type', contentType);
+        res.setHeader('Content-Type', mime);
         res.setHeader('Cache-Control', 'public, max-age=2592000'); // 30 days
         res.setHeader('X-Cache', 'MISS');
 
@@ -6326,7 +6604,7 @@ app.get('/api/image-proxy', allowLocalOrAuth, (req, res) => {
             receivedBytes += chunk.length;
             if (receivedBytes > IMAGE_PROXY_MAX_BYTES && !aborted) {
                 aborted = true;
-                console.warn(`[IMAGE_PROXY] Image exceeded ${IMAGE_PROXY_MAX_BYTES} bytes, aborting: ${imageUrl}`);
+                console.warn(`[IMAGE_PROXY] Image exceeded ${IMAGE_PROXY_MAX_BYTES} bytes, aborting: ${safeUrlForLog(imageUrl)}`);
                 imageRes.destroy();
                 fileStream.destroy();
                 discardTemp();
@@ -6348,13 +6626,14 @@ app.get('/api/image-proxy', allowLocalOrAuth, (req, res) => {
             if (aborted) return discardTemp();
             const meta = {
                 url: imageUrl,
-                contentType: contentType,
+                contentType: mime,
                 cachedAt: new Date().toISOString()
             };
             try {
                 fs.renameSync(tempCachePath, cacheFilePath);
                 fs.writeFileSync(cacheMetaPath, JSON.stringify(meta, null, 2));
                 console.log(`[IMAGE_PROXY] Cached image: ${urlHash}`);
+                pruneImageCache();
             } catch (err) {
                 console.error(`[IMAGE_PROXY] Failed to write cache entry:`, err.message);
                 discardTemp();
@@ -6368,10 +6647,10 @@ app.get('/api/image-proxy', allowLocalOrAuth, (req, res) => {
 
     }).catch((err) => {
         if (err instanceof SsrfBlockedError) {
-            console.warn(`[IMAGE_PROXY] Blocked ${imageUrl}: ${err.message}`);
+            console.warn(`[IMAGE_PROXY] Blocked ${safeUrlForLog(imageUrl)}: ${err.message}`);
             return res.status(400).send('Invalid or disallowed URL');
         }
-        console.error(`[IMAGE_PROXY] Error fetching image from ${imageUrl}:`, err.message);
+        console.error(`[IMAGE_PROXY] Error fetching image from ${safeUrlForLog(imageUrl)}:`, err.message);
         res.status(502).send('Failed to fetch image');
     });
 });
@@ -6383,6 +6662,7 @@ const settingsUpload = multer({
         destination: (req, file, cb) => cb(null, DATA_DIR),
         filename: (req, file, cb) => cb(null, 'settings.tmp.json')
     }),
+    limits: { fileSize: 10 * 1024 * 1024, files: 1 },
     fileFilter: (req, file, cb) => {
         if (file.mimetype === 'application/json') {
             cb(null, true);
@@ -6392,7 +6672,7 @@ const settingsUpload = multer({
     }
 });
 
-app.get('/api/settings/export', requireAdmin, (req, res) => {
+app.get('/api/settings/export', requireAuth, requireAdmin, (req, res) => {
     if (fs.existsSync(SETTINGS_PATH)) {
         res.download(SETTINGS_PATH, 'viniplay-settings-backup.json', (err) => {
             if (err) {
@@ -6404,7 +6684,7 @@ app.get('/api/settings/export', requireAdmin, (req, res) => {
     }
 });
 
-app.post('/api/settings/import', requireAdmin, settingsUpload.single('settingsFile'), (req, res) => {
+app.post('/api/settings/import', requireAuth, requireAdmin, settingsUpload.single('settingsFile'), (req, res) => {
     if (!req.file) {
         return res.status(400).json({ error: 'No settings file was uploaded.' });
     }
@@ -6566,7 +6846,8 @@ app.post('/api/logs/client', requireAuth, express.text({ type: ['text/*', 'appli
             const tag = entry.tag || 'CLIENT';
             const msg = entry.message || '';
             const meta = entry.data ? ` | ${typeof entry.data === 'object' ? JSON.stringify(entry.data) : entry.data}` : '';
-            console.log(`[CLIENT:${deviceId}] [${tag}] ${msg}${meta}`);
+            // One line per entry: a newline from the browser must not forge a log record.
+            console.log(String(`[CLIENT:${deviceId}] [${tag}] ${msg}${meta}`).replace(/[\r\n]+/g, ' '));
         });
 
         res.sendStatus(204);
@@ -6577,12 +6858,24 @@ app.post('/api/logs/client', requireAuth, express.text({ type: ['text/*', 'appli
 });
 
 // --- Main Route Handling ---
+// Everything real is already served by express.static above. This only handles client-side
+// routes; building a path from req.path here let `..` read files outside public/.
 app.get('*', (req, res) => {
-    const filePath = path.join(PUBLIC_DIR, req.path);
-    if (fs.existsSync(filePath) && fs.lstatSync(filePath).isFile()) {
-        return res.sendFile(filePath);
-    }
     res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
+});
+
+// Last-resort error handler: keep stack traces and SQL messages out of responses, and give
+// multer/body-parser failures a JSON status instead of the default HTML page.
+app.use((err, req, res, next) => {
+    if (res.headersSent) return next(err);
+    if (err instanceof multer.MulterError) {
+        const status = err.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+        return res.status(status).json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'File is too large.' : 'Upload failed.' });
+    }
+    if (err.type === 'entity.too.large') return res.status(413).json({ error: 'Request is too large.' });
+    if (err instanceof SyntaxError && err.status === 400) return res.status(400).json({ error: 'Invalid JSON body.' });
+    console.error('[SERVER_ERROR]', err);
+    res.status(500).json({ error: 'Internal server error.' });
 });
 
 // --- Server Start ---
