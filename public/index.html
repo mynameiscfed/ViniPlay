@@ -914,12 +914,12 @@
                                 <input type="password" id="epg-ai-key" autocomplete="new-password" placeholder="sk-or-..."
                                     class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-white focus:ring-blue-500 focus:border-blue-500">
                             </div>
-                            <div>
+                            <div class="relative">
                                 <label for="epg-ai-model" class="block text-sm font-medium text-gray-400 mb-2">Model</label>
-                                <input type="text" id="epg-ai-model" list="epg-ai-models" autocomplete="off"
-                                    placeholder="Search OpenRouter models..."
+                                <input type="text" id="epg-ai-model" autocomplete="off" role="combobox" aria-expanded="false"
+                                    aria-controls="epg-ai-models" aria-autocomplete="list" placeholder="Search OpenRouter models..."
                                     class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-white focus:ring-blue-500 focus:border-blue-500">
-                                <datalist id="epg-ai-models"></datalist>
+                                <div id="epg-ai-models" class="menu model-menu hidden" role="listbox" aria-label="OpenRouter models"></div>
                             </div>
                         </div>
                         <div class="flex flex-wrap items-center gap-3 mt-4">
