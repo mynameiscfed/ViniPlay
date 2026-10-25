@@ -497,7 +497,7 @@ input:checked+.slider:before {
 
 .pill-live {
     background: var(--pk);
-    color: #1A0610;
+    color: var(--on-pk);
 }
 
 .pill-cy {
@@ -691,6 +691,11 @@ input:checked+.slider:before {
     background-color: var(--scrim);
     -webkit-backdrop-filter: blur(6px);
     backdrop-filter: blur(6px);
+}
+
+/* Dialogs sit above the phone tab bar (130) and the "More" sheet (150). */
+body>div[id$="-modal"] {
+    z-index: 150;
 }
 
 body.modal-open {

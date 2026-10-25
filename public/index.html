@@ -35,11 +35,12 @@
     <link rel="preload" href="/fonts/figtree-latin.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="preload" href="/fonts/bricolage-grotesque-latin.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="stylesheet" href="/css/fonts.css?v=1">
-    <link rel="stylesheet" href="/css/tokens.css?v=1">
+    <link rel="stylesheet" href="/css/tokens.css?v=2">
     <link rel="stylesheet" href="/css/tailwind.css?v=1">
-    <link rel="stylesheet" href="/css/base.css?v=1">
-    <link rel="stylesheet" href="/css/shell.css?v=1">
-    <link rel="stylesheet" href="/css/legacy.css?v=1">
+    <link rel="stylesheet" href="/css/base.css?v=2">
+    <link rel="stylesheet" href="/css/shell.css?v=2">
+    <link rel="stylesheet" href="/css/guide.css?v=1">
+    <link rel="stylesheet" href="/css/legacy.css?v=2">
     <link rel="stylesheet" href="/css/tv.css?v=1">
 
     <script src="https://cdn.jsdelivr.net/npm/mpegts.js/dist/mpegts.js"></script>
@@ -133,7 +134,7 @@
                 <span class="grow"></span>
                 <button id="header-search-btn" type="button" class="search" aria-label="Search">
                     <span data-icon="search"></span>
-                    <span class="search-label">Search channels, shows, movies</span>
+                    <span class="search-label">Search channels and shows</span>
                     <kbd>/</kbd>
                 </button>
                 <button id="tab-notifications" type="button" class="ib" aria-label="Reminders" title="Reminders">
@@ -182,37 +183,46 @@
 
             <!-- TV Guide Page -->
             <div id="page-guide" class="flex flex-grow flex-col overflow-hidden">
-                <div id="unified-guide-header"
-                    class="relative flex-shrink-0 bg-gray-800 p-2 sm:p-4 border-b border-gray-700 flex flex-col sm:flex-row items-stretch sm:items-center sm:justify-between gap-3 z-40">
-                    <div class="flex items-center gap-2 sm:gap-3 date-nav-controls">
-                        <span id="guide-date-display" class="text-base sm:text-lg font-semibold text-white"></span>
-                        <label for="guide-date-picker"
-                            class="bg-gray-700 hover:bg-gray-600 border border-gray-600 rounded-md p-2 cursor-pointer transition-colors"
-                            title="Jump to date">
-                            <span data-icon="calendar"></span>
-                        </label>
-                        <input type="date" id="guide-date-picker" class="hidden">
+                <div id="unified-guide-header" class="guide-bar">
+                    <select id="source-filter" aria-label="Playlist" class="chip"></select>
+                    <div id="group-chips" class="chips" role="group" aria-label="Quick filters">
+                        <button type="button" class="chip" data-group="all">All</button>
+                        <button type="button" class="chip" data-group="favorites"><span data-icon="star"></span>Favorites</button>
+                        <button type="button" class="chip" data-group="recents">Recents</button>
                     </div>
-
-                    <div
-                        class="relative w-full sm:w-auto flex flex-wrap sm:flex-nowrap sm:items-center sm:justify-end gap-2 filter-search-controls">
-                        <select id="source-filter" aria-label="Playlist"
-                            class="flex-1 min-w-0 sm:flex-none sm:w-48 bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm text-white focus:ring-blue-500 focus:border-blue-500"></select>
-                        <select id="group-filter" aria-label="Group"
-                            class="flex-1 min-w-0 sm:flex-none sm:w-64 bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm text-white focus:ring-blue-500 focus:border-blue-500 disabled:opacity-60"></select>
-                        <input type="search" id="search-input" placeholder="Search channels &amp; shows..."
-                            autocomplete="off"
-                            class="basis-full sm:basis-auto bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-sm text-white focus:ring-blue-500 focus:border-blue-500 sm:w-56">
+                    <select id="group-filter" aria-label="Group" class="chip"></select>
+                    <div class="guide-tools">
+                        <div class="seg" role="group" aria-label="View">
+                            <button id="guide-view-list" type="button" aria-label="List view"><span data-icon="list"></span></button>
+                            <button id="guide-view-grid" type="button" aria-label="Grid view"><span data-icon="grid"></span></button>
+                        </div>
+                        <button id="guide-date-btn" type="button" class="chip" title="Jump to date"><span data-icon="calendar"></span><span id="guide-date-display"></span></button>
+                        <input type="date" id="guide-date-picker" class="sr-only" tabindex="-1" aria-label="Date">
                     </div>
                 </div>
-                <div id="guide-search-status"
-                    class="hidden flex-shrink-0 bg-gray-800/80 border-b border-gray-700 px-3 sm:px-4 py-1.5 flex items-center justify-between gap-3 text-xs sm:text-sm text-gray-300">
+
+                <section id="guide-preview" class="gp hidden" aria-live="polite">
+                    <div id="gp-art" class="gp-art"></div>
+                    <div class="gp-main">
+                        <div class="gp-meta"><span id="gp-chno" class="mono"></span><span id="gp-channel"></span><span id="gp-tags" class="mono"></span></div>
+                        <h2 id="gp-title" class="gp-title"></h2>
+                        <div class="gp-line"><span id="gp-time"></span><span class="gp-bar"><i id="gp-bar-fill"></i></span><span id="gp-left"></span></div>
+                        <p id="gp-desc" class="gp-desc"></p>
+                        <div class="gp-actions">
+                            <button id="gp-watch" type="button" class="btn btn-primary"><span data-icon="play"></span>Watch live</button>
+                            <button id="gp-more" type="button" class="btn">Details</button>
+                            <button id="gp-fav" type="button" class="btn btn-icon" aria-label="Favorite"><span data-icon="star" class="favorite-star"></span></button>
+                        </div>
+                    </div>
+                    <div class="gp-next"><div class="eyebrow">Next on this channel</div><div id="gp-next-list"></div></div>
+                </section>
+
+                <div id="guide-search-status" class="hidden guide-status">
                     <span id="guide-search-status-text" class="min-w-0 truncate"></span>
-                    <button type="button" id="guide-search-clear-btn"
-                        class="flex-shrink-0 text-blue-400 hover:text-blue-300 font-semibold">Clear search</button>
+                    <button type="button" id="guide-search-clear-btn" class="btn btn-sm btn-ghost">Clear search</button>
                 </div>
 
-                <div id="guide-container" class="flex-grow bg-gray-900 overflow-auto relative custom-scrollbar">
+                <div id="guide-container" class="flex-grow overflow-auto relative custom-scrollbar" data-scroll-owner>
                     <div id="guide-placeholder" class="absolute inset-0 flex items-center justify-center z-40">
                         <div id="initial-loading-indicator" class="text-center text-gray-400">
                             <div class="loader mx-auto"></div>
@@ -230,16 +240,12 @@
                         </div>
                     </div>
                     <div id="guide-grid" class="h-full w-full">
-                        <div class="sticky-corner flex items-center justify-center p-2 sm:p-4">
-                            <div class="flex items-center gap-2">
-                                <button id="now-btn"
-                                    class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-3 rounded-md text-sm transition-colors">Now</button>
-                            </div>
+                        <div class="sticky-corner">
+                            <button id="now-btn" type="button" class="chip on">Now</button>
                             <div id="channel-column-resize-handle" class="channel-resize-handle"></div>
                         </div>
                         <div class="time-bar-cell"></div>
-                        <div id="now-line" class="absolute top-0 bg-red-500 w-0.5 z-30 pointer-events-none hidden">
-                        </div>
+                        <div id="now-line" class="hidden"><b></b></div>
                     </div>
                 </div>
             </div>
@@ -1266,6 +1272,22 @@
         </main>
         </div>
     </div>
+
+    <!-- Search palette: opened from the top bar or with "/" -->
+    <div id="search-palette" class="palette-wrap hidden" role="dialog" aria-label="Search">
+        <div id="search-palette-scrim" class="palette-scrim"></div>
+        <div class="palette">
+            <div class="palette-head">
+                <span data-icon="search"></span>
+                <input id="search-input" type="search" placeholder="Search channels and shows" autocomplete="off">
+                <button id="search-palette-close" type="button" class="ib" aria-label="Close search"><span data-icon="close"></span></button>
+            </div>
+            <div id="palette-results" class="palette-results"></div>
+        </div>
+    </div>
+
+    <!-- Channel number typed on the remote -->
+    <div id="num-entry" class="num-entry hidden" aria-live="polite"></div>
 
     <!-- Key hints (TV mode only) -->
     <div id="tv-hints" class="hints" aria-hidden="true">

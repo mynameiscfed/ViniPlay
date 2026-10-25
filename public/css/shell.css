@@ -216,7 +216,7 @@
     border: 2px solid var(--bg);
     border-radius: 1em;
     background: var(--pk);
-    color: #1A0610;
+    color: var(--on-pk);
     font: 800 .72em/1 var(--f-ui);
 }
 

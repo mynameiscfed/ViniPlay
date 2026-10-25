@@ -43,6 +43,7 @@ export const guideState = {
     channelGroups: new Set(),
     channelSources: new Set(), // For the source filter
     visibleChannels: [],
+    view: null, // 'list' (now and next) or 'grid' (timeline); set from the device in guide.js
     scrollHandler: null, // Holds the reference to the throttled scroll handler for virtualization
     userNotifications: [], // Stores active program notifications for the current user
 };

@@ -38,6 +38,8 @@
   --c-rd: 255 90 82;
   /* Text colour on a solid accent fill. */
   --c-on: 6 18 26;
+  /* Text colour on a solid pink (live) fill. */
+  --on-pk: #1A0610;
 
   --tint-cy: rgba(46, 211, 230, .14);
   --tint-pk: rgba(255, 79, 155, .17);
@@ -129,6 +131,7 @@
     --c-gr: 11 112 72;
     --c-rd: 180 42 36;
     --c-on: 255 255 255;
+    --on-pk: #fff;
 
     --tint-cy: rgba(8, 105, 124, .1);
     --tint-pk: rgba(176, 20, 88, .1);
@@ -219,6 +222,7 @@
   --c-gr: 11 112 72;
   --c-rd: 180 42 36;
   --c-on: 255 255 255;
+  --on-pk: #fff;
 
   --tint-cy: rgba(8, 105, 124, .1);
   --tint-pk: rgba(176, 20, 88, .1);

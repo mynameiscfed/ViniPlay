@@ -45,6 +45,12 @@ export function pickNeighbour(cur, dir, within = scope()) {
     for (const el of within.querySelectorAll(FOCUSABLE)) {
         if (el === cur || el.contains(cur) || cur.contains(el) || !visible(el)) continue;
         const b = el.getBoundingClientRect();
+        // Something scrolled out of its own scroller (the guide) is not on screen, so the arrows skip it.
+        const scroller = el.closest('[data-scroll-owner]');
+        if (scroller && scroller !== cur.closest('[data-scroll-owner]')) {
+            const r = scroller.getBoundingClientRect();
+            if (b.right < r.left || b.left > r.right || b.bottom < r.top || b.top > r.bottom) continue;
+        }
         const bx = (b.left + b.right) / 2, by = (b.top + b.bottom) / 2;
         const horizontal = dir === 'left' || dir === 'right';
         const ahead = dir === 'right' ? bx > ax + 1 : dir === 'left' ? bx < ax - 1 : dir === 'down' ? by > ay + 1 : by < ay - 1;
@@ -91,6 +97,27 @@ function goBack() {
 
 let goPending = 0;
 
+let digitHandler = null;
+let digits = '';
+let digitTimer = 0;
+
+/** Registers what to do with a number typed on the remote (after a short pause). */
+export const setDigitHandler = (fn) => { digitHandler = fn; };
+
+function pushDigit(d) {
+    const box = document.getElementById('num-entry');
+    digits = (digits + d).slice(-4);
+    box.textContent = digits;
+    box.classList.remove('hidden');
+    clearTimeout(digitTimer);
+    digitTimer = setTimeout(() => {
+        const typed = digits;
+        digits = '';
+        box.classList.add('hidden');
+        digitHandler(typed);
+    }, 1400);
+}
+
 function onKeyDown(e) {
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     const target = e.target;
@@ -99,7 +126,7 @@ function onKeyDown(e) {
     const isBack = BACK_KEYS.has(e.key) || e.keyCode === 10009 || (e.key === 'Backspace' && !typing(target) && !target.isContentEditable);
     if (isBack) {
         root.classList.add('kb');
-        if (typing(target) && e.key === 'Escape') { target.blur(); e.preventDefault(); return; }
+        if (typing(target) && e.key === 'Escape' && !target.closest('#search-palette')) { target.blur(); e.preventDefault(); return; }
         if (e.key === 'Escape' && document.fullscreenElement) return; // let the browser leave fullscreen
         if (goBack()) e.preventDefault();
         return;
@@ -124,6 +151,14 @@ function onKeyDown(e) {
     }
 
     if (e.key === 'Tab') { root.classList.add('kb'); return; }
+
+    // Digits: the page that registered a handler decides what a typed number means (a channel).
+    if (digitHandler && /^\d$/.test(e.key) && scope() === document) {
+        e.preventDefault();
+        root.classList.add('kb');
+        pushDigit(e.key);
+        return;
+    }
 
     if (e.key === 'Enter' && target.matches?.('[tabindex]:not(button):not(a):not(input)')) {
         root.classList.add('kb');

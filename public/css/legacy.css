@@ -39,15 +39,6 @@
         }
 
         /* Kept for backward compatibility, will be removed by HTML */
-        .programme-item {
-            border-left: 3px solid var(--cy);
-            transition: all 0.2s;
-        }
-
-        .programme-item:hover {
-            background-color: rgb(var(--g-700));
-            cursor: pointer;
-        }
 
         html,
         body {
@@ -56,71 +47,6 @@
         }
 
         /* Ensure body doesn't scroll, let inner divs handle it */
-        .favorite-star {
-            transition: all 0.2s;
-        }
-
-        .favorite-star.favorited {
-            color: var(--am);
-            transform: scale(1.2);
-        }
-
-        .programme-progress {
-            position: absolute;
-            top: 0;
-            left: 0;
-            bottom: 0;
-            background-color: rgb(var(--c-cy) / 0.3);
-            border-radius: 2px 0 0 2px;
-            pointer-events: none;
-            transition: width 0.3s linear;
-        }
-
-        .programme-item.past {
-            background-color: rgb(var(--g-700));
-            border-left-color: var(--tx3);
-            opacity: 0.6;
-        }
-
-        .programme-item.live {
-            border-left: 4px solid var(--am);
-            background-color: rgb(var(--g-700));
-        }
-
-        .programme-item.live::after {
-            content: 'LIVE';
-            position: absolute;
-            top: 4px;
-            right: 4px;
-            background-color: var(--rd);
-            color: var(--tx);
-            padding: 1px 4px;
-            font-size: 0.65rem;
-            font-weight: 700;
-            border-radius: 4px;
-            z-index: 20;
-        }
-
-        .programme-item .prog-title {
-            font-size: 0.9rem;
-            font-weight: 600;
-        }
-
-        .programme-item .prog-time {
-            font-size: 0.75rem;
-        }
-
-        #group-filter,
-        #source-filter,
-        #search-input {
-            transition: all 0.2s ease;
-        }
-
-        #group-filter:hover,
-        #source-filter:hover,
-        #search-input:hover {
-            background-color: rgb(var(--g-600));
-        }
 
         body.modal-open {
             overflow: hidden;
@@ -198,32 +124,6 @@
             overflow-y: auto;
         }
 
-        .programme-item.highlighted-search {
-            outline: 3px solid var(--am);
-            box-shadow: 0 0 15px rgb(var(--c-am) / 0.5), inset 0 0 0 2px var(--am);
-            z-index: 15;
-            transition: all 0.3s ease-out;
-            transform: scale(1.02);
-        }
-
-        .programme-item.search-match {
-            box-shadow: inset 0 0 0 2px var(--am);
-            background-color: #3f3a1d;
-        }
-
-        .channel-name {
-            display: -webkit-box;
-            -webkit-box-orient: vertical;
-            -webkit-line-clamp: 3;
-            line-clamp: 3;
-            overflow: hidden;
-            overflow-wrap: anywhere;
-            word-break: break-word;
-            white-space: normal;
-            font-size: 0.8125rem;
-            line-height: 1.1rem;
-        }
-
         .search-results-header {
             padding: 0.5rem 0.75rem;
             background-color: rgb(var(--g-700));
@@ -290,214 +190,7 @@
             transform: translateX(16px);
         }
 
-        .source-badge {
-            font-size: 0.6rem;
-            font-weight: 700;
-            padding: 2px 6px;
-            border-radius: 10px;
-            margin-left: 8px;
-            flex-shrink: 0;
-            text-transform: uppercase;
-        }
-
-        .source-badge {
-            font-size: 0.6rem;
-            font-weight: 700;
-            padding: 2px 6px;
-            border-radius: 10px;
-            flex-shrink: 0;
-            text-transform: uppercase;
-        }
-
-        .channel-info .source-badge {
-            margin-left: 0;
-            min-width: 0;
-            max-width: 100%;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
-
-        .chno-badge {
-            font-size: 0.65rem;
-            font-weight: 600;
-            padding: 2px 6px;
-            border-radius: 4px;
-            background-color: var(--cy);
-            color: var(--tx);
-            flex-shrink: 0;
-        }
-
         /* --- Guide Grid Styles for sticky headers --- */
-        #guide-container {
-            flex-grow: 1;
-            /* Make it fill available space */
-            background-color: var(--bg);
-            /* Match body background */
-            overflow: auto;
-            /* Handles both vertical and horizontal scrolling */
-            position: relative;
-            /* For the now-line's absolute positioning relative to scrolled content */
-        }
-
-        #guide-grid {
-            display: grid;
-            grid-template-columns: var(--channel-col-width, 180px) 1fr;
-            /* Sticky channel info, then scrollable timeline */
-            grid-auto-rows: min-content;
-            /* Rows size to content, important for first row sticky */
-            position: relative;
-            /* For now-line absolute positioning */
-            min-width: fit-content;
-            /* Ensure grid stretches to contain wide timeline */
-            height: fit-content;
-            /* Allow content to dictate height */
-        }
-
-        .sticky-corner {
-            position: sticky;
-            top: 0;
-            left: 0;
-            z-index: 45;
-            /* FIX: Increased z-index to be above all other headers */
-            background-color: var(--s2);
-            /* Match channel-info background */
-            height: 64px;
-            /* Explicit height, matches time-bar-cell */
-            width: var(--channel-col-width, 180px);
-            border-bottom: 1px solid rgb(var(--g-700));
-            border-right: 1px solid rgb(var(--g-700));
-            box-sizing: border-box;
-            display: flex;
-            flex-direction: column;
-            align-items: flex-start;
-            justify-content: center;
-            padding: 8px;
-        }
-
-        .channel-resize-handle {
-            position: absolute;
-            top: 0;
-            right: 0;
-            bottom: 0;
-            width: 8px;
-            cursor: ew-resize;
-            z-index: 35;
-        }
-
-        .channel-resize-handle::after {
-            content: '';
-            position: absolute;
-            display: block;
-            width: 2px;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            height: 60%;
-            background-color: rgb(var(--g-400));
-            opacity: 0.6;
-            border-radius: 1px;
-        }
-
-        .channel-resize-handle:hover::after {
-            opacity: 1;
-            background-color: var(--tx);
-        }
-
-        .time-bar-cell {
-            position: sticky;
-            top: 0;
-            left: 0;
-            /* Reset position */
-            z-index: 25;
-            background-color: var(--bg);
-            height: 64px;
-            display: flex;
-            align-items: center;
-            border-bottom: 1px solid rgb(var(--g-700));
-            box-sizing: border-box;
-            overflow: hidden;
-            grid-column: 2;
-            /* Explicitly place in second column */
-        }
-
-        .channel-info {
-            position: sticky;
-            left: 0;
-            z-index: 30;
-            background-color: var(--s2);
-            border-right: 1px solid rgb(var(--g-700));
-            box-sizing: border-box;
-            height: 96px;
-            width: var(--channel-col-width, 180px);
-        }
-
-        .timeline-row {
-            position: relative;
-            height: 96px;
-        }
-
-        #now-line {
-            position: absolute;
-            top: 0;
-            background-color: var(--rd);
-            width: 2px;
-            z-index: 28;
-            pointer-events: none;
-            transition: left 0.5s ease;
-            height: 100%;
-        }
-
-        @media (max-width: 767px) {
-            /* Keep channel names visible on mobile: the column stays narrow (see main.js),
-               so shrink the text and let it wrap onto more lines instead of hiding it. */
-            .channel-name {
-                font-size: 0.72rem;
-                line-height: 0.95rem;
-                -webkit-line-clamp: 4;
-                line-clamp: 4;
-            }
-
-            .channel-info .source-badge,
-            .channel-info .chno-badge {
-                font-size: 0.55rem;
-                padding: 1px 4px;
-            }
-
-            .channel-resize-handle {
-                display: none;
-            }
-        }
-
-        #unified-guide-header {
-            flex-shrink: 0;
-            padding: 0.5rem 1rem;
-            z-index: 35;
-        }
-
-        .programme-item.has-notification {
-            border-bottom: 3px solid var(--am);
-        }
-
-        .programme-item.has-recording.status-scheduled {
-            border-bottom: 3px solid var(--cy);
-        }
-
-        .programme-item.has-recording.status-recording {
-            border-bottom: 3px solid var(--rd);
-        }
-
-        .programme-item.has-recording.status-completed {
-            border-bottom: 3px solid var(--gr);
-        }
-
-        .programme-item.has-recording.status-error {
-            border-bottom: 3px solid var(--am);
-        }
-
-        .programme-item.has-recording.status-cancelled {
-            border-bottom: 3px solid var(--tx3);
-        }
 
         #page-multiview {
             background-color: var(--bg);
@@ -1162,7 +855,6 @@
             height: 0.875rem;
             fill: currentColor;
         }
-
 
         /* --- NEW: Immersive Mode Styles --- */
         #app-container.multiview-immersive #main-header,
