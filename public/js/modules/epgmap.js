@@ -12,12 +12,13 @@ import { escapeHtml } from './utils.js';
 import { ICONS } from './icons.js';
 
 const $ = (id) => document.getElementById(id);
-const OVERSCAN = 8; // rows drawn above and below the visible window, as in the guide
+const PAGE_SIZES = [10, 25, 50];
 
 let filter = 'none'; // 'none' (no guide data) | 'suggested' | 'manual' | 'all'
-let rows = []; // the filtered, sorted list; only the rows in view are in the DOM
-let rowH = 0; // measured from the first drawn row; rows have a fixed height
-let lastRange = '';
+let rows = []; // the filtered, sorted list; only the current page is in the DOM
+let page = 0;
+let pageSize = 25;
+try { const n = Number(localStorage.getItem('viniplay.epgPageSize')); if (PAGE_SIZES.includes(n)) pageSize = n; } catch { /* storage blocked */ }
 let selected = new Set(); // channel ids picked for a bulk action
 let optionsKey = '';
 let suggestions = new Map(); // channel id -> {epgId, names, sample, confidence, confident, via, aiDisagreed?}
@@ -68,9 +69,9 @@ const rowHTML = (ch) => {
     const s = suggestions.get(ch.id);
     return `<tr data-id="${escapeHtml(ch.id)}">
         <td><input type="checkbox" data-act="select" aria-label="Select ${escapeHtml(ch.displayName)}"${selected.has(ch.id) ? ' checked' : ''}></td>
-        <td>${escapeHtml(ch.displayName)}<div class="text-xs text-gray-500">${escapeHtml(ch.group)} · ${escapeHtml(ch.source)}</div></td>
+        <td title="${escapeHtml(ch.displayName)}">${escapeHtml(ch.displayName)}<div class="text-xs text-gray-500">${escapeHtml(ch.group)} · ${escapeHtml(ch.source)}</div></td>
         <td>${guideCell(ch)}</td>
-        <td>${suggestionCell(s)}</td>
+        <td title="${s ? escapeHtml(s.names[0] || s.epgId) : ''}">${suggestionCell(s)}</td>
         <td class="text-right"><div class="flex items-center justify-end gap-3">
             ${s ? `<button class="action-btn" data-act="accept" title="Accept suggestion" aria-label="Accept suggestion">${ICONS.check}</button>
                    <button class="action-btn" data-act="reject" title="Dismiss suggestion" aria-label="Dismiss suggestion">${ICONS.close}</button>` : ''}
@@ -95,26 +96,20 @@ function fillFilterMenus() {
     grpSel.innerHTML = opts(groups, `All groups (${groups.size})`, groups.has(grp) ? grp : '');
 }
 
-// Draws only the rows in view plus a margin, with spacer rows standing in for the rest.
-function drawWindow(force = false) {
-    const box = $('epg-map-scroll'), tbody = $('epg-map-tbody');
-    if (!rows.length) {
-        lastRange = '';
-        tbody.innerHTML = '<tr><td colspan="5" class="text-center text-gray-500 py-4">No channels to show.</td></tr>';
-        return;
-    }
-    const h = rowH || 64;
-    const top = Math.max(0, box.scrollTop - tbody.offsetTop);
-    const start = Math.max(0, Math.floor(top / h) - OVERSCAN);
-    const end = Math.min(rows.length, Math.ceil((top + box.clientHeight) / h) + OVERSCAN);
-    if (!force && `${start}-${end}` === lastRange) return;
-    lastRange = `${start}-${end}`;
-    const spacer = (n) => (n ? `<tr aria-hidden="true" style="height:${n * h}px"><td colspan="5" style="padding:0;border:0"></td></tr>` : '');
-    tbody.innerHTML = spacer(start) + rows.slice(start, end).map(rowHTML).join('') + spacer(rows.length - end);
-    if (!rowH) {
-        rowH = tbody.querySelector('tr[data-id]')?.offsetHeight || 0;
-        if (rowH && rowH !== h) drawWindow(true);
-    }
+const pageRows = () => rows.slice(page * pageSize, (page + 1) * pageSize);
+
+// Draws one page of rows and the pager under the table.
+function drawPage() {
+    const pages = Math.max(1, Math.ceil(rows.length / pageSize));
+    page = Math.min(page, pages - 1); // accepting the last rows of the last page shrinks the list
+    $('epg-map-tbody').innerHTML = pageRows().map(rowHTML).join('')
+        || '<tr><td colspan="5" class="text-center text-gray-500 py-4">No channels to show.</td></tr>';
+    const first = page * pageSize;
+    $('epg-map-range').textContent = rows.length
+        ? `${first + 1}–${Math.min(first + pageSize, rows.length)} of ${rows.length} · page ${page + 1} of ${pages}` : '';
+    $('epg-map-prev').disabled = page === 0;
+    $('epg-map-next').disabled = page >= pages - 1;
+    $('epg-map-size').value = String(pageSize);
 }
 
 function renderBulkBar() {
@@ -128,8 +123,9 @@ function renderBulkBar() {
     set('reject', 'Dismiss suggestions', withSug);
     set('clear', 'Remove assignments', withOverride);
     const all = $('epg-map-all');
-    all.checked = rows.length > 0 && rows.every((ch) => selected.has(ch.id));
-    all.indeterminate = !all.checked && rows.some((ch) => selected.has(ch.id));
+    const shown = pageRows();
+    all.checked = shown.length > 0 && shown.every((ch) => selected.has(ch.id));
+    all.indeterminate = !all.checked && shown.some((ch) => selected.has(ch.id));
 }
 
 export function renderEpgMap() {
@@ -138,8 +134,10 @@ export function renderEpgMap() {
     // Most-actionable rows first: strongest suggestion at the top, channels with nothing last.
     rows = matching().sort((a, b) => (suggestions.get(b.id)?.confidence ?? -1) - (suggestions.get(a.id)?.confidence ?? -1));
     const without = guideState.channels.filter((ch) => status(ch) === 'none').length;
-    drawWindow(true);
-    $('epg-map-summary').textContent = `${without} of ${guideState.channels.length} channels have no guide data · ${suggestions.size} suggestions · showing ${rows.length}`;
+    drawPage();
+    const saving = savingCount();
+    $('epg-map-summary').textContent = `${without} of ${guideState.channels.length} channels have no guide data · ${suggestions.size} suggestions · showing ${rows.length}`
+        + (saving ? ` · saving ${saving} change${saving === 1 ? '' : 's'}, the guide updates in the background` : '');
     document.querySelectorAll('[data-epg-filter]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.epgFilter === filter)));
     document.querySelectorAll('[data-epg-count]').forEach((n) => {
         n.textContent = guideState.channels.filter((ch) => inFilter(ch, n.dataset.epgCount)).length;
@@ -147,6 +145,8 @@ export function renderEpgMap() {
     const bulk = [...suggestions.values()].filter((s) => BULK.has(tierOf(s))).length;
     $('epg-map-accept-btn').classList.toggle('hidden', !bulk);
     $('epg-map-accept-btn').textContent = `Accept all (${bulk})`;
+    $('epg-map-reset-btn').classList.toggle('hidden', !suggestions.size);
+    $('epg-map-reset-btn').textContent = `Dismiss all suggestions (${suggestions.size})`;
     renderBulkBar();
 }
 
@@ -160,20 +160,45 @@ async function hydrateSuggestions() {
     return true;
 }
 
-/** Saves the change on the server, which re-merges the guides; then reloads the programmes so the guide shows them. */
-async function apply(set, clear = []) {
+// Changes show at once and are sent in one batch shortly after: the server re-merges the whole guide
+// on every save, which can take minutes on a big guide, so clicks must never wait on it.
+let queued = { set: {}, clear: new Set() };
+let flushTimer = null;
+let inFlight = 0;
+const savingCount = () => Object.keys(queued.set).length + queued.clear.size + inFlight;
+
+function apply(set, clear = []) {
+    const ov = { ...overrides(), ...set };
+    clear.forEach((id) => delete ov[id]);
+    guideState.settings.epgOverrides = ov;
+    Object.entries(set).forEach(([id, epgId]) => { queued.set[id] = epgId; queued.clear.delete(id); suggestions.delete(id); });
+    clear.forEach((id) => { delete queued.set[id]; queued.clear.add(id); });
+    selected.clear();
+    renderEpgMap();
+    clearTimeout(flushTimer);
+    flushTimer = setTimeout(flush, 800);
+}
+
+async function flush() {
+    const set = queued.set, clear = [...queued.clear];
+    if (!Object.keys(set).length && !clear.length) return;
+    queued = { set: {}, clear: new Set() };
+    const n = Object.keys(set).length + clear.length;
+    inFlight += n;
+    renderEpgMap();
     const res = await apiFetch('/api/epg/overrides', {
         method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ set, clear }),
     });
-    if (!res) return false;
-    guideState.settings.epgOverrides = (await res.json()).epgOverrides;
+    inFlight -= n;
+    if (savingCount()) return renderEpgMap(); // more changes queued meanwhile: refresh once they land
     const config = await fetchConfig();
-    if (config) guideState.programs = config.epgContent || {};
-    Object.keys(set).forEach((id) => suggestions.delete(id));
-    selected.clear();
-    showNotification('Guide data updated.');
+    if (config) {
+        guideState.programs = config.epgContent || {};
+        // A failed save leaves the server as it was: take its assignments and suggestions back.
+        if (!res) { guideState.settings.epgOverrides = config.settings.epgOverrides || {}; await hydrateSuggestions(); }
+    }
+    showNotification(res ? 'Guide data updated.' : 'Could not save the guide changes. They were undone.', !res);
     renderEpgMap();
-    return true;
 }
 
 // Re-merging a big guide takes a while: keep the controls from piling up requests meanwhile.
@@ -259,7 +284,16 @@ export function setupEpgMap() {
     const debounced = (fn) => () => { clearTimeout(timer); timer = setTimeout(fn, 250); };
 
     // A new filter starts a new list: drop the old selection so a bulk action never hits rows you cannot see.
-    const refilter = () => { selected.clear(); $('epg-map-scroll').scrollTop = 0; renderEpgMap(); };
+    const refilter = () => { selected.clear(); page = 0; renderEpgMap(); };
+    // Likewise a new page is a new batch.
+    const turn = (to) => { selected.clear(); page = to; renderEpgMap(); };
+    $('epg-map-prev').addEventListener('click', () => turn(page - 1));
+    $('epg-map-next').addEventListener('click', () => turn(page + 1));
+    $('epg-map-size').addEventListener('change', (e) => {
+        pageSize = Number(e.target.value);
+        try { localStorage.setItem('viniplay.epgPageSize', String(pageSize)); } catch { /* storage blocked */ }
+        turn(0);
+    });
     document.querySelectorAll('[data-epg-filter]').forEach((b) => b.addEventListener('click', () => {
         filter = b.dataset.epgFilter;
         refilter();
@@ -267,24 +301,22 @@ export function setupEpgMap() {
     $('epg-map-search').addEventListener('input', debounced(refilter));
     $('epg-map-source').addEventListener('change', () => { $('epg-map-group').value = ''; refilter(); });
     $('epg-map-group').addEventListener('change', refilter);
-    let frame = 0;
-    $('epg-map-scroll').addEventListener('scroll', () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(() => drawWindow()); }, { passive: true });
 
     $('epg-map-all').addEventListener('change', (e) => {
-        if (e.target.checked) rows.forEach((ch) => selected.add(ch.id)); else selected.clear();
-        drawWindow(true);
+        if (e.target.checked) pageRows().forEach((ch) => selected.add(ch.id)); else selected.clear();
+        drawPage();
         renderBulkBar();
     });
     $('epg-map-bulk').addEventListener('click', (e) => {
         const act = e.target.closest('[data-bulk]')?.dataset.bulk;
         if (!act) return;
         const ids = [...selected];
-        if (act === 'none') { selected.clear(); drawWindow(true); return renderBulkBar(); }
+        if (act === 'none') { selected.clear(); drawPage(); return renderBulkBar(); }
         if (act === 'accept') {
             const set = {};
             ids.forEach((id) => { const s = suggestions.get(id); if (s) set[id] = s.epgId; });
             const n = Object.keys(set).length;
-            showConfirm('Accept selected suggestions?', `Assign the suggested guide data to ${n} channel${n === 1 ? '' : 's'}.`, () => whileBusy(() => apply(set)));
+            showConfirm('Accept selected suggestions?', `Assign the suggested guide data to ${n} channel${n === 1 ? '' : 's'}.`, () => apply(set));
         } else if (act === 'reject') {
             const channelIds = ids.filter((id) => suggestions.has(id));
             channelIds.forEach((id) => suggestions.delete(id));
@@ -293,10 +325,20 @@ export function setupEpgMap() {
             renderEpgMap();
         } else if (act === 'clear') {
             const clear = ids.filter((id) => overrides()[id]);
-            showConfirm('Remove assignments?', `Remove the hand-picked guide data from ${clear.length} channel${clear.length === 1 ? '' : 's'}.`, () => whileBusy(() => apply({}, clear)));
+            showConfirm('Remove assignments?', `Remove the hand-picked guide data from ${clear.length} channel${clear.length === 1 ? '' : 's'}.`, () => apply({}, clear));
         }
     });
     $('epg-map-auto-btn').addEventListener('click', suggest);
+    $('epg-map-reset-btn').addEventListener('click', () => showConfirm('Dismiss all suggestions?',
+        `All ${suggestions.size} suggestions are removed; channels you already assigned keep their guide data. Then tick Also ask AI and press Suggest matches to match every channel again from scratch.`,
+        () => whileBusy(async () => {
+            const res = await apiFetch('/api/epg/suggest', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ all: true }) });
+            if (!res) return;
+            suggestions.clear();
+            selected.clear();
+            showNotification('Suggestions cleared. Ready to match again.');
+            renderEpgMap();
+        })));
     $('epg-map-accept-btn').addEventListener('click', () => {
         const set = {};
         suggestions.forEach((s, id) => { if (BULK.has(tierOf(s))) set[id] = s.epgId; });
@@ -305,7 +347,7 @@ export function setupEpgMap() {
         const by = { exact: 0, likely: 0, ai: 0 };
         Object.keys(set).forEach((id) => { by[tierOf(suggestions.get(id))]++; });
         const parts = [`${by.exact} exact`, `${by.likely} likely`]; if (by.ai) parts.push(`${by.ai} AI`);
-        showConfirm('Accept all suggestions?', `Permanently assign guide data to ${n} channels (${parts.join(', ')}). Check the list first: there is no undo.`, () => whileBusy(() => apply(set)));
+        showConfirm('Accept all suggestions?', `Permanently assign guide data to ${n} channels (${parts.join(', ')}). Check the list first: there is no undo.`, () => apply(set));
     });
 
     $('epg-map-tbody').addEventListener('click', (e) => {
@@ -323,8 +365,8 @@ export function setupEpgMap() {
             fetch('/api/epg/suggest', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ channelIds: [ch.id] }) });
             renderEpgMap();
         }
-        else if (btn.dataset.act === 'accept') whileBusy(() => apply({ [ch.id]: s.epgId }));
-        else if (btn.dataset.act === 'clear') whileBusy(() => apply({}, [ch.id]));
+        else if (btn.dataset.act === 'accept') apply({ [ch.id]: s.epgId });
+        else if (btn.dataset.act === 'clear') apply({}, [ch.id]);
     });
 
     $('epg-assign-search').addEventListener('input', debounced(searchGuideChannels));
@@ -334,7 +376,7 @@ export function setupEpgMap() {
         if (!pick || !assigning) return;
         const channel = assigning;
         closeModal($('epg-assign-modal'));
-        whileBusy(() => apply({ [channel.id]: pick.dataset.epgId }));
+        apply({ [channel.id]: pick.dataset.epgId });
     });
 
     // Restore persisted suggestions from before the refresh, then draw.

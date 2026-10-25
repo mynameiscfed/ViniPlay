@@ -75,6 +75,7 @@ test('model search needs every word and caps the result', () => {
     assert.strictEqual(searchModels(list, 'FLASH vendor').length, 50);
     assert.deepStrictEqual(searchModels(list, 'x pro').map((m) => m.id), ['x/pro']);
     assert.strictEqual(searchModels(list, '').length, 50);
+    assert.strictEqual(searchModels(list, '', Infinity).length, 81); // ?all=1 sends the whole list
     assert.deepStrictEqual(searchModels(list, 'nothing like it'), []);
 });
 

@@ -58,21 +58,87 @@ async function test() {
     else status(`Test failed: ${body.error || res.statusText}`, true);
 }
 
+// The whole list is fetched once and searched here, so typing filters instantly.
+let models = null;
+let shown = [];
+let active = -1;
+let typed = false; // opening shows every model; typing narrows the list
+
 async function loadModels() {
-    const res = await fetch(`/api/epg/ai/models?q=${encodeURIComponent($('epg-ai-model').value.trim())}`);
+    if (models) return true;
+    const res = await fetch('/api/epg/ai/models?all=1');
     const body = await res.json().catch(() => null);
-    if (!res.ok) return status(body?.error || "Couldn't load OpenRouter's model list. You can still type a model name.", true);
-    $('epg-ai-models').innerHTML = body.map((m) => {
-        const price = m.promptPerM === null ? '' : m.promptPerM === 0 ? ' - free' : ` - $${m.promptPerM}/M input`;
-        return `<option value="${escapeHtml(m.id)}" label="${escapeHtml(m.name + price)}"></option>`;
-    }).join('');
+    if (!res.ok || !Array.isArray(body)) {
+        status(body?.error || "Couldn't load OpenRouter's model list. You can still type a model name.", true);
+        return false;
+    }
+    models = body;
+    return true;
+}
+
+const price = (m) => (m.promptPerM === null ? '' : m.promptPerM === 0 ? 'Free' : `$${m.promptPerM}/M input`);
+
+function drawMenu() {
+    const words = $('epg-ai-model').value.toLowerCase().split(/\s+/).filter(Boolean);
+    const q = typed ? words : [];
+    shown = (models || []).filter((m) => q.every((w) => `${m.id} ${m.name}`.toLowerCase().includes(w)));
+    active = Math.min(active, shown.length - 1);
+    $('epg-ai-models').innerHTML = `<div class="count">${shown.length} of ${models?.length || 0} models</div>` + shown.map((m, i) => `
+        <div class="mi" role="option" id="epg-ai-model-${i}" data-model="${escapeHtml(m.id)}" aria-selected="${i === active}">
+            <span>${escapeHtml(m.name)}</span><small>${escapeHtml(m.id)}${price(m) ? ` · ${price(m)}` : ''}</small>
+        </div>`).join('');
+    $('epg-ai-model').setAttribute('aria-activedescendant', active >= 0 ? `epg-ai-model-${active}` : '');
+}
+
+function openMenu(open) {
+    $('epg-ai-models').classList.toggle('hidden', !open);
+    $('epg-ai-model').setAttribute('aria-expanded', String(open));
+}
+
+async function showMenu() {
+    if (!(await loadModels())) return;
+    if (!$('epg-ai-models').classList.contains('hidden')) return;
+    typed = false;
+    active = models.findIndex((m) => m.id === $('epg-ai-model').value.trim()); // start on the current model
+    drawMenu();
+    openMenu(true);
+    document.getElementById(`epg-ai-model-${active}`)?.scrollIntoView({ block: 'nearest' });
+}
+
+function pick(id) {
+    $('epg-ai-model').value = id;
+    openMenu(false);
 }
 
 export function setupEpgAi() {
     if (!$('epg-ai-key')) return;
-    let timer;
-    $('epg-ai-model').addEventListener('focus', loadModels);
-    $('epg-ai-model').addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(loadModels, 250); });
+    const input = $('epg-ai-model'), menu = $('epg-ai-models');
+    input.addEventListener('focus', showMenu);
+    input.addEventListener('click', showMenu);
+    input.addEventListener('input', () => { typed = true; active = -1; drawMenu(); openMenu(!!models); });
+    input.addEventListener('keydown', (e) => {
+        if (menu.classList.contains('hidden')) return;
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+            e.preventDefault();
+            active = Math.max(0, Math.min(shown.length - 1, active + (e.key === 'ArrowDown' ? 1 : -1)));
+            drawMenu();
+            document.getElementById(`epg-ai-model-${active}`)?.scrollIntoView({ block: 'nearest' });
+        } else if (e.key === 'Enter' && shown[active]) {
+            e.preventDefault();
+            pick(shown[active].id);
+        } else if (e.key === 'Escape') {
+            e.preventDefault();
+            e.stopPropagation();
+            openMenu(false);
+        }
+    });
+    // mousedown so the pick lands before the field loses focus
+    menu.addEventListener('mousedown', (e) => {
+        const opt = e.target.closest('[data-model]');
+        e.preventDefault();
+        if (opt) pick(opt.dataset.model);
+    });
+    input.addEventListener('blur', () => openMenu(false));
     $('epg-ai-save-btn').addEventListener('click', async () => { if (await save()) { status(''); showNotification('AI settings saved.'); } });
     $('epg-ai-test-btn').addEventListener('click', test);
     $('epg-ai-clear-btn').addEventListener('click', () => showConfirm('Remove key?',
