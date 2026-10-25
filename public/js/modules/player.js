@@ -5,13 +5,14 @@
 
 import { appState, guideState, UIElements } from './state.js';
 // MODIFIED: Added stopStream and sendRedirectHeartbeat to the import
-import { saveUserSetting, stopStream, startRedirectStream, stopRedirectStream, sendRedirectHeartbeat, saveWatchProgressApi, getWatchProgress, deleteWatchProgress } from './api.js';
-import { showNotification, openModal, closeModal } from './ui.js';
+import { apiFetch, saveUserSetting, stopStream, startRedirectStream, stopRedirectStream, sendRedirectHeartbeat, saveWatchProgressApi, getWatchProgress, deleteWatchProgress, fetchSeriesDetails } from './api.js';
+import { showNotification, openModal, closeModal, showConfirm } from './ui.js';
 import { castState, loadMedia, setLocalPlayerState } from './cast.js';
 import { logToPlayerConsole } from './player_direct.js';
 import { ICONS } from './icons.js'; // NEW: Import ICONS
 import { getCodecName } from './codecs.js'; // NEW: Import codec utility
 import { sendTelemetry, tracePlayerAction } from './telemetry.js';
+import { nowNext, escapeHtml } from './utils.js';
 
 let streamInfoInterval = null; // Interval to update stream stats
 let currentLocalStreamUrl = null; // ADDED: Track the original URL of the currently playing local stream
@@ -34,6 +35,16 @@ let currentChannelInfo = null; // Stores { url, name, channelId, logo } for retr
 let retryCount = 0;
 const MAX_RETRIES = 3;
 let retryTimeout = null;
+
+// --- Player extras ---
+let liveRewindUpdateInterval = null;
+let liveRewindHideTimeout = null;
+let sleepTimer = null;
+let currentRecordJob = null;
+let playerFallbackUsed = false;
+let currentEpisodeContext = null;
+let selectedAudioTrack = null;
+let currentStreamTracks = null;
 
 /**
  * Acquires a Web Lock to prevent Chromium from discarding the tab while media is playing.
@@ -153,6 +164,7 @@ export function setActiveMediaTracking(mediaInfo) {
 
     if (!mediaInfo || !mediaInfo.contentType || !mediaInfo.contentId) {
         currentActiveMedia = null;
+        currentEpisodeContext = null;
         if (progressSaveInterval) {
             clearInterval(progressSaveInterval);
             progressSaveInterval = null;
@@ -164,8 +176,20 @@ export function setActiveMediaTracking(mediaInfo) {
         contentType: mediaInfo.contentType,
         contentId: String(mediaInfo.contentId),
         title: mediaInfo.title || '',
-        duration: mediaInfo.duration || 0
+        duration: mediaInfo.duration || 0,
+        seriesId: mediaInfo.seriesId || null,
+        season: mediaInfo.season || null,
+        episode: mediaInfo.episode || null,
+        seriesTitle: mediaInfo.seriesTitle || '',
+        logo: mediaInfo.logo || ''
     };
+    currentEpisodeContext = mediaInfo.seriesId ? {
+        seriesId: String(mediaInfo.seriesId),
+        season: mediaInfo.season || null,
+        episode: mediaInfo.episode || null,
+        seriesTitle: mediaInfo.seriesTitle || '',
+        logo: mediaInfo.logo || ''
+    } : null;
     lastSavedProgressSec = -1;
 
     if (progressSaveInterval) clearInterval(progressSaveInterval);
@@ -217,6 +241,7 @@ export function flushWatchProgress() {
         }
     }
     currentActiveMedia = null;
+    currentEpisodeContext = null;
     if (progressSaveInterval) {
         clearInterval(progressSaveInterval);
         progressSaveInterval = null;
@@ -606,6 +631,14 @@ function updateFullscreenButtonState() {
  */
 function handleStreamError() {
     if (retryCount >= MAX_RETRIES) {
+        const fallbackId = guideState.settings.playerFallbackProfileId;
+        if (fallbackId && fallbackId !== currentProfileId && !playerFallbackUsed && currentChannelInfo) {
+            playerFallbackUsed = true;
+            retryCount = 0;
+            showNotification('Stream profile failed. Trying the fallback profile...', true, 3000);
+            playChannel(currentChannelInfo.url, currentChannelInfo.name, currentChannelInfo.channelId, currentChannelInfo.forceLive, fallbackId, true);
+            return;
+        }
         showNotification(`Stream failed after ${MAX_RETRIES} retries. Please try another channel.`, true, 5000);
         stopAndCleanupPlayer();
         return;
@@ -613,23 +646,18 @@ function handleStreamError() {
 
     retryCount++;
     showNotification(`Stream interrupted. Retrying... (${retryCount}/${MAX_RETRIES})`, true, 2000);
+    if (retryTimeout) clearTimeout(retryTimeout);
 
-    // Clear any previous timeout
-    if (retryTimeout) {
-        clearTimeout(retryTimeout);
-    }
-
-    // Attempt to restart after a short delay
     retryTimeout = setTimeout(() => {
+        retryTimeout = null;
         console.log(`[PLAYER_RETRY] Attempting to restart stream. Attempt ${retryCount}/${MAX_RETRIES}.`);
         if (currentChannelInfo) {
-            // Re-call playChannel which handles the full setup
-            playChannel(currentChannelInfo.url, currentChannelInfo.name, currentChannelInfo.channelId);
+            playChannel(currentChannelInfo.url, currentChannelInfo.name, currentChannelInfo.channelId, currentChannelInfo.forceLive, null, true);
         } else {
             console.error("[PLAYER_RETRY] Cannot retry: current channel info is missing.");
             stopAndCleanupPlayer();
         }
-    }, 2000); // 2-second delay before retrying
+    }, 2000);
 }
 
 
@@ -659,9 +687,13 @@ export async function forceRefreshStream() {
         appState.player.destroy();
         appState.player = null;
     }
+    if (appState.hlsPlayer) {
+        try { appState.hlsPlayer.destroy(); } catch (e) { }
+        appState.hlsPlayer = null;
+    }
 
     // Immediately try to play the channel again
-    playChannel(currentChannelInfo.url, currentChannelInfo.name, currentChannelInfo.channelId);
+    playChannel(currentChannelInfo.url, currentChannelInfo.name, currentChannelInfo.channelId, currentChannelInfo.forceLive);
 }
 
 
@@ -696,7 +728,28 @@ export const stopAndCleanupPlayer = async () => { // MODIFIED: Made function asy
         retryTimeout = null;
     }
     retryCount = 0;
+    playerFallbackUsed = false;
     currentChannelInfo = null;
+    currentRecordJob = null;
+    if (liveRewindUpdateInterval) {
+        clearInterval(liveRewindUpdateInterval);
+        liveRewindUpdateInterval = null;
+    }
+    if (liveRewindHideTimeout) {
+        clearTimeout(liveRewindHideTimeout);
+        liveRewindHideTimeout = null;
+    }
+    if (sleepTimer) {
+        clearTimeout(sleepTimer);
+        sleepTimer = null;
+    }
+    const recordBtn = document.getElementById('record-current-btn');
+    if (recordBtn) recordBtn.classList.add('hidden');
+    const liveEdgeBtn = document.getElementById('player-live-edge-btn');
+    if (liveEdgeBtn) liveEdgeBtn.classList.add('hidden');
+    document.getElementById('audio-track-btn')?.classList.add('hidden');
+    const overlay = document.getElementById('timeshift-controls-overlay');
+    if (overlay) overlay.classList.add('hidden');
     document.dispatchEvent(new CustomEvent('playerstop'));
 
 
@@ -820,6 +873,7 @@ export const stopAndCleanupPlayer = async () => { // MODIFIED: Made function asy
         UIElements.videoElement.style.opacity = '1';
         UIElements.videoElement.style.pointerEvents = 'auto';
         UIElements.videoElement.controls = true;
+        UIElements.videoElement.playbackRate = 1;
     }
 
     // NEW: Exit fullscreen if container was in fullscreen mode
@@ -869,127 +923,410 @@ function updateStreamInfo() {
 }
 
 
+function hidePlayerOverlays() {
+    document.getElementById('timeshift-controls-overlay')?.classList.add('hidden');
+    const vodOverlay = document.getElementById('vod-controls-overlay');
+    if (vodOverlay) {
+        vodOverlay.classList.add('hidden');
+        vodOverlay.style.opacity = '0';
+    }
+}
+
+function updateLiveButtons() {
+    const liveBtn = document.getElementById('player-live-edge-btn');
+    if (liveBtn) liveBtn.classList.toggle('hidden', !currentChannelInfo?.channelId);
+}
+
+export async function refreshPlayerRecordState() {
+    const btn = document.getElementById('record-current-btn');
+    if (!btn) return;
+    const canDvr = appState.currentUser?.isAdmin || appState.currentUser?.canUseDvr;
+    if (!canDvr || !currentChannelInfo?.channelId) {
+        btn.classList.add('hidden');
+        currentRecordJob = null;
+        return;
+    }
+    btn.classList.remove('hidden', 'text-red-500');
+    btn.classList.add('text-gray-400');
+    btn.title = 'Record current programme';
+    currentRecordJob = null;
+    try {
+        const res = await apiFetch('/api/dvr/jobs');
+        if (!res) return;
+        const jobs = await res.json();
+        const currentProgram = nowNext(currentChannelInfo.channelId).now;
+        currentRecordJob = jobs.find(job => {
+            if (String(job.channelId) !== String(currentChannelInfo.channelId)) return false;
+            if (job.status === 'recording' || job.status === 'reconnecting') return true;
+            if (job.status !== 'scheduled' || !currentProgram || !job.programStart) return false;
+            return Math.abs(Date.parse(job.programStart) - Date.parse(currentProgram.start)) < 60000;
+        }) || null;
+    } catch (e) {
+        console.warn('[PLAYER] Could not refresh recording state:', e);
+        return;
+    }
+    const recording = currentRecordJob && (currentRecordJob.status === 'recording' || currentRecordJob.status === 'reconnecting');
+    btn.classList.toggle('text-red-500', !!recording);
+    btn.classList.toggle('text-gray-400', !recording);
+    btn.title = recording ? 'Stop recording' : currentRecordJob ? 'Recording scheduled' : 'Record current programme';
+    const dot = btn.querySelector('[data-rec-state]');
+    if (dot) dot.textContent = recording ? 'REC' : currentRecordJob ? 'SCHED' : '';
+}
+
+async function scheduleCurrentChannel() {
+    if (!currentChannelInfo?.channelId) return;
+    const channel = guideState.channels.find(c => c.id === currentChannelInfo.channelId);
+    const current = nowNext(currentChannelInfo.channelId).now;
+    const body = current && Date.parse(current.stop) > Date.now()
+        ? {
+            channelId: currentChannelInfo.channelId,
+            channelName: channel?.displayName || channel?.name || currentChannelInfo.name,
+            programTitle: current.title,
+            programStart: current.start,
+            programStop: current.stop,
+        }
+        : {
+            channelId: currentChannelInfo.channelId,
+            channelName: channel?.displayName || channel?.name || currentChannelInfo.name,
+            programTitle: `${currentChannelInfo.name} (manual)`,
+            startTime: new Date().toISOString(),
+            endTime: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        };
+    const endpoint = current && Date.parse(current.stop) > Date.now() ? '/api/dvr/schedule' : '/api/dvr/schedule/manual';
+    const res = await apiFetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+    if (res) {
+        showNotification(current ? `Recording "${current.title}".` : 'Recording for 60 minutes.', false, 2500);
+        refreshPlayerRecordState();
+    }
+}
+
+async function toggleCurrentRecording() {
+    if (!currentRecordJob) return scheduleCurrentChannel();
+    showConfirm('Stop Recording?', 'Stop this recording and keep what has been captured so far?', async () => {
+        const endpoint = currentRecordJob.status === 'scheduled'
+            ? `/api/dvr/jobs/${currentRecordJob.id}`
+            : `/api/dvr/jobs/${currentRecordJob.id}/stop`;
+        const method = currentRecordJob.status === 'scheduled' ? 'DELETE' : 'POST';
+        if (await apiFetch(endpoint, { method })) {
+            showNotification('Recording stopped.');
+            refreshPlayerRecordState();
+        }
+    });
+}
+
+export function jumpToLive() {
+    const video = UIElements.videoElement;
+    if (!video || !currentChannelInfo?.channelId) return;
+    try {
+        if (video.seekable && video.seekable.length > 0) {
+            video.currentTime = Math.max(0, video.seekable.end(video.seekable.length - 1) - 0.5);
+            video.play().catch(() => {});
+        } else {
+            showNotification('Rejoining live...', false, 1500);
+            forceRefreshStream();
+        }
+    } catch (e) {
+        showNotification('Could not jump to live.', true);
+    }
+}
+
+function setupLiveRewindControls() {
+    const overlay = document.getElementById('timeshift-controls-overlay');
+    if (!overlay) return;
+    overlay.classList.remove('hidden');
+    overlay.style.opacity = '1';
+
+    const video = UIElements.videoElement;
+    const progressBar = document.getElementById('timeshift-progress-bar');
+    const currentTimeEl = document.getElementById('timeshift-current-time');
+    const totalTimeEl = document.getElementById('timeshift-total-time');
+    const liveEdgeBtn = document.getElementById('timeshift-live-edge-btn');
+    const liveDot = document.getElementById('timeshift-live-dot');
+    const playPauseBtn = document.getElementById('timeshift-play-pause-btn');
+    const rewind15Btn = document.getElementById('timeshift-rewind-15-btn');
+    const forward15Btn = document.getElementById('timeshift-forward-15-btn');
+    const container = UIElements.videoModalContainer || document.getElementById('video-modal-container');
+    let seeking = false;
+
+    const total = () => {
+        try {
+            return video.seekable.length ? video.seekable.end(video.seekable.length - 1) : 0;
+        } catch (e) {
+            return 0;
+        }
+    };
+    const showControls = () => {
+        overlay.style.opacity = '1';
+        if (liveRewindHideTimeout) clearTimeout(liveRewindHideTimeout);
+        liveRewindHideTimeout = setTimeout(() => {
+            if (!video.paused && !seeking) overlay.style.opacity = '0';
+        }, 3500);
+    };
+
+    if (progressBar) {
+        progressBar.oninput = (e) => {
+            seeking = true;
+            if (currentTimeEl) currentTimeEl.textContent = formatTimeSeconds(parseFloat(e.target.value));
+        };
+        progressBar.onchange = (e) => {
+            seeking = false;
+            video.currentTime = Math.max(0, parseFloat(e.target.value));
+        };
+    }
+    if (liveEdgeBtn) liveEdgeBtn.onclick = () => jumpToLive();
+    if (rewind15Btn) rewind15Btn.onclick = () => { video.currentTime = Math.max(0, video.currentTime - 15); };
+    if (forward15Btn) forward15Btn.onclick = () => { video.currentTime = Math.min(total(), video.currentTime + 15); };
+    if (playPauseBtn) playPauseBtn.onclick = () => { video.paused ? video.play().catch(() => {}) : video.pause(); };
+    if (container) {
+        container.onmousemove = showControls;
+        container.ontouchstart = showControls;
+    }
+    showControls();
+
+    if (liveRewindUpdateInterval) clearInterval(liveRewindUpdateInterval);
+    liveRewindUpdateInterval = setInterval(() => {
+        if (!currentChannelInfo?.channelId) return;
+        const end = total();
+        const current = video.currentTime || 0;
+        if (totalTimeEl) totalTimeEl.textContent = end ? formatTimeSeconds(end) : '--:--';
+        if (currentTimeEl && !seeking) currentTimeEl.textContent = formatTimeSeconds(current);
+        if (progressBar && !seeking && end > 0) {
+            progressBar.max = end;
+            progressBar.value = Math.min(end, current);
+        }
+        const nearLive = end > 5 && end - current < 8;
+        if (liveDot) liveDot.className = `w-2 h-2 rounded-full ${nearLive ? 'bg-white animate-pulse' : 'bg-gray-400'} inline-block`;
+        if (liveEdgeBtn) liveEdgeBtn.className = `ml-1 px-2.5 py-1 text-xs font-bold rounded-md ${nearLive ? 'bg-red-600 text-white' : 'bg-gray-700 text-gray-300'} transition-colors flex items-center gap-1.5 flex-shrink-0 cursor-pointer`;
+        if (playPauseBtn) playPauseBtn.innerHTML = video.paused ? ICONS.play : ICONS.pause;
+    }, 500);
+}
+
+async function playLiveRewind(url, name, channelId, logo, profileId) {
+    const streamUrl = `/api/livebuffer/${encodeURIComponent(channelId)}/stream.m3u8?_t=${Date.now()}`;
+    currentStreamUrlToPlay = streamUrl;
+    currentLocalStreamUrl = null;
+    currentProfileId = null;
+    if (appState.player) {
+        appState.player.destroy();
+        appState.player = null;
+    }
+    if (appState.hlsPlayer) {
+        try { appState.hlsPlayer.destroy(); } catch (e) { }
+        appState.hlsPlayer = null;
+    }
+    if (streamInfoInterval) {
+        clearInterval(streamInfoInterval);
+        streamInfoInterval = null;
+    }
+    // Casting cannot use the cookie-protected live-buffer URL, so keep a normal /stream URL for the Cast sender.
+    const settings = guideState.settings;
+    const profile = (settings.streamProfiles || []).find(p => p.id === profileId);
+    const castUrl = profile && profile.command !== 'redirect'
+        ? `/stream?url=${encodeURIComponent(url)}&profileId=${profileId}&userAgentId=${settings.activeUserAgentId}`
+        : url;
+    setLocalPlayerState(castUrl, name, logo, null, null);
+    UIElements.videoModal?.classList.remove('pip-active');
+    UIElements.videoTitle.textContent = name;
+    updateMediaSession(name, logo);
+    requestScreenWakeLock();
+    openModal(UIElements.videoModal);
+    UIElements.videoElement.controls = false;
+    document.getElementById('audio-track-btn')?.classList.add('hidden');
+    setupLiveRewindControls();
+    refreshPlayerRecordState();
+    updateLiveButtons();
+    setPrimaryPlayerButtons(true);
+
+    let fellBack = false;
+    const fallback = () => {
+        if (fellBack || !currentChannelInfo || String(currentChannelInfo.channelId) !== String(channelId)) return;
+        fellBack = true;
+        if (liveRewindUpdateInterval) {
+            clearInterval(liveRewindUpdateInterval);
+            liveRewindUpdateInterval = null;
+        }
+        document.getElementById('timeshift-controls-overlay')?.classList.add('hidden');
+        if (appState.hlsPlayer) {
+            try { appState.hlsPlayer.destroy(); } catch (e) { }
+            appState.hlsPlayer = null;
+        }
+        showNotification('Live rewind is unavailable. Playing live.', true, 3000);
+        UIElements.videoElement.controls = true;
+        playChannel(url, name, channelId, true, profileId);
+    };
+
+    if (window.Hls && Hls.isSupported()) {
+        try {
+            const hls = new Hls({
+                enableWorker: true,
+                lowLatencyMode: false,
+                backBufferLength: 300,
+                maxBufferLength: 60,
+                maxMaxBufferLength: 120,
+            });
+            appState.hlsPlayer = hls;
+            hls.loadSource(streamUrl);
+            hls.attachMedia(UIElements.videoElement);
+            hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                UIElements.videoElement.play().catch(e => console.warn('[LIVE_REWIND] Autoplay prevented:', e));
+            });
+            hls.on(Hls.Events.ERROR, (event, data) => {
+                if (data.fatal) {
+                    console.warn('[LIVE_REWIND] Playback error:', data.type, data.details);
+                    fallback();
+                }
+            });
+            return;
+        } catch (e) {
+            console.warn('[LIVE_REWIND] HLS setup failed:', e);
+            fallback();
+            return;
+        }
+    }
+    if (UIElements.videoElement.canPlayType('application/vnd.apple.mpegurl')) {
+        UIElements.videoElement.src = streamUrl;
+        UIElements.videoElement.addEventListener('error', fallback, { once: true });
+        UIElements.videoElement.play().catch(e => console.warn('[LIVE_REWIND] Autoplay prevented:', e));
+        return;
+    }
+    fallback();
+}
+
 /**
  * Initializes and starts playing a channel stream, either locally or on a Cast device.
  * @param {string} url - The URL of the channel stream.
  * @param {string} name - The name of the channel to display.
  * @param {string} channelId - The unique ID of the channel.
+ * @param {boolean} [forceLive=false] - Skip the rewind buffer and use the normal live path.
+ * @param {string|null} [profileOverride=null] - Optional profile for retry/fallback.
  */
-export const playChannel = (url, name, channelId) => {
+export const playChannel = async (url, name, channelId, forceLive = false, profileOverride = null, isRetry = false) => {
     // Unhide refresh button for live channel streams
     const refreshBtn = document.getElementById('refresh-stream-btn');
     if (refreshBtn) refreshBtn.classList.remove('hidden');
 
     isUserInitiatedPause = false;
-    // Prime / request wake lock immediately inside user click gesture
     requestScreenWakeLock();
-
-    // On a fresh play request (not a retry), reset the retry counter
-    if (!retryTimeout) {
+    if (!isRetry) {
         retryCount = 0;
+        playerFallbackUsed = false;
     }
 
     const channel = guideState.channels.find(c => c.id === channelId);
     const logo = channel ? channel.logo : '';
-
-    // Store current channel info for potential retries and overlays
-    currentChannelInfo = { url, name, channelId, logo };
-    document.dispatchEvent(new CustomEvent('playchannel', { detail: channelId })); // osd.js shows the now/next card
+    const channelChanged = !currentChannelInfo || String(currentChannelInfo.channelId) !== String(channelId) || currentChannelInfo.url !== url;
+    if (channelChanged) {
+        selectedAudioTrack = null;
+        currentStreamTracks = null;
+    }
+    currentChannelInfo = { url, name, channelId, logo, forceLive };
+    document.dispatchEvent(new CustomEvent('playchannel', { detail: channelId }));
     sendTelemetry('PLAYER_PLAY_CHANNEL', `playChannel initiated for "${name}" (${channelId})`, {
         url,
-        profileId: guideState.settings.activeStreamProfileId
+        profileId: profileOverride || guideState.settings.activeStreamProfileId
     });
 
-    // Update and save recent channels regardless of playback target
     if (channelId) {
         const recentChannels = [channelId, ...(guideState.settings.recentChannels || []).filter(id => id !== channelId)].slice(0, 15);
         guideState.settings.recentChannels = recentChannels;
         saveUserSetting('recentChannels', recentChannels);
     }
 
-    const profileId = guideState.settings.activeStreamProfileId;
+    const profileId = profileOverride || guideState.settings.activeStreamProfileId;
     const userAgentId = guideState.settings.activeUserAgentId;
     if (!profileId || !userAgentId) {
         showNotification("Active stream profile or user agent not set. Please check settings.", true);
         return;
     }
     const profile = (guideState.settings.streamProfiles || []).find(p => p.id === profileId);
-    if (!profile) {
-        return showNotification("Stream profile not found.", true);
+    if (!profile) return showNotification("Stream profile not found.", true);
+    const supportsAudioSelection = /^https?:/i.test(url) && profile.command !== 'redirect' && !profile.command.includes('-f mp4');
+    if (!supportsAudioSelection) selectedAudioTrack = null;
+
+    // Tear down the previous local stream and player before replacing them.
+    if (appState.hlsPlayer) {
+        try { appState.hlsPlayer.destroy(); } catch (e) { }
+        appState.hlsPlayer = null;
     }
-
-    // --- Activity Logging for Redirect Streams ---
-    if (profile.command === 'redirect') {
-        const channel = guideState.channels.find(c => c.id === channelId);
-        beginRedirectLogging(url, channelId, name, channel ? channel.logo : '');
-    }
-    // --- End Activity Logging ---
-
-    const streamUrlToPlay = profile.command === 'redirect' ? url : `/stream?url=${encodeURIComponent(url)}&profileId=${profileId}&userAgentId=${userAgentId}`;
-    currentStreamUrlToPlay = streamUrlToPlay;
-    if (isAudioOnly) {
-        toggleAudioOnly(false);
-    }
-
-    if (castState.isCasting) {
-        console.log(`[PLAYER] Already casting. Loading new channel "${name}" to remote device.`);
-        // CRITICAL FIX: Chromecast needs absolute URLs, not relative
-        const absoluteStreamUrl = streamUrlToPlay.startsWith('http')
-            ? streamUrlToPlay
-            : `${window.location.origin}${streamUrlToPlay}`;
-        loadMedia(absoluteStreamUrl, name, logo);
-        openModal(UIElements.videoModal);
-        return;
-    }
-
-    // --- Local Playback Logic ---
-    currentLocalStreamUrl = url;
-    currentProfileId = profileId; // Store the profile ID
-    console.log(`[PLAYER] Playing channel "${name}" locally. Tracking URL for cleanup: ${currentLocalStreamUrl}, Profile: ${currentProfileId}`);
-
-    setLocalPlayerState(streamUrlToPlay, name, logo, url, profileId);
-
     if (appState.player) {
         appState.player.destroy();
         appState.player = null;
+    }
+    if (currentLocalStreamUrl) {
+        const oldUrl = currentLocalStreamUrl;
+        const oldProfile = currentProfileId;
+        currentLocalStreamUrl = null;
+        currentProfileId = null;
+        await stopStream(oldUrl, oldProfile || undefined).catch(() => {});
     }
     if (streamInfoInterval) {
         clearInterval(streamInfoInterval);
         streamInfoInterval = null;
     }
+    if (liveRewindUpdateInterval) {
+        clearInterval(liveRewindUpdateInterval);
+        liveRewindUpdateInterval = null;
+    }
+    hidePlayerOverlays();
+    setActiveMediaTracking(null);
+    UIElements.videoElement.controls = true;
+    UIElements.videoElement.playbackRate = 1;
+    if (isAudioOnly) toggleAudioOnly(false);
+
+    if (!castState.isCasting && !forceLive && guideState.settings.liveRewind?.enabled === true && channelId) {
+        return playLiveRewind(url, name, channelId, logo, profileId);
+    }
+
+    if (profile.command === 'redirect') {
+        beginRedirectLogging(url, channelId, name, logo);
+    }
+
+    let streamUrlToPlay = profile.command === 'redirect' ? url : `/stream?url=${encodeURIComponent(url)}&profileId=${profileId}&userAgentId=${userAgentId}`;
+    if (supportsAudioSelection && selectedAudioTrack !== null) streamUrlToPlay += `&audioTrack=${selectedAudioTrack}`;
+    currentStreamUrlToPlay = streamUrlToPlay;
+
+    if (castState.isCasting) {
+        console.log(`[PLAYER] Already casting. Loading new channel "${name}" to remote device.`);
+        const absoluteStreamUrl = streamUrlToPlay.startsWith('http') ? streamUrlToPlay : `${window.location.origin}${streamUrlToPlay}`;
+        loadMedia(absoluteStreamUrl, name, logo);
+        openModal(UIElements.videoModal);
+        return;
+    }
+
+    currentLocalStreamUrl = url;
+    currentProfileId = profileId;
+    setLocalPlayerState(streamUrlToPlay, name, logo, url, profileId);
+    console.log(`[PLAYER] Playing channel "${name}" locally. Tracking URL for cleanup: ${currentLocalStreamUrl}, Profile: ${currentProfileId}`);
 
     if (mpegts.isSupported()) {
         const mpegtsConfig = {
             enableStashBuffer: true,
             stashInitialSize: 4096,
-            liveBufferLatency: 2.0,
+            liveBufferLatencyChasing: true,
+            liveBufferLatencyMaxLatency: 5.0,
+            liveBufferLatencyMinRemain: 1.0,
         };
 
-        appState.player = mpegts.createPlayer({
-            type: 'mse',
-            isLive: true,
-            url: streamUrlToPlay
-        }, mpegtsConfig);
+        appState.player = mpegts.createPlayer({ type: 'mse', isLive: true, url: streamUrlToPlay }, mpegtsConfig);
 
-        // --- NEW: Robust Error Handling ---
         appState.player.on(mpegts.Events.ERROR, (errorType, errorDetail) => {
             console.error(`[PLAYER] MPEGTS Player Error: Type=${errorType}, Detail=${errorDetail}`);
-            // We only want to auto-retry on unrecoverable network/media errors.
             if (errorType === 'NetworkError' || errorType === 'MediaError') {
-                // To prevent a retry loop if the user has manually closed the player
-                if (appState.player) {
-                    handleStreamError();
-                }
+                if (appState.player) handleStreamError();
             } else {
                 showNotification(`Player Error: ${errorDetail}`, true);
                 stopAndCleanupPlayer();
             }
         });
 
-        // When playback starts successfully, reset the retry counter.
         appState.player.on(mpegts.Events.MEDIA_INFO, () => {
             console.log('[PLAYER] Media info received, playback started successfully.');
             retryCount = 0;
+            playerFallbackUsed = false;
             if (retryTimeout) {
                 clearTimeout(retryTimeout);
                 retryTimeout = null;
@@ -1003,32 +1340,27 @@ export const playChannel = (url, name, channelId) => {
         requestScreenWakeLock();
         appState.player.attachMediaElement(UIElements.videoElement);
         appState.player.load();
+        refreshPlayerRecordState();
+        updateLiveButtons();
+        setPrimaryPlayerButtons(true);
+        if (supportsAudioSelection) document.getElementById('audio-track-btn')?.classList.remove('hidden');
 
-        // NEW: Enforce aspect ratio when metadata is loaded to ensure controls are visible (desktop only)
         UIElements.videoElement.addEventListener('loadedmetadata', () => {
             if (window.innerWidth >= 768 && isAspectRatioLocked && UIElements.videoElement.videoWidth) {
                 const videoRatio = UIElements.videoElement.videoWidth / UIElements.videoElement.videoHeight;
                 const currentWidth = UIElements.videoModalContainer.offsetWidth;
-
-                // Calculate header height
                 const header = UIElements.videoModalContainer.querySelector('.flex.justify-between');
                 const headerHeight = header ? header.offsetHeight : 0;
-
-                const targetHeight = (currentWidth / videoRatio) + headerHeight;
-                UIElements.videoModalContainer.style.height = `${targetHeight}px`;
+                UIElements.videoModalContainer.style.height = `${(currentWidth / videoRatio) + headerHeight}px`;
             }
         }, { once: true });
 
         UIElements.videoElement.volume = parseFloat(localStorage.getItem('iptvPlayerVolume') || 0.5);
-
         appState.player.play().catch((err) => {
             console.error("MPEGTS Player play() caught an error:", err);
-            // This initial play error is often critical, so we start the retry process.
             handleStreamError();
         });
-
         streamInfoInterval = setInterval(updateStreamInfo, 2000);
-
     } else {
         showNotification('Your browser does not support Media Source Extensions (MSE).', true);
     }
@@ -1094,6 +1426,7 @@ export const playRecordingOrDirectVideo = async (url, title, logo = '', isVod = 
         UIElements.videoElement.src = url;
         UIElements.videoElement.load();
         UIElements.videoElement.volume = parseFloat(localStorage.getItem('iptvPlayerVolume') || 0.5);
+        UIElements.videoElement.playbackRate = parseFloat(localStorage.getItem('iptvPlaybackRate') || '1');
 
         if (startTime > 0) {
             const applyStartTime = () => {
@@ -1118,6 +1451,8 @@ export const playRecordingOrDirectVideo = async (url, title, logo = '', isVod = 
     UIElements.videoModal?.classList.remove('pip-active');
     openModal(UIElements.videoModal);
     requestScreenWakeLock();
+    setPrimaryPlayerButtons(false);
+    refreshPlayerRecordState();
 
     try {
         await UIElements.videoElement.play();
@@ -1180,7 +1515,12 @@ export function performVodSeek(targetTime) {
         contentType: currentActiveMedia.contentType,
         contentId: currentActiveMedia.contentId,
         title: currentActiveMedia.title,
-        duration: session.duration || currentActiveMedia.duration || 0
+        duration: session.duration || currentActiveMedia.duration || 0,
+        seriesId: currentActiveMedia.seriesId,
+        season: currentActiveMedia.season,
+        episode: currentActiveMedia.episode,
+        seriesTitle: currentActiveMedia.seriesTitle,
+        logo: currentActiveMedia.logo,
     } : null;
     playVOD(session.url, session.title, session.logo, safeTarget, session.duration, mediaInfo, true);
 }
@@ -1448,10 +1788,13 @@ export const playVOD = async (url, title, logo = '', startTime = 0, knownDuratio
         video.src = streamUrlToPlay;
         video.load();
         video.volume = parseFloat(localStorage.getItem('iptvPlayerVolume') || 0.5);
+        video.playbackRate = parseFloat(localStorage.getItem('iptvPlaybackRate') || '1');
 
         UIElements.videoModal?.classList.remove('pip-active');
         openModal(UIElements.videoModal);
         requestScreenWakeLock();
+        setPrimaryPlayerButtons(false);
+        refreshPlayerRecordState();
         setupVodControlsOverlay(profile.name);
         probeVodDuration(url, title);
 
@@ -1509,11 +1852,14 @@ export const playVOD = async (url, title, logo = '', startTime = 0, knownDuratio
             currentChannelInfo = { url, name: title, channelId: null, logo };
             updateMediaSession(title, logo);
             requestScreenWakeLock();
-
-            // Hide native controls so our VOD overlay takes over without "LIVE" scrubber locking
+            setPrimaryPlayerButtons(false);
+            refreshPlayerRecordState();
             if (UIElements.videoElement) {
                 UIElements.videoElement.controls = false;
+                UIElements.videoElement.playbackRate = parseFloat(localStorage.getItem('iptvPlaybackRate') || '1');
             }
+
+            // Hide native controls so our VOD overlay takes over without "LIVE" scrubber locking
 
             // Setup and display VOD controls overlay
             setupVodControlsOverlay(profile.name);
@@ -1561,6 +1907,12 @@ export const playVOD = async (url, title, logo = '', startTime = 0, knownDuratio
     }
 };
 
+function isTranscodedLive() {
+    const profile = (guideState.settings.streamProfiles || []).find(p => p.id === currentProfileId);
+    return !!(currentChannelInfo?.channelId && /^https?:/i.test(currentChannelInfo.url || '') &&
+        profile && profile.command !== 'redirect' && !profile.command.includes('-f mp4'));
+}
+
 /**
  * Detects and populates available audio tracks in the menu.
  */
@@ -1575,7 +1927,10 @@ function updateAudioTrackList() {
     console.log('[AUDIO_TRACKS] Number of tracks:', audioTracks ? audioTracks.length : 0);
 
     if (!audioTracks || audioTracks.length <= 1) {
-        // Hide button if no multiple tracks
+        if (isTranscodedLive()) {
+            btnEl?.classList.remove('hidden');
+            return;
+        }
         console.log('[AUDIO_TRACKS] Not enough tracks, hiding button');
         btnEl?.classList.add('hidden');
         return;
@@ -1611,6 +1966,56 @@ function selectAudioTrack(index) {
     updateAudioTrackList();
     document.getElementById('audio-track-menu')?.classList.add('hidden');
     showNotification(`Audio track switched`, false, 1500);
+}
+
+async function prepareAudioTrackMenu() {
+    const listEl = document.getElementById('audio-track-list');
+    const menu = document.getElementById('audio-track-menu');
+    if (!listEl || !menu) return;
+    menu.classList.remove('hidden');
+    listEl.innerHTML = '<div class="px-4 py-2 text-sm text-gray-400">Loading tracks...</div>';
+
+    if (UIElements.videoElement.audioTracks && UIElements.videoElement.audioTracks.length > 1) {
+        updateAudioTrackList();
+        return;
+    }
+    if (!isTranscodedLive() || !currentChannelInfo?.channelId) {
+        listEl.innerHTML = '<div class="px-4 py-2 text-sm text-gray-400">No alternate audio tracks.</div>';
+        return;
+    }
+    try {
+        const res = await apiFetch(`/api/stream/tracks?url=${encodeURIComponent(currentChannelInfo.url)}&userAgentId=${encodeURIComponent(guideState.settings.activeUserAgentId || '')}`);
+        if (!res) {
+            listEl.innerHTML = '<div class="px-4 py-2 text-sm text-red-400">Could not read audio tracks.</div>';
+            return;
+        }
+        currentStreamTracks = await res.json();
+        const tracks = currentStreamTracks.audio || [];
+        if (!tracks.length) {
+            listEl.innerHTML = '<div class="px-4 py-2 text-sm text-gray-400">No alternate audio tracks.</div>';
+            return;
+        }
+        listEl.innerHTML = '';
+        tracks.forEach((track) => {
+            const item = document.createElement('div');
+            const active = selectedAudioTrack === track.ordinal;
+            item.className = `px-4 py-2 cursor-pointer hover:bg-gray-700 transition-colors ${active ? 'bg-blue-600 font-semibold' : ''}`;
+            item.textContent = track.title || track.language || `Audio ${track.ordinal + 1}`;
+            item.onclick = () => selectServerAudioTrack(track.ordinal);
+            listEl.appendChild(item);
+        });
+    } catch (e) {
+        listEl.innerHTML = '<div class="px-4 py-2 text-sm text-red-400">Could not read audio tracks.</div>';
+    }
+}
+
+function selectServerAudioTrack(ordinal) {
+    selectedAudioTrack = ordinal;
+    document.getElementById('audio-track-menu')?.classList.add('hidden');
+    showNotification(`Audio track ${ordinal + 1} selected.`, false, 1500);
+    if (!currentChannelInfo?.channelId) return;
+    const forceLive = !!appState.hlsPlayer || currentChannelInfo.forceLive === true;
+    playChannel(currentChannelInfo.url, currentChannelInfo.name, currentChannelInfo.channelId, forceLive, currentProfileId);
 }
 
 /**
@@ -1673,6 +2078,115 @@ function selectSubtitleTrack(index) {
     showNotification(index === -1 ? 'Subtitles off' : 'Subtitle track switched', false, 1500);
 }
 
+async function maybePlayNextEpisode() {
+    const context = currentEpisodeContext;
+    if (!context?.seriesId || localStorage.getItem('iptvAutoplayNext') === 'off') return;
+    currentEpisodeContext = null;
+    try {
+        const series = await fetchSeriesDetails(context.seriesId);
+        if (!series?.seasons) return;
+        const episodes = Object.values(series.seasons).flat()
+            .sort((a, b) => (a.season - b.season) || (a.episode - b.episode));
+        const index = episodes.findIndex(ep => Number(ep.season) === Number(context.season) && Number(ep.episode) === Number(context.episode));
+        const next = index >= 0 ? episodes[index + 1] : null;
+        if (!next) return;
+        const nextMedia = {
+            contentType: 'vod_episode',
+            contentId: String(next.id),
+            title: next.name,
+            duration: next.duration_secs || 0,
+            seriesId: context.seriesId,
+            season: next.season,
+            episode: next.episode,
+            seriesTitle: series.name,
+            logo: context.logo,
+        };
+        showNotification(`Playing next: ${next.name}`, false, 2500);
+        playVOD(next.url, next.name, context.logo, 0, next.duration_secs || null, nextMedia);
+    } catch (e) {
+        console.warn('[PLAYER] Could not autoplay next episode:', e);
+    }
+}
+
+export function cyclePlaybackSpeed() {
+    const video = UIElements.videoElement;
+    if (!video) return;
+    const speeds = [1, 1.25, 1.5, 2, 0.75, 0.5];
+    const current = Number(video.playbackRate) || 1;
+    const next = speeds[(speeds.indexOf(current) + 1) % speeds.length] || 1;
+    video.playbackRate = next;
+    localStorage.setItem('iptvPlaybackRate', String(next));
+    showNotification(`Playback speed: ${next}x`, false, 1200);
+}
+
+export function cycleSleepTimer() {
+    const steps = [0, 15, 30, 60, 90];
+    const current = Number(sessionStorage.getItem('iptvSleepMinutes') || 0);
+    const next = steps[(steps.indexOf(current) + 1) % steps.length] || 0;
+    sessionStorage.setItem('iptvSleepMinutes', String(next));
+    if (sleepTimer) {
+        clearTimeout(sleepTimer);
+        sleepTimer = null;
+    }
+    if (next > 0) {
+        sleepTimer = setTimeout(() => {
+            showNotification('Sleep timer ended. Stopping playback.', false, 3000);
+            stopAndCleanupPlayer();
+        }, next * 60 * 1000);
+        showNotification(`Sleep timer: ${next} minutes`, false, 1500);
+    } else {
+        showNotification('Sleep timer off', false, 1500);
+    }
+}
+
+function setPrimaryPlayerButtons(isLive) {
+    const liveBtn = document.getElementById('player-live-edge-btn');
+    if (liveBtn) liveBtn.classList.toggle('hidden', !isLive);
+    const speedBtn = document.getElementById('player-speed-btn');
+    if (speedBtn) speedBtn.classList.toggle('hidden', isLive);
+    const autoplayBtn = document.getElementById('player-autoplay-btn');
+    if (autoplayBtn) {
+        autoplayBtn.classList.toggle('hidden', isLive);
+        autoplayBtn.classList.toggle('flex', !isLive);
+    }
+    const badge = document.getElementById('player-autoplay-badge');
+    if (badge) {
+        const on = localStorage.getItem('iptvAutoplayNext') !== 'off';
+        badge.textContent = on ? 'On' : 'Off';
+        badge.className = `text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full border ${on ? 'bg-blue-500/20 text-blue-400 border-blue-500/30' : 'bg-gray-800 text-gray-400 border-gray-700'}`;
+    }
+    refreshQualityMenu(isLive);
+}
+
+function refreshQualityMenu(isLive) {
+    const row = document.getElementById('player-quality-row');
+    const select = document.getElementById('player-quality-select');
+    if (!row || !select) return;
+    const allowed = guideState.settings.allowUserQualitySwitch === true;
+    if (!allowed || !isLive || !currentChannelInfo?.channelId) {
+        row.classList.add('hidden');
+        return;
+    }
+    const hardware = guideState.hardware || {};
+    const profiles = (guideState.settings.streamProfiles || []).filter(profile => {
+        if (profile.id.includes('fmp4')) return false;
+        if (profile.id.includes('nvidia') && !hardware.nvidia) return false;
+        if (profile.id === 'ffmpeg-intel' && !hardware.intel_qsv) return false;
+        if (profile.id === 'ffmpeg-vaapi' && !hardware.intel_vaapi) return false;
+        if (profile.id === 'ffmpeg-vaapi-amd' && !hardware.radeon_vaapi) return false;
+        return true;
+    });
+    select.innerHTML = profiles.map(profile => `<option value="${escapeHtml(profile.id)}">${escapeHtml(profile.name)}</option>`).join('');
+    select.value = currentProfileId || guideState.settings.activeStreamProfileId;
+    select.onchange = () => {
+        if (!currentChannelInfo?.channelId) return;
+        document.getElementById('player-more-options-menu')?.classList.add('hidden');
+        const forceLive = !!appState.hlsPlayer || currentChannelInfo.forceLive === true;
+        playChannel(currentChannelInfo.url, currentChannelInfo.name, currentChannelInfo.channelId, forceLive, select.value);
+    };
+    row.classList.remove('hidden');
+}
+
 /**
  * Sets up event listeners for the video player.
  */
@@ -1691,6 +2205,22 @@ export function setupPlayerEventListeners() {
     if (refreshBtn) {
         bindTap(refreshBtn, forceRefreshStream);
     }
+
+    const recordBtn = document.getElementById('record-current-btn');
+    if (recordBtn) bindTap(recordBtn, toggleCurrentRecording);
+    const liveEdgeBtn = document.getElementById('player-live-edge-btn');
+    if (liveEdgeBtn) bindTap(liveEdgeBtn, jumpToLive);
+    const speedBtn = document.getElementById('player-speed-btn');
+    if (speedBtn) bindTap(speedBtn, () => { document.getElementById('player-more-options-menu')?.classList.add('hidden'); cyclePlaybackSpeed(); });
+    const sleepBtn = document.getElementById('player-sleep-btn');
+    if (sleepBtn) bindTap(sleepBtn, () => { document.getElementById('player-more-options-menu')?.classList.add('hidden'); cycleSleepTimer(); });
+    const autoplayBtn = document.getElementById('player-autoplay-btn');
+    if (autoplayBtn) bindTap(autoplayBtn, () => {
+        const next = localStorage.getItem('iptvAutoplayNext') === 'off' ? 'on' : 'off';
+        localStorage.setItem('iptvAutoplayNext', next);
+        showNotification(`Autoplay next episode ${next}.`, false, 1500);
+        setPrimaryPlayerButtons(false);
+    });
 
     bindTap(UIElements.pipBtn, () => {
         if (document.pictureInPictureEnabled && UIElements.videoElement && (UIElements.videoElement.readyState >= 1 || !UIElements.videoElement.paused)) {
@@ -1864,6 +2394,7 @@ export function setupPlayerEventListeners() {
         releaseScreenWakeLock();
         releaseTabDiscardLock();
         if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'none';
+        maybePlayNextEpisode();
     });
 
     // Handle tab visibility changes: restore video playback when returning to foreground if not paused by user
@@ -1935,7 +2466,11 @@ export function setupPlayerEventListeners() {
             e.stopPropagation();
             document.getElementById('player-more-options-menu')?.classList.add('hidden');
             const menu = document.getElementById('audio-track-menu');
-            menu?.classList.toggle('hidden');
+            if (menu && !menu.classList.contains('hidden')) {
+                menu.classList.add('hidden');
+            } else {
+                prepareAudioTrackMenu();
+            }
             document.getElementById('subtitle-track-menu')?.classList.add('hidden');
         });
     }

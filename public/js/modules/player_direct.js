@@ -565,9 +565,11 @@ function playLiveStream(url, streamType) {
             const mpegtsConfig = {
                 enableStashBuffer: true,
                 stashInitialSize: 4096,
-                liveBufferLatency: 2.0,
+                liveBufferLatencyChasing: true,
+                liveBufferLatencyMaxLatency: 5.0,
+                liveBufferLatencyMinRemain: 1.0,
             };
-            logToPlayerConsole(`Player config: stashInitialSize=${mpegtsConfig.stashInitialSize}KB, liveBufferLatency=${mpegtsConfig.liveBufferLatency}s`);
+            logToPlayerConsole(`Player config: stashInitialSize=${mpegtsConfig.stashInitialSize}KB, live latency chase up to ${mpegtsConfig.liveBufferLatencyMaxLatency}s`);
 
             const newPlayer = mpegts.createPlayer({
                 type: 'mse',
