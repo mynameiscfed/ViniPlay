@@ -57,7 +57,7 @@ export const progData = (channel, prog) => {
 };
 
 /** Flips a channel's favourite flag everywhere it is shown. */
-const toggleFavorite = (channelId) => {
+export const toggleFavorite = (channelId) => {
     const channel = guideState.channels.find(c => c.id === channelId);
     if (!channel) return false;
     channel.isFavorite = !channel.isFavorite;
@@ -374,7 +374,7 @@ const channelHTML = (channel) => {
 };
 
 /** Phone list row: the channel with what is on now and next. */
-const cardHTML = (channel) => {
+export const cardHTML = (channel) => {
     const { now, next } = nowNext(channel.id);
     const offset = guideState.settings.timezoneOffset || 0;
     let bar = '';

@@ -53,6 +53,8 @@ export function pickNeighbour(cur, dir, within = scope()) {
         }
         const bx = (b.left + b.right) / 2, by = (b.top + b.bottom) / 2;
         const horizontal = dir === 'left' || dir === 'right';
+        // Up and down stay inside the rail or inside the page; only left and right cross between them.
+        if (!horizontal && !!el.closest('#app-rail') !== !!cur.closest('#app-rail')) continue;
         const ahead = dir === 'right' ? bx > ax + 1 : dir === 'left' ? bx < ax - 1 : dir === 'down' ? by > ay + 1 : by < ay - 1;
         if (!ahead) continue;
         const gap = dir === 'right' ? b.left - a.right : dir === 'left' ? a.left - b.right : dir === 'down' ? b.top - a.bottom : a.top - b.bottom;

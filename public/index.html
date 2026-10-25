@@ -40,6 +40,7 @@
     <link rel="stylesheet" href="/css/base.css?v=2">
     <link rel="stylesheet" href="/css/shell.css?v=2">
     <link rel="stylesheet" href="/css/guide.css?v=1">
+    <link rel="stylesheet" href="/css/home.css?v=5">
     <link rel="stylesheet" href="/css/legacy.css?v=2">
     <link rel="stylesheet" href="/css/player.css?v=1">
     <link rel="stylesheet" href="/css/tv.css?v=1">
@@ -785,34 +786,19 @@
             </div>
 
             <!-- Notifications Page -->
-            <div id="page-notifications"
-                class="hidden flex-grow flex-col items-center p-4 overflow-y-auto custom-scrollbar">
-                <div class="w-full max-w-4xl mx-auto space-y-6 pb-16">
-                    <div id="notification-settings-container" class="mb-6"></div>
-
-                    <h2 class="text-xl font-bold text-white mb-4 border-b border-gray-700 pb-2">Upcoming Notifications
-                    </h2>
-                    <div id="no-notifications-message" class="hidden text-center text-gray-500 p-4">
-                        <span data-icon="notifications" class="mx-auto h-12 w-12 text-gray-600"></span>
-                        <h3 class="mt-2 text-sm font-medium">No Notifications Set</h3>
-                        <p class="mt-1 text-sm">Browse the TV Guide and set notifications for your favorite upcoming
-                            programs.</p>
-                    </div>
-                    <div id="notifications-list" class="space-y-4"></div>
-
-                    <div class="flex justify-between items-center mt-8 mb-4 border-b border-gray-700 pb-2">
-                        <h2 class="text-xl font-bold text-white">Past & Expired Notifications</h2>
-                        <button id="clear-past-notifications-btn"
-                            class="hidden bg-gray-600 hover:bg-gray-500 text-white text-sm font-bold py-1 px-3 rounded-md">Clear
-                            All</button>
-                    </div>
-                    <div id="no-past-notifications-message" class="hidden text-center text-gray-500 p-4">
-                        <span data-icon="cancel" class="mx-auto h-12 w-12 text-gray-600"></span>
-                        <h3 class="mt-2 text-sm font-medium">No Past Notifications</h3>
-                        <p class="mt-1 text-sm">Notifications that have already triggered or expired will appear here.
-                        </p>
-                    </div>
-                    <div id="past-notifications-list" class="space-y-4 opacity-80"></div>
+            <div id="page-notifications" class="hidden flex-grow flex-col overflow-y-auto custom-scrollbar">
+                <div class="page-col">
+                    <section class="shelf">
+                        <h3>Upcoming reminders</h3>
+                        <div id="no-notifications-message" class="hidden card hm-empty"><p>No reminders set. Open the TV guide, pick a programme and choose Remind me.</p></div>
+                        <div id="notifications-list" class="lrows"></div>
+                    </section>
+                    <section class="shelf">
+                        <h3>Past and expired<button id="clear-past-notifications-btn" type="button" class="hidden btn btn-ghost btn-sm">Clear all</button></h3>
+                        <div id="no-past-notifications-message" class="hidden card hm-empty"><p>Reminders that have fired or expired will appear here.</p></div>
+                        <div id="past-notifications-list" class="lrows"></div>
+                    </section>
+                    <div id="notification-settings-container"></div>
                 </div>
             </div>
 
