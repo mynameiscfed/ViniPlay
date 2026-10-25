@@ -5,7 +5,7 @@
  */
 
 import { appState, guideState, UIElements } from './state.js';
-import { apiFetch, saveGlobalSetting, saveUserSetting, fetchAppVersion } from './api.js';
+import { apiFetch, lastApiError, saveGlobalSetting, saveUserSetting, fetchAppVersion } from './api.js';
 // MODIFIED: Import isProcessingRunning for the button logic
 import { showNotification, openModal, closeModal, showConfirm, setButtonLoadingState, showProcessingModal, updateProcessingStatus, isProcessingRunning } from './ui.js';
 import { handleGuideLoad } from './guide.js';
@@ -1365,8 +1365,12 @@ export function setupSettingsEventListeners() {
 
         // 3. Handle initial request failure
         if (!res || !res.ok) {
-            const data = res ? await res.json() : { error: 'Could not connect to server.' };
-            updateProcessingStatus(`Failed to start process: ${data.error}`, 'error');
+            // apiFetch returns null for any failure, so say which one: no response at all vs. an HTTP error.
+            const e = lastApiError;
+            const reason = !e ? 'Could not connect to server.'
+                : e.status ? `Server responded ${e.status}${e.message ? `: ${e.message}` : ''}`
+                : `Could not connect to server (${e.message}).`;
+            updateProcessingStatus(`Failed to start process: ${reason}`, 'error');
         }
     };
 
