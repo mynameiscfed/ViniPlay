@@ -40,6 +40,7 @@
     <link rel="stylesheet" href="/css/base.css?v=1">
     <link rel="stylesheet" href="/css/shell.css?v=1">
     <link rel="stylesheet" href="/css/legacy.css?v=1">
+    <link rel="stylesheet" href="/css/tv.css?v=1">
 
     <script src="https://cdn.jsdelivr.net/npm/mpegts.js/dist/mpegts.js"></script>
     <!-- Hls.js for Live DVR Timeshift / Chase Play -->
@@ -1266,6 +1267,15 @@
         </div>
     </div>
 
+    <!-- Key hints (TV mode only) -->
+    <div id="tv-hints" class="hints" aria-hidden="true">
+        <span><kbd>&#9664; &#9650; &#9654; &#9660;</kbd>Move</span>
+        <span><kbd>OK</kbd>Select</span>
+        <span><kbd>Back</kbd>Up a level</span>
+        <span><kbd>0-9</kbd>Go to channel</span>
+        <span><kbd>?</kbd>Shortcuts</span>
+    </div>
+
     <!-- Bottom tab bar (phones) -->
     <nav id="app-tabbar" class="tabbar hidden" aria-label="Main">
         <button id="mobile-nav-home" type="button" class="ni"><span class="pl"><span data-icon="home"></span></span><span class="lb">Home</span></button>
@@ -1650,6 +1660,54 @@
                     Me</button>
             </div>
             <div id="details-resize-handle" class="resize-handle"></div>
+        </div>
+    </div>
+
+    <div id="shortcuts-modal" class="hidden fixed inset-0 bg-black/80 flex items-center justify-center z-[80] p-4">
+        <div class="bg-gray-800 rounded-xl shadow-xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+            <div class="p-5 border-b border-gray-700 flex items-center justify-between">
+                <h3 class="text-xl font-bold text-white">Keyboard and remote shortcuts</h3>
+                <button type="button" id="shortcuts-close-btn" class="btn btn-ghost btn-sm">Close</button>
+            </div>
+            <div class="p-5 overflow-y-auto custom-scrollbar grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-5 text-sm">
+                <div>
+                    <p class="eyebrow mb-2">Move around</p>
+                    <dl class="shortcut-list">
+                        <div><dt><kbd>&larr;</kbd><kbd>&uarr;</kbd><kbd>&rarr;</kbd><kbd>&darr;</kbd></dt><dd>Move focus</dd></div>
+                        <div><dt><kbd>Enter</kbd></dt><dd>Select (OK)</dd></div>
+                        <div><dt><kbd>Esc</kbd></dt><dd>Back, up one level</dd></div>
+                        <div><dt><kbd>/</kbd></dt><dd>Search</dd></div>
+                        <div><dt><kbd>?</kbd></dt><dd>This list</dd></div>
+                    </dl>
+                </div>
+                <div>
+                    <p class="eyebrow mb-2">Go to</p>
+                    <dl class="shortcut-list">
+                        <div><dt><kbd>G</kbd><kbd>H</kbd></dt><dd>Home</dd></div>
+                        <div><dt><kbd>G</kbd><kbd>L</kbd></dt><dd>Live TV</dd></div>
+                        <div><dt><kbd>G</kbd><kbd>R</kbd></dt><dd>Reminders</dd></div>
+                        <div><dt><kbd>G</kbd><kbd>S</kbd></dt><dd>Settings (admins)</dd></div>
+                    </dl>
+                </div>
+                <div>
+                    <p class="eyebrow mb-2">Live TV guide</p>
+                    <dl class="shortcut-list">
+                        <div><dt><kbd>Enter</kbd></dt><dd>Watch the channel</dd></div>
+                        <div><dt>Hold <kbd>Enter</kbd></dt><dd>Program details</dd></div>
+                        <div><dt><kbd>CH +</kbd><kbd>CH -</kbd></dt><dd>Page by one hour</dd></div>
+                        <div><dt><kbd>0-9</kbd></dt><dd>Go to a channel number</dd></div>
+                    </dl>
+                </div>
+                <div>
+                    <p class="eyebrow mb-2">Player</p>
+                    <dl class="shortcut-list">
+                        <div><dt><kbd>Space</kbd></dt><dd>Play or pause</dd></div>
+                        <div><dt><kbd>&uarr;</kbd><kbd>&darr;</kbd></dt><dd>Previous or next channel</dd></div>
+                        <div><dt><kbd>M</kbd></dt><dd>Mute</dd></div>
+                        <div><dt><kbd>F</kbd></dt><dd>Full screen</dd></div>
+                    </dl>
+                </div>
+            </div>
         </div>
     </div>
 

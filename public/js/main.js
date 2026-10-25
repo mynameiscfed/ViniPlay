@@ -25,6 +25,7 @@ import { ICONS } from './modules/icons.js'; // MODIFIED: Import the new icon lib
 import { initActivityPage, setupAdminEventListeners, handleActivityUpdate, handleAdminChannelClick } from './modules/admin.js';
 import { initTelemetry } from './modules/telemetry.js';
 import { refreshHome } from './modules/home.js';
+import { initFocus } from './modules/focus.js';
 
 // The initializeCastApi function is no longer called directly from here,
 // but the cast.js module will handle its own initialization via the window callback.
@@ -644,6 +645,7 @@ function setupCoreEventListeners() {
 // --- App Start ---
 document.addEventListener('DOMContentLoaded', () => {
     initTelemetry();
+    initFocus();
     // NEW: Check for notification deep link parameters on initial load.
     const urlParams = new URLSearchParams(window.location.search);
     const channelId = urlParams.get('channelId');
