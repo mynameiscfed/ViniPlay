@@ -2285,20 +2285,7 @@ app.post('/api/sources/fetch-groups', requireAuth, requireAdmin, async (req, res
             sourceToUse = settings.m3uSources.find(s => s.id === sourceId) || settings.epgSources.find(s => s.id === sourceId);
         }
 
-        // --- START CACHE CHECK ---
-        if (!forceRefresh && sourceToUse && sourceToUse.cachedRawPath && fs.existsSync(sourceToUse.cachedRawPath)) {
-            try {
-                console.log(`[API_GROUPS] Using cached raw file: ${sourceToUse.cachedRawPath}`);
-                content = fs.readFileSync(sourceToUse.cachedRawPath, 'utf-8');
-                usedCache = true;
-            } catch (cacheReadError) {
-                console.warn(`[API_GROUPS] Failed to read cache file ${sourceToUse.cachedRawPath}. Will fetch fresh. Error:`, cacheReadError.message);
-                usedCache = false; // Ensure we fetch fresh if cache read fails
-            }
-        }
-        // --- END CACHE CHECK ---
-
-        // --- Fetch if cache wasn't used or refresh was forced ---
+        // XC categories are not the cached M3U live list. Handle them before the cache.
         if (type === 'xc' && xc) {
             const xcInfo = JSON.parse(xc);
             if (!xcInfo.server || !xcInfo.username || !xcInfo.password) {
@@ -2312,6 +2299,23 @@ app.post('/api/sources/fetch-groups', requireAuth, requireAdmin, async (req, res
             return res.json({ success: true, groups: allCategories, usedCache: false });
         }
 
+        // After the URL was edited in the form, the saved source's cache describes the old provider.
+        const urlChanged = type === 'url' && sourceToUse && sourceToUse.type === 'url' && url && url !== sourceToUse.path;
+
+        // --- START CACHE CHECK ---
+        if (!forceRefresh && !urlChanged && sourceToUse && sourceToUse.cachedRawPath && fs.existsSync(sourceToUse.cachedRawPath)) {
+            try {
+                console.log(`[API_GROUPS] Using cached raw file: ${sourceToUse.cachedRawPath}`);
+                content = fs.readFileSync(sourceToUse.cachedRawPath, 'utf-8');
+                usedCache = true;
+            } catch (cacheReadError) {
+                console.warn(`[API_GROUPS] Failed to read cache file ${sourceToUse.cachedRawPath}. Will fetch fresh. Error:`, cacheReadError.message);
+                usedCache = false; // Ensure we fetch fresh if cache read fails
+            }
+        }
+        // --- END CACHE CHECK ---
+
+        // --- Fetch if cache wasn't used or refresh was forced ---
         if (!usedCache) {
             console.log(`[API_GROUPS] ${forceRefresh ? 'Refresh forced' : 'Cache not used/found'}. Fetching from original source.`);
             if (type === 'url' && url) {
@@ -6247,30 +6251,6 @@ app.get('/api/dvr/storage', requireAuth, (req, res) => {
     }
 });
 
-app.delete('/api/dvr/jobs/all', requireAuth, requireDvrAccess, (req, res) => {
-    const userId = req.session.userId;
-    console.log(`[DVR_API] Clearing all scheduled/historical jobs for user ${userId}.`);
-
-    db.all("SELECT id FROM dvr_jobs WHERE user_id = ? AND status = 'scheduled'", [userId], (err, scheduledJobs) => {
-        if (err) {
-            return res.status(500).json({ error: 'Could not fetch jobs to cancel.' });
-        }
-        scheduledJobs.forEach(job => {
-            if (activeDvrJobs.has(job.id)) {
-                activeDvrJobs.get(job.id)?.cancel();
-                activeDvrJobs.delete(job.id);
-            }
-        });
-
-        db.run("DELETE FROM dvr_jobs WHERE user_id = ?", [userId], function (err) {
-            if (err) {
-                return res.status(500).json({ error: 'Could not clear jobs from database.' });
-            }
-            res.json({ success: true, deletedCount: this.changes });
-        });
-    });
-});
-
 app.delete('/api/dvr/recordings/all', requireAuth, requireDvrAccess, (req, res) => {
     const userId = req.session.userId;
     console.log(`[DVR_API] Deleting all completed recordings for user ${userId}.`);
@@ -6881,6 +6861,11 @@ app.post('/api/logs/client', requireAuth, express.text({ type: ['text/*', 'appli
 });
 
 // --- Main Route Handling ---
+// Unknown API paths must not fall through to the SPA and look like a successful HTML 200.
+app.use('/api', (req, res) => {
+    res.status(404).json({ error: 'API endpoint not found.' });
+});
+
 // Everything real is already served by express.static above. This only handles client-side
 // routes; building a path from req.path here let `..` read files outside public/.
 app.get('*', (req, res) => {

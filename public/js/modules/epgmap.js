@@ -26,7 +26,9 @@ let searchSeq = 0; // drops the answer of a search that was overtaken by a newer
 let pollTimer = null;
 
 const overrides = () => guideState.settings.epgOverrides || {};
-const status = (ch) => (overrides()[ch.id] ? 'manual' : (guideState.programs[ch.id]?.length ? 'ok' : 'none'));
+const hasPrograms = (ch) => !!guideState.programs[ch.id]?.length;
+// An override whose guide channel disappeared must stay visible under "No guide data".
+const status = (ch) => (overrides()[ch.id] && hasPrograms(ch) ? 'manual' : (hasPrograms(ch) ? 'ok' : 'none'));
 const byId = (id) => guideState.channels.find((c) => c.id === id);
 
 const inFilter = (ch, f) => f === 'all' || (f === 'suggested' ? suggestions.has(ch.id) : status(ch) === f);
@@ -45,9 +47,10 @@ const matching = () => {
 };
 
 const guideCell = (ch) => {
-    const state = status(ch);
-    if (state === 'manual') return `<span class="text-blue-400">Assigned</span><div class="text-xs text-gray-500">${escapeHtml(overrides()[ch.id])}</div>`;
-    return state === 'ok' ? '<span class="text-green-400">Has guide data</span>' : '<span class="text-yellow-400">No guide data</span>';
+    const override = overrides()[ch.id];
+    if (override && hasPrograms(ch)) return `<span class="text-blue-400">Assigned</span><div class="text-xs text-gray-500">${escapeHtml(override)}</div>`;
+    if (override) return `<span class="text-yellow-400">No guide data</span><div class="text-xs text-gray-500">Assignment ${escapeHtml(override)} not found</div>`;
+    return hasPrograms(ch) ? '<span class="text-green-400">Has guide data</span>' : '<span class="text-yellow-400">No guide data</span>';
 };
 
 // A Dice similarity is not a probability, so say what it is in plain words instead of "90%".

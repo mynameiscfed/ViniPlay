@@ -49,7 +49,6 @@ const initializeUIElements = () => {
     UIElements.mobileMenuClose = document.getElementById('mobile-menu-close');
     UIElements.mobileNavGuide = document.getElementById('mobile-nav-guide');
     UIElements.mobileNavSettings = document.getElementById('mobile-nav-settings');
-    UIElements.mobileNavLogoutBtn = document.getElementById('mobile-nav-logout-btn');
     UIElements.mobileMenuOverlay = document.getElementById('mobile-menu-overlay');
 
     // Notification Tab/Page Elements

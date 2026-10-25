@@ -717,7 +717,7 @@ async function playChannelInWidget(widgetId, channel, gridstackItemContentEl) {
 
     if (isVOD) {
         // For VOD files, auto-select fMP4 profile (same as Direct Player)
-        const hasNVIDIA = settings.hasNvidiaGpu;
+        const hasNVIDIA = !!guideState.hardware?.nvidia;
         profileIdToUse = hasNVIDIA ? 'ffmpeg-fmp4-nvidia' : 'ffmpeg-fmp4';
         console.log(`[MultiView] Auto-selected ${hasNVIDIA ? 'NVIDIA' : 'CPU'} fMP4 profile for VOD`);
 
