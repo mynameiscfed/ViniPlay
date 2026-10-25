@@ -135,7 +135,9 @@ export function renderEpgMap() {
     rows = matching().sort((a, b) => (suggestions.get(b.id)?.confidence ?? -1) - (suggestions.get(a.id)?.confidence ?? -1));
     const without = guideState.channels.filter((ch) => status(ch) === 'none').length;
     drawPage();
-    $('epg-map-summary').textContent = `${without} of ${guideState.channels.length} channels have no guide data · ${suggestions.size} suggestions · showing ${rows.length}`;
+    const saving = savingCount();
+    $('epg-map-summary').textContent = `${without} of ${guideState.channels.length} channels have no guide data · ${suggestions.size} suggestions · showing ${rows.length}`
+        + (saving ? ` · saving ${saving} change${saving === 1 ? '' : 's'}, the guide updates in the background` : '');
     document.querySelectorAll('[data-epg-filter]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.epgFilter === filter)));
     document.querySelectorAll('[data-epg-count]').forEach((n) => {
         n.textContent = guideState.channels.filter((ch) => inFilter(ch, n.dataset.epgCount)).length;
@@ -156,20 +158,45 @@ async function hydrateSuggestions() {
     return true;
 }
 
-/** Saves the change on the server, which re-merges the guides; then reloads the programmes so the guide shows them. */
-async function apply(set, clear = []) {
+// Changes show at once and are sent in one batch shortly after: the server re-merges the whole guide
+// on every save, which can take minutes on a big guide, so clicks must never wait on it.
+let queued = { set: {}, clear: new Set() };
+let flushTimer = null;
+let inFlight = 0;
+const savingCount = () => Object.keys(queued.set).length + queued.clear.size + inFlight;
+
+function apply(set, clear = []) {
+    const ov = { ...overrides(), ...set };
+    clear.forEach((id) => delete ov[id]);
+    guideState.settings.epgOverrides = ov;
+    Object.entries(set).forEach(([id, epgId]) => { queued.set[id] = epgId; queued.clear.delete(id); suggestions.delete(id); });
+    clear.forEach((id) => { delete queued.set[id]; queued.clear.add(id); });
+    selected.clear();
+    renderEpgMap();
+    clearTimeout(flushTimer);
+    flushTimer = setTimeout(flush, 800);
+}
+
+async function flush() {
+    const set = queued.set, clear = [...queued.clear];
+    if (!Object.keys(set).length && !clear.length) return;
+    queued = { set: {}, clear: new Set() };
+    const n = Object.keys(set).length + clear.length;
+    inFlight += n;
+    renderEpgMap();
     const res = await apiFetch('/api/epg/overrides', {
         method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ set, clear }),
     });
-    if (!res) return false;
-    guideState.settings.epgOverrides = (await res.json()).epgOverrides;
+    inFlight -= n;
+    if (savingCount()) return renderEpgMap(); // more changes queued meanwhile: refresh once they land
     const config = await fetchConfig();
-    if (config) guideState.programs = config.epgContent || {};
-    Object.keys(set).forEach((id) => suggestions.delete(id));
-    selected.clear();
-    showNotification('Guide data updated.');
+    if (config) {
+        guideState.programs = config.epgContent || {};
+        // A failed save leaves the server as it was: take its assignments and suggestions back.
+        if (!res) { guideState.settings.epgOverrides = config.settings.epgOverrides || {}; await hydrateSuggestions(); }
+    }
+    showNotification(res ? 'Guide data updated.' : 'Could not save the guide changes. They were undone.', !res);
     renderEpgMap();
-    return true;
 }
 
 // Re-merging a big guide takes a while: keep the controls from piling up requests meanwhile.
@@ -287,7 +314,7 @@ export function setupEpgMap() {
             const set = {};
             ids.forEach((id) => { const s = suggestions.get(id); if (s) set[id] = s.epgId; });
             const n = Object.keys(set).length;
-            showConfirm('Accept selected suggestions?', `Assign the suggested guide data to ${n} channel${n === 1 ? '' : 's'}.`, () => whileBusy(() => apply(set)));
+            showConfirm('Accept selected suggestions?', `Assign the suggested guide data to ${n} channel${n === 1 ? '' : 's'}.`, () => apply(set));
         } else if (act === 'reject') {
             const channelIds = ids.filter((id) => suggestions.has(id));
             channelIds.forEach((id) => suggestions.delete(id));
@@ -296,7 +323,7 @@ export function setupEpgMap() {
             renderEpgMap();
         } else if (act === 'clear') {
             const clear = ids.filter((id) => overrides()[id]);
-            showConfirm('Remove assignments?', `Remove the hand-picked guide data from ${clear.length} channel${clear.length === 1 ? '' : 's'}.`, () => whileBusy(() => apply({}, clear)));
+            showConfirm('Remove assignments?', `Remove the hand-picked guide data from ${clear.length} channel${clear.length === 1 ? '' : 's'}.`, () => apply({}, clear));
         }
     });
     $('epg-map-auto-btn').addEventListener('click', suggest);
@@ -308,7 +335,7 @@ export function setupEpgMap() {
         const by = { exact: 0, likely: 0, ai: 0 };
         Object.keys(set).forEach((id) => { by[tierOf(suggestions.get(id))]++; });
         const parts = [`${by.exact} exact`, `${by.likely} likely`]; if (by.ai) parts.push(`${by.ai} AI`);
-        showConfirm('Accept all suggestions?', `Permanently assign guide data to ${n} channels (${parts.join(', ')}). Check the list first: there is no undo.`, () => whileBusy(() => apply(set)));
+        showConfirm('Accept all suggestions?', `Permanently assign guide data to ${n} channels (${parts.join(', ')}). Check the list first: there is no undo.`, () => apply(set));
     });
 
     $('epg-map-tbody').addEventListener('click', (e) => {
@@ -326,8 +353,8 @@ export function setupEpgMap() {
             fetch('/api/epg/suggest', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ channelIds: [ch.id] }) });
             renderEpgMap();
         }
-        else if (btn.dataset.act === 'accept') whileBusy(() => apply({ [ch.id]: s.epgId }));
-        else if (btn.dataset.act === 'clear') whileBusy(() => apply({}, [ch.id]));
+        else if (btn.dataset.act === 'accept') apply({ [ch.id]: s.epgId });
+        else if (btn.dataset.act === 'clear') apply({}, [ch.id]);
     });
 
     $('epg-assign-search').addEventListener('input', debounced(searchGuideChannels));
@@ -337,7 +364,7 @@ export function setupEpgMap() {
         if (!pick || !assigning) return;
         const channel = assigning;
         closeModal($('epg-assign-modal'));
-        whileBusy(() => apply({ [channel.id]: pick.dataset.epgId }));
+        apply({ [channel.id]: pick.dataset.epgId });
     });
 
     // Restore persisted suggestions from before the refresh, then draw.
