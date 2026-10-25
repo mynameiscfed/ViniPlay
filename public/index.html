@@ -1263,10 +1263,16 @@
                                 </div>
                             </div>
                             <div class="border-t border-red-700/50 pt-4">
-                                <p class="text-sm text-gray-400 mb-2">This permanently deletes all saved application
-                                    data from the server and your browser cache. The page will reload.</p>
-                                <button id="clear-data-btn"
-                                    class="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-4 rounded-md flex items-center justify-center gap-2">
+                                <p class="text-sm text-gray-400 mb-2">This permanently deletes everything ViniPlay saved on
+                                    this server: sources and channels, profiles and settings, <strong>all recordings and
+                                    scheduled recordings</strong>, and the push keys, so every device must turn reminders on
+                                    again. Export your settings first. The page reloads afterwards.</p>
+                                <label for="clear-data-confirm" class="block text-sm text-gray-400 mb-1">Type
+                                    <strong>RESET</strong> to continue</label>
+                                <input type="text" id="clear-data-confirm" autocomplete="off"
+                                    class="w-full bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-white mb-2">
+                                <button id="clear-data-btn" disabled
+                                    class="w-full disabled:opacity-50 bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-4 rounded-md flex items-center justify-center gap-2">
                                     <span data-icon="trash"></span>
                                     <span>Clear All Data & Reset</span>
                                 </button>

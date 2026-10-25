@@ -1874,8 +1874,11 @@ export function setupSettingsEventListeners() {
     });
 
     // --- Danger Zone ---
+    const resetWord = document.getElementById('clear-data-confirm');
+    resetWord.addEventListener('input', () => { UIElements.clearDataBtn.disabled = resetWord.value.trim() !== 'RESET'; });
     UIElements.clearDataBtn.addEventListener('click', () => {
-        showConfirm('Clear All Data?', 'This will permanently delete ALL settings and files from the server and your browser cache. The page will reload.', async () => {
+        if (resetWord.value.trim() !== 'RESET') return;
+        showConfirm('Clear all data?', 'Last check: sources, settings, all recordings and push keys are deleted from this server. This cannot be undone.', async () => {
             const res = await apiFetch('/api/data', { method: 'DELETE' }); // Use apiFetch
             if (res?.ok) { // Check for ok status
                 if (appState.db) {
