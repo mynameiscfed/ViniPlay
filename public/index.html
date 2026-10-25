@@ -865,10 +865,14 @@
                         </div>
                         <div class="flex flex-wrap items-center justify-between gap-2 mb-2 text-sm text-gray-400">
                             <span id="epg-map-summary"></span>
+                            <div class="flex flex-wrap gap-2 ml-auto">
+                            <button type="button" id="epg-map-unassign-btn"
+                                class="hidden bg-gray-600 hover:bg-gray-500 disabled:opacity-50 text-white text-sm font-bold py-1 px-3 rounded-md"></button>
                             <button type="button" id="epg-map-reset-btn"
-                                class="hidden ml-auto bg-gray-600 hover:bg-gray-500 disabled:opacity-50 text-white text-sm font-bold py-1 px-3 rounded-md"></button>
+                                class="hidden bg-gray-600 hover:bg-gray-500 disabled:opacity-50 text-white text-sm font-bold py-1 px-3 rounded-md"></button>
                             <button type="button" id="epg-map-accept-btn"
                                 class="hidden bg-green-600 hover:bg-green-700 disabled:bg-green-800 text-white text-sm font-bold py-1 px-3 rounded-md"></button>
+                            </div>
                         </div>
                         <div id="epg-map-bulk" class="hidden flex flex-wrap items-center gap-2 mb-2 p-2 rounded-md bg-gray-700 text-sm text-white">
                             <span id="epg-map-bulk-count" class="font-bold mr-auto"></span>

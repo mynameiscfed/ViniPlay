@@ -146,6 +146,9 @@ export function renderEpgMap() {
     $('epg-map-accept-btn').classList.toggle('hidden', !bulk);
     $('epg-map-accept-btn').textContent = `Accept all (${bulk})`;
     $('epg-map-reset-btn').classList.toggle('hidden', !suggestions.size);
+    const assigned = Object.keys(overrides()).length;
+    $('epg-map-unassign-btn').classList.toggle('hidden', !assigned);
+    $('epg-map-unassign-btn').textContent = `Remove all assignments (${assigned})`;
     $('epg-map-reset-btn').textContent = `Dismiss all suggestions (${suggestions.size})`;
     renderBulkBar();
 }
@@ -331,6 +334,11 @@ export function setupEpgMap() {
         }
     });
     $('epg-map-auto-btn').addEventListener('click', suggest);
+    $('epg-map-unassign-btn').addEventListener('click', () => {
+        const ids = Object.keys(overrides());
+        showConfirm('Remove all assignments?', `Every channel you matched by hand or by accepting a suggestion (${ids.length}) goes back to the guide data its source gives it, or none. Run Suggest matches afterwards to match them again. There is no undo.`,
+            () => apply({}, ids));
+    });
     $('epg-map-reset-btn').addEventListener('click', () => showConfirm('Dismiss all suggestions?',
         `All ${suggestions.size} suggestions are removed; channels you already assigned keep their guide data. Then tick Also ask AI and press Suggest matches to match every channel again from scratch.`,
         () => whileBusy(async () => {
