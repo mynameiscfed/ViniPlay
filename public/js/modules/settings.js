@@ -638,64 +638,148 @@ export const populateTimezoneSelector = () => {
  * Renders the M3U or EPG source table.
  * @param {('m3u'|'epg')} sourceType - The type of source to render.
  */
+// Each source is a card: health at a glance, its own Refresh, and no table to scroll sideways.
 const renderSourceTable = (sourceType) => {
-    const tbody = UIElements[`${sourceType}SourcesTbody`];
+    const list = UIElements[`${sourceType}SourcesTbody`];
     const sources = guideState.settings[`${sourceType}Sources`] || [];
-    tbody.innerHTML = '';
 
     if (sources.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="8" class="text-center text-gray-500 py-4">No ${sourceType.toUpperCase()} sources added.</td></tr>`;
+        list.innerHTML = `<p class="text-center text-gray-500 py-4 col-span-full">No ${sourceType.toUpperCase()} sources added.</p>`;
         return;
     }
 
-    sources.forEach(source => {
+    list.innerHTML = sources.map(source => {
         const pathDisplay = source.type === 'file' ? (source.path.split('/').pop() || source.path.split('\\').pop()) : source.path;
-        const lastUpdated = new Date(source.lastUpdated).toLocaleString();
-        const refreshText = (source.type === 'url' || source.type === 'xc') && source.refreshHours > 0 ? `Every ${source.refreshHours}h` : 'Disabled';
-        const tr = document.createElement('tr');
-        tr.dataset.sourceId = source.id;
-        tr.innerHTML = `
-            <td>${escapeHtml(source.name)}</td>
-            <td><span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${source.type === 'file' ? 'bg-blue-200 text-blue-800' : 'bg-purple-200 text-purple-800'}">${escapeHtml(source.type)}</span></td>
-            <td class="max-w-xs truncate" title="${escapeHtml(pathDisplay)}">${escapeHtml(pathDisplay)}</td>
-            <td><span class="text-xs font-medium text-gray-400">${escapeHtml(source.statusMessage || 'N/A')}</span></td>
-            <td>${lastUpdated}</td>
-            <td>${refreshText}</td>
-            <td>
-                <label class="switch">
-                    <input type="checkbox" class="activate-switch" ${source.isActive ? 'checked' : ''}>
+        const failed = /failed|not found/i.test(source.statusMessage || '');
+        const health = !source.isActive ? 'Off' : failed ? 'Failed' : source.lastUpdated ? 'OK' : 'Not refreshed yet';
+        const dot = !source.isActive ? 'bg-gray-500' : failed ? 'bg-red-500' : 'bg-green-500';
+        const refreshText = (source.type === 'url' || source.type === 'xc') && source.refreshHours > 0 ? `Refreshes every ${source.refreshHours} h` : 'Manual refresh';
+        const updated = source.lastUpdated ? new Date(source.lastUpdated).toLocaleString() : 'never';
+        return `
+        <div class="source-card bg-gray-900/50 rounded-lg p-4 flex flex-col gap-2 border ${failed && source.isActive ? 'border-red-500/60' : 'border-transparent'}${source.isActive ? '' : ' opacity-70'}" data-source-id="${escapeHtml(source.id)}">
+            <div class="flex items-center gap-2 min-w-0">
+                <span class="w-2.5 h-2.5 rounded-full flex-none ${dot}" title="${health}"></span>
+                <span class="font-bold text-white truncate flex-grow">${escapeHtml(source.name)}</span>
+                <span class="text-xs uppercase text-gray-400">${escapeHtml(source.type)}</span>
+                <label class="switch" title="${source.isActive ? 'Turn off' : 'Turn on'}">
+                    <input type="checkbox" class="activate-switch" aria-label="${escapeHtml(source.name)} active" ${source.isActive ? 'checked' : ''}>
                     <span class="slider"></span>
                 </label>
-            </td>
-            <td class="text-right">
-                <div class="flex items-center justify-end gap-3">
-                    ${source.isActive ? `<button class="action-btn refresh-source-btn" title="Refresh this source">${ICONS.refresh}</button>` : ''}
-                    <button class="action-btn edit-source-btn" title="Edit Source">
-                        ${ICONS.edit}
-                    </button>
-                     <button class="action-btn delete-source-btn" title="Delete Source">
-                        ${ICONS.trash}
-                    </button>
-                </div>
-            </td>
-        `;
-        tbody.appendChild(tr);
-    });
+            </div>
+            <div class="text-xs text-gray-500 truncate" title="${escapeHtml(pathDisplay)}">${escapeHtml(pathDisplay)}</div>
+            <div class="text-sm ${failed ? 'text-red-400' : 'text-gray-400'}">${health} · ${escapeHtml(source.statusMessage || 'No status yet')}</div>
+            <div class="text-xs text-gray-500">Updated ${escapeHtml(updated)} · ${refreshText}</div>
+            <div class="flex items-center gap-2 mt-auto pt-1">
+                ${source.isActive ? `<button type="button" class="refresh-source-btn chip">${ICONS.refresh} Refresh</button>` : ''}
+                <button type="button" class="edit-source-btn chip">${ICONS.edit} Edit</button>
+                <button type="button" class="delete-source-btn chip ml-auto" aria-label="Delete ${escapeHtml(source.name)}" title="Delete source">${ICONS.trash}</button>
+            </div>
+        </div>`;
+    }).join('');
 };
 
 /**
  * Updates all settings UI elements based on the current state.
  * MODIFIED: Removed redundant admin checks as this page is now admin-only.
  */
-/** Chips at the top of Settings that jump to each visible section. */
-export const renderSettingsNav = () => {
-    const nav = document.getElementById('settings-nav');
-    const heads = [...document.querySelectorAll('#page-settings h2')].filter(h => h.offsetParent);
-    nav.innerHTML = heads.map((h, i) => `<button type="button" class="chip" data-i="${i}">${escapeHtml(h.textContent.trim())}</button>`).join('');
-    nav.onclick = (e) => {
-        const chip = e.target.closest('[data-i]');
-        if (chip) heads[chip.dataset.i].scrollIntoView({ block: 'start', behavior: 'smooth' });
+// Settings is split into pages. Each card joins the page that lists its heading; anything unlisted goes to System.
+const SETTINGS_PAGES = [
+    ['overview', 'Overview', []],
+    ['sources', 'Sources', ['Guide Data Sources']],
+    ['channels', 'Channels & guide', ['Channel EPG', 'AI Matching']],
+    ['playback', 'Players & profiles', ['Player Settings', 'Chromecast Settings']],
+    ['recording', 'Recording', ['DVR Settings', 'Storage Management']],
+    ['users', 'Users', ['User Management']],
+    ['system', 'System', []],
+];
+const headingText = (h) => h.textContent.replace(/\s+/g, ' ').trim();
+const pageOfHeading = (text) => (SETTINGS_PAGES.find(([, , heads]) => heads.includes(text)) || SETTINGS_PAGES[6])[0];
+const settingsCards = () => [...document.querySelectorAll('#page-settings h2')].map((h) => ({ h, card: h.closest('.rounded-xl'), page: pageOfHeading(headingText(h)) })).filter((c) => c.card);
+let settingsPage = (() => { try { return localStorage.getItem('viniplay.settingsPage') || 'overview'; } catch { return 'overview'; } })();
+
+/** Every settings card as a search target for the palette. */
+export const settingsSearchIndex = () => settingsCards().map(({ h, page }) => ({ title: headingText(h), page, pageLabel: SETTINGS_PAGES.find((p) => p[0] === page)[1] }));
+
+export const showSettingsPage = (page, headingTitle) => {
+    settingsPage = SETTINGS_PAGES.some((p) => p[0] === page) ? page : 'overview';
+    try { localStorage.setItem('viniplay.settingsPage', settingsPage); } catch { /* private mode: page is not remembered */ }
+    settingsCards().forEach(({ card, page: p }) => { card.dataset.settingsPage = p; card.hidden = p !== settingsPage; });
+    document.getElementById('settings-overview').hidden = settingsPage !== 'overview';
+    document.querySelectorAll('#settings-nav [data-page]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.page === settingsPage)));
+    if (settingsPage === 'overview') renderSettingsOverview();
+    const target = headingTitle && settingsCards().find((c) => headingText(c.h) === headingTitle);
+    const scroller = document.getElementById('page-settings');
+    scroller.scrollTop = target ? scroller.scrollTop + target.card.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 16 : 0;
+};
+
+function renderSettingsOverview() {
+    const box = document.getElementById('settings-overview');
+    const sources = [...(guideState.settings.m3uSources || []), ...(guideState.settings.epgSources || [])];
+    const failing = sources.filter((src) => /failed|not found/i.test(src.statusMessage || ''));
+    const overrides = guideState.settings.epgOverrides || {};
+    const channels = guideState.channels || [];
+    const noGuide = channels.filter((ch) => !overrides[ch.id] && !guideState.programs?.[ch.id]?.length).length;
+    const attention = [
+        noGuide && [`${noGuide.toLocaleString()} channel${noGuide === 1 ? ' has' : 's have'} no guide data`, 'The guide shows them as empty rows.', 'channels', 'Review channels'],
+        ...failing.map((src) => [`${src.name} failed to refresh`, src.statusMessage, 'sources', 'Fix source']),
+    ].filter(Boolean);
+    const status = {
+        sources: `${sources.length} source${sources.length === 1 ? '' : 's'}${failing.length ? `, ${failing.length} failing` : ''}`,
+        channels: `${(channels.length - noGuide).toLocaleString()} of ${channels.length.toLocaleString()} channels have guide data`,
+        playback: 'Stream, user agent and Chromecast profiles',
+        recording: 'Recording profile, padding and storage',
+        users: 'Accounts, roles and source access',
+        system: 'Timezone, logs, backup and reset',
     };
+    box.innerHTML = `<h2 class="sr-only">Overview</h2>${attention.map(([title, detail, page, label]) => `
+        <div class="flex flex-wrap items-center gap-3 rounded-xl p-4 mb-3" style="background:var(--tint-am);border:1px solid rgb(var(--c-am) / .4)">
+            <div class="flex-grow min-w-0"><div class="font-bold text-white">${escapeHtml(title)}</div><div class="text-sm text-gray-400">${escapeHtml(detail)}</div></div>
+            <button type="button" class="chip" data-page="${page}">${label}</button>
+        </div>`).join('')}
+        <div class="grid gap-3" style="grid-template-columns:repeat(auto-fill,minmax(15rem,1fr))">${SETTINGS_PAGES.slice(1).map(([key, label]) => `
+            <button type="button" class="text-left bg-gray-800 hover:bg-gray-700 rounded-xl p-4" data-page="${key}">
+                <div class="font-bold text-white">${label}</div><div class="text-sm text-gray-400 mt-1">${escapeHtml(status[key])}</div>
+            </button>`).join('')}</div>`;
+}
+
+// Number fields get - and + buttons: big targets for touch and a remote, and one save when the clicking stops.
+function addSteppers() {
+    document.querySelectorAll('#page-settings input[type="number"]:not([data-stepper])').forEach((input) => {
+        input.dataset.stepper = '1';
+        let timer = 0;
+        const btn = (label, step) => {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.className = 'chip flex-none justify-center';
+            b.textContent = label;
+            b.setAttribute('aria-label', `${step > 0 ? 'Increase' : 'Decrease'} ${input.labels?.[0]?.textContent.trim() || 'value'}`);
+            b.addEventListener('click', () => {
+                if (step > 0) input.stepUp(); else input.stepDown();
+                clearTimeout(timer);
+                timer = setTimeout(() => input.dispatchEvent(new Event('change', { bubbles: true })), 600);
+            });
+            return b;
+        };
+        const wrap = document.createElement('div');
+        wrap.className = 'flex items-center gap-2';
+        input.replaceWith(wrap);
+        input.classList.add('text-center', 'min-w-0');
+        wrap.append(btn('−', -1), input, btn('+', 1));
+    });
+}
+
+export const renderSettingsNav = () => {
+    addSteppers();
+    const nav = document.getElementById('settings-nav');
+    if (!document.getElementById('settings-overview')) nav.insertAdjacentHTML('afterend', '<section id="settings-overview" aria-label="Overview"></section>');
+    nav.innerHTML = SETTINGS_PAGES.map(([key, label]) => `<button type="button" class="chip" data-page="${key}">${label}</button>`).join('');
+    const go = (e) => {
+        const b = e.target.closest('[data-page]');
+        if (b) showSettingsPage(b.dataset.page);
+    };
+    nav.onclick = go;
+    document.getElementById('settings-overview').onclick = go;
+    showSettingsPage(settingsPage);
 };
 
 export const updateUIFromSettings = async () => {
@@ -1421,7 +1505,7 @@ export function setupSettingsEventListeners() {
     // --- Source Table Clicks (Edit, Delete, Activate) ---
     const handleSourceTableClick = async (e, sourceType) => {
         const target = e.target;
-        const row = target.closest('tr');
+        const row = target.closest('[data-source-id]');
         if (!row) return;
         const sourceId = row.dataset.sourceId;
         const source = guideState.settings[`${sourceType}Sources`].find(s => s.id === sourceId);
@@ -1790,8 +1874,11 @@ export function setupSettingsEventListeners() {
     });
 
     // --- Danger Zone ---
+    const resetWord = document.getElementById('clear-data-confirm');
+    resetWord.addEventListener('input', () => { UIElements.clearDataBtn.disabled = resetWord.value.trim() !== 'RESET'; });
     UIElements.clearDataBtn.addEventListener('click', () => {
-        showConfirm('Clear All Data?', 'This will permanently delete ALL settings and files from the server and your browser cache. The page will reload.', async () => {
+        if (resetWord.value.trim() !== 'RESET') return;
+        showConfirm('Clear all data?', 'Last check: sources, settings, all recordings and push keys are deleted from this server. This cannot be undone.', async () => {
             const res = await apiFetch('/api/data', { method: 'DELETE' }); // Use apiFetch
             if (res?.ok) { // Check for ok status
                 if (appState.db) {
