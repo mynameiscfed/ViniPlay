@@ -1,0 +1,511 @@
+/*
+ * App shell: navigation rail, top bar, bottom tab bar, account menu, "More" sheet.
+ *
+ * Sizes inside the shell use em, so one set of rules serves desktop (14px),
+ * phone (15px) and TV (24px at 1080p, see tv.css).
+ */
+
+#app-container {
+    display: grid;
+    grid-template-columns: 5.9em minmax(0, 1fr);
+    height: 100%;
+    font-size: .875rem;
+    background: var(--bg);
+    color: var(--tx);
+}
+
+#app-container.hidden {
+    display: none;
+}
+
+#app-body {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    position: relative;
+}
+
+#app-body>main {
+    flex: 1 1 auto;
+    min-height: 0;
+}
+
+/* ---------- Rail ---------- */
+.rail {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: .3em;
+    padding: 1.1em 0 1em;
+    background: var(--s1);
+    border-right: 1px solid var(--line);
+    overflow-y: auto;
+}
+
+.rail-brand {
+    display: block;
+    width: 2.7em;
+    height: 2.7em;
+    margin-bottom: .9em;
+    border-radius: .8em;
+    overflow: hidden;
+    flex: none;
+}
+
+.rail-brand img {
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+
+.rail .sp {
+    flex: 1;
+}
+
+.ni {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: .28em;
+    width: 5em;
+    padding: .4em 0;
+    border: 0;
+    border-radius: .8em;
+    background: transparent;
+    color: var(--tx3);
+    font: 650 .82em/1.1 var(--f-ui);
+    cursor: pointer;
+    white-space: nowrap;
+    flex: none;
+    transition: color .15s;
+}
+
+.ni .pl {
+    display: grid;
+    place-items: center;
+    width: 3.6em;
+    height: 2.2em;
+    border-radius: 1.2em;
+    transition: background-color .15s, color .15s;
+}
+
+.ni .pl svg {
+    width: 1.5em;
+    height: 1.5em;
+}
+
+.ni:hover {
+    color: var(--tx);
+}
+
+.ni:hover .pl {
+    background: var(--s3);
+}
+
+.ni.active {
+    color: var(--tx);
+}
+
+.ni.active .pl {
+    background: var(--cy);
+    color: var(--on);
+}
+
+/* ---------- Top bar ---------- */
+.top {
+    display: flex;
+    align-items: center;
+    gap: 1em;
+    height: 4.1em;
+    padding: 0 1.5em;
+    flex: none;
+}
+
+.top h1 {
+    margin: 0;
+    font: 700 1.7em/1 var(--f-disp);
+    letter-spacing: -.015em;
+    white-space: nowrap;
+    color: var(--tx);
+}
+
+.top .clock {
+    font: 600 .95em var(--f-mono);
+    color: var(--tx2);
+    white-space: nowrap;
+}
+
+.top .grow {
+    flex: 1;
+    min-width: 0;
+}
+
+.search {
+    display: flex;
+    align-items: center;
+    gap: .6em;
+    width: 25em;
+    max-width: 38vw;
+    height: 2.6em;
+    padding: 0 .7em 0 .9em;
+    border: 1px solid var(--line);
+    border-radius: .8em;
+    background: var(--s2);
+    color: var(--tx3);
+    font: 500 1em var(--f-ui);
+    text-align: left;
+    cursor: pointer;
+    flex: none;
+}
+
+.search:hover {
+    border-color: var(--line2);
+    color: var(--tx2);
+}
+
+.search .search-label {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.search kbd {
+    height: 1.9em;
+    font-size: .8em;
+}
+
+.ib {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 2.6em;
+    height: 2.6em;
+    border: 1px solid var(--line);
+    border-radius: .8em;
+    background: var(--s2);
+    color: var(--tx2);
+    cursor: pointer;
+    flex: none;
+    transition: background-color .15s, color .15s, border-color .15s;
+}
+
+.ib:hover {
+    background: var(--s3);
+    color: var(--tx);
+}
+
+.ib.on,
+.ib.active {
+    background: var(--tint-cy);
+    border-color: var(--cy);
+    color: var(--cy);
+}
+
+.ib .nb {
+    position: absolute;
+    top: -.35em;
+    right: -.35em;
+    min-width: 1.4em;
+    height: 1.4em;
+    padding: 0 .3em;
+    display: grid;
+    place-items: center;
+    border: 2px solid var(--bg);
+    border-radius: 1em;
+    background: var(--pk);
+    color: #1A0610;
+    font: 800 .72em/1 var(--f-ui);
+}
+
+.ib .nb.hidden {
+    display: none;
+}
+
+.av {
+    display: grid;
+    place-items: center;
+    width: 2.4em;
+    height: 2.4em;
+    border: 1px solid var(--line2);
+    border-radius: 50%;
+    background: var(--s4);
+    color: var(--tx);
+    font: 800 .95em var(--f-ui);
+    text-transform: uppercase;
+    cursor: pointer;
+    flex: none;
+}
+
+/* ---------- Account menu ---------- */
+.menu-wrap {
+    position: relative;
+    flex: none;
+}
+
+.menu {
+    position: absolute;
+    right: 0;
+    top: calc(100% + .6em);
+    z-index: 120;
+    width: 21em;
+    max-width: calc(100vw - 1.5em);
+    padding: .4em;
+    border: 1px solid var(--line2);
+    border-radius: 1em;
+    background: var(--s2);
+    box-shadow: var(--shadow-2);
+}
+
+.menu.hidden {
+    display: none;
+}
+
+.menu-head {
+    display: flex;
+    align-items: center;
+    gap: .8em;
+    padding: .7em .8em .8em;
+}
+
+.menu-head .av {
+    width: 2.8em;
+    height: 2.8em;
+    cursor: default;
+}
+
+.menu-head .who {
+    font-weight: 700;
+    font-size: 1.05em;
+    color: var(--tx);
+}
+
+.menu-head .role {
+    font-size: .86em;
+    color: var(--tx3);
+}
+
+.mi {
+    display: flex;
+    align-items: center;
+    gap: .8em;
+    width: 100%;
+    min-height: 2.9em;
+    padding: 0 .8em;
+    border: 0;
+    border-radius: .7em;
+    background: transparent;
+    color: var(--tx);
+    font: 600 1em var(--f-ui);
+    text-align: left;
+    cursor: pointer;
+}
+
+.mi:hover {
+    background: var(--s3);
+}
+
+.mi svg {
+    width: 1.3em;
+    height: 1.3em;
+    color: var(--tx2);
+}
+
+.mi kbd {
+    margin-left: auto;
+}
+
+.mi.danger,
+.mi.danger svg {
+    color: var(--rd);
+}
+
+.mi.hidden {
+    display: none;
+}
+
+.menu-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: .8em;
+    padding: .35em .8em;
+}
+
+.menu-row .lb {
+    color: var(--tx2);
+    font-weight: 600;
+}
+
+.menu-sep {
+    height: 1px;
+    margin: .4em .3em;
+    background: var(--line);
+}
+
+.seg>button.on {
+    background: var(--s4);
+    color: var(--tx);
+}
+
+/* ---------- Bottom tab bar and "More" sheet (phones) ---------- */
+.tabbar {
+    display: none;
+}
+
+#mobile-menu-overlay {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 140;
+    background: var(--scrim);
+}
+
+#mobile-menu-overlay.hidden {
+    display: none;
+}
+
+.sheet {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 150;
+    display: flex;
+    flex-direction: column;
+    gap: .2em;
+    padding: .7em 1em calc(1.2em + env(safe-area-inset-bottom, 0px));
+    border-top: 1px solid var(--line2);
+    border-radius: 1.4em 1.4em 0 0;
+    background: var(--s2);
+    box-shadow: var(--shadow-2);
+    font-size: 1rem;
+    animation: sheet-up .22s ease-out;
+}
+
+.sheet.hidden {
+    display: none;
+}
+
+.sheet-grip {
+    width: 2.8em;
+    height: .3em;
+    margin: 0 auto .8em;
+    border-radius: 1em;
+    background: var(--line2);
+}
+
+.sheet-close {
+    margin-top: .6em;
+}
+
+@keyframes sheet-up {
+    from {
+        transform: translateY(40px);
+        opacity: 0;
+    }
+
+    to {
+        transform: none;
+        opacity: 1;
+    }
+}
+
+/* ---------- Tablet: tighter top bar ---------- */
+@media (max-width: 1023.98px) {
+    #app-container {
+        font-size: .9rem;
+    }
+
+    .top {
+        padding: 0 1.1em;
+    }
+
+    .search {
+        width: 3em;
+        padding: 0;
+        justify-content: center;
+    }
+
+    .search .search-label,
+    .search kbd {
+        display: none;
+    }
+}
+
+/* ---------- Phone ---------- */
+@media (max-width: 767.98px) {
+    #app-container {
+        grid-template-columns: minmax(0, 1fr);
+        font-size: .9375rem;
+        padding-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px));
+    }
+
+    #app-rail {
+        display: none;
+    }
+
+    .top {
+        height: 3.6em;
+        gap: .6em;
+        padding: 0 .9em;
+    }
+
+    .top h1 {
+        font-size: 1.45em;
+    }
+
+    .top .clock {
+        display: none;
+    }
+
+    #tab-notifications {
+        order: 5;
+    }
+
+    .tabbar,
+    #app-container:not(.hidden)~.tabbar {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 130;
+        display: flex;
+        justify-content: space-around;
+        height: calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px));
+        padding: .45em .4em env(safe-area-inset-bottom, 0px);
+        border-top: 1px solid var(--line);
+        background: rgb(var(--c-s1) / .97);
+        -webkit-backdrop-filter: blur(10px);
+        backdrop-filter: blur(10px);
+        font-size: .9375rem;
+    }
+
+    #app-container.hidden~.tabbar {
+        display: none;
+    }
+
+    .tabbar .ni {
+        flex: 1;
+        width: auto;
+        font-size: .76em;
+        padding: .2em 0;
+    }
+
+    .tabbar .ni .pl {
+        width: 3.4em;
+        height: 2em;
+    }
+}
+
+/* Anything fixed to the screen edge clears the notch in landscape. */
+@media (max-width: 767.98px) and (orientation: landscape) {
+    .tabbar {
+        padding-left: env(safe-area-inset-left, 0px);
+        padding-right: env(safe-area-inset-right, 0px);
+    }
+}

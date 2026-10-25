@@ -15,6 +15,7 @@ import { finalizeGuideLoad, handleGuideLoad } from './guide.js';
 import { fetchConfig, saveUserSetting, saveDeviceSetting } from './api.js';
 import { initActivityPage } from './admin.js';
 import { initVodPage } from './vod.js';
+import { refreshHome } from './home.js';
 import { sendTelemetry } from './telemetry.js';
 import { escapeHtml } from './utils.js';
 
@@ -463,36 +464,19 @@ export const makeColumnResizable = (handleEl, targetEl, minWidth, settingKey, cs
 };
 
 /**
- * Opens the mobile navigation menu.
+ * Opens the "More" sheet on phones.
  */
 export const openMobileMenu = () => {
-    if (UIElements.mobileNavMenu) {
-        UIElements.mobileNavMenu.classList.remove('hidden');
-        UIElements.mobileNavMenu.classList.remove('-translate-x-full');
-        UIElements.mobileNavMenu.classList.add('translate-x-0');
-    }
-    if (UIElements.mobileMenuOverlay) {
-        UIElements.mobileMenuOverlay.classList.remove('hidden');
-    }
-    document.body.classList.add('overflow-hidden');
+    UIElements.mobileNavMenu?.classList.remove('hidden');
+    UIElements.mobileMenuOverlay?.classList.remove('hidden');
 };
 
 /**
- * Closes the mobile navigation menu.
+ * Closes the "More" sheet on phones.
  */
 export const closeMobileMenu = () => {
-    if (UIElements.mobileNavMenu) {
-        UIElements.mobileNavMenu.classList.add('-translate-x-full');
-        UIElements.mobileNavMenu.classList.remove('translate-x-0');
-        UIElements.mobileNavMenu.addEventListener('transitionend', function handler() {
-            UIElements.mobileNavMenu.classList.add('hidden');
-            UIElements.mobileNavMenu.removeEventListener('transitionend', handler);
-        });
-    }
-    if (UIElements.mobileMenuOverlay) {
-        UIElements.mobileMenuOverlay.classList.add('hidden');
-    }
-    document.body.classList.remove('overflow-hidden');
+    UIElements.mobileNavMenu?.classList.add('hidden');
+    UIElements.mobileMenuOverlay?.classList.add('hidden');
 };
 
 // FINAL FIX: This function will be called whenever a setting is saved.
@@ -561,7 +545,8 @@ export const handleRouteChange = () => {
  * @param {string} path - The new path to render.
  */
 async function proceedWithRouteChange(path) {
-    const isGuide = path.startsWith('/tvguide') || path === '/';
+    const isHome = path === '/' || path.startsWith('/home');
+    const isGuide = path.startsWith('/tvguide');
     const isMultiView = path.startsWith('/multiview');
     const isPlayer = path.startsWith('/player');
     const isDvr = path.startsWith('/dvr');
@@ -574,49 +559,33 @@ async function proceedWithRouteChange(path) {
 
     const isAdmin = appState.currentUser?.isAdmin;
 
-    // Toggle desktop and mobile nav button visibility and active state
-    UIElements.tabGuide?.classList.toggle('active', isGuide);
-    UIElements.mobileNavGuide?.classList.toggle('active', isGuide);
-
-    UIElements.tabMultiview?.classList.toggle('active', isMultiView);
-    UIElements.mobileNavMultiview?.classList.toggle('active', isMultiView);
-
-    UIElements.tabPlayer?.classList.toggle('active', isPlayer);
-    UIElements.mobileNavPlayer?.classList.toggle('active', isPlayer);
-
-    // DVR tab is visible to all users to see completed recordings
-    if (UIElements.tabDvr) UIElements.tabDvr.classList.toggle('active', isDvr);
-    if (UIElements.mobileNavDvr) UIElements.mobileNavDvr.classList.toggle('active', isDvr);
-
-    // VOD tab is visible to all
-    if (UIElements.tabVod) UIElements.tabVod.classList.toggle('active', isVod);
-    if (UIElements.mobileNavVod) UIElements.mobileNavVod.classList.toggle('active', isVod);
-    // --- END ADD ---
-
-    // Activity tab is for admins only
-    if (UIElements.tabActivity) {
-        UIElements.tabActivity.classList.toggle('active', isActivity && isAdmin);
-        UIElements.tabActivity.classList.toggle('hidden', !isAdmin);
-    }
-    if (UIElements.mobileNavActivity) {
-        UIElements.mobileNavActivity.classList.toggle('active', isActivity && isAdmin);
-        UIElements.mobileNavActivity.classList.toggle('hidden', !isAdmin);
-    }
-
+    // Navigation state. The rail (tab-*) and the phone tab bar (mobile-nav-*) stay in step.
+    // The phone bar has no Multi-View, Activity or Settings tab, so those light up "More".
+    const setActive = (name, on) => {
+        UIElements['tab' + name]?.classList.toggle('active', on);
+        UIElements['mobileNav' + name]?.classList.toggle('active', on);
+    };
+    setActive('Home', isHome);
+    setActive('Guide', isGuide);
+    setActive('Multiview', isMultiView);
+    setActive('Dvr', isDvr);
+    setActive('Vod', isVod);
+    setActive('Activity', isActivity && isAdmin);
+    setActive('Settings', isSettings && isAdmin);
     UIElements.tabNotifications?.classList.toggle('active', isNotifications);
-    UIElements.mobileNavNotifications?.classList.toggle('active', isNotifications);
+    UIElements.mobileMenuToggle?.classList.toggle('active', isMultiView || isPlayer || (isActivity && isAdmin) || (isSettings && isAdmin));
 
-    // Settings tab is for admins only
-    if (UIElements.tabSettings) {
-        UIElements.tabSettings.classList.toggle('active', isSettings && isAdmin);
-        UIElements.tabSettings.classList.toggle('hidden', !isAdmin);
+    // Admin-only destinations
+    for (const key of ['tabActivity', 'mobileNavActivity', 'tabSettings', 'mobileNavSettings']) {
+        UIElements[key]?.classList.toggle('hidden', !isAdmin);
     }
-    if (UIElements.mobileNavSettings) {
-        UIElements.mobileNavSettings.classList.toggle('active', isSettings && isAdmin);
-        UIElements.mobileNavSettings.classList.toggle('hidden', !isAdmin);
-    }
+
+    setPageTitle(path);
 
     // Toggle page visibility
+    UIElements.pageHome.classList.toggle('hidden', !isHome);
+    UIElements.pageHome.classList.toggle('flex', isHome);
+
     UIElements.pageGuide.classList.toggle('hidden', !isGuide);
     UIElements.pageGuide.classList.toggle('flex', isGuide);
 
@@ -645,10 +614,9 @@ async function proceedWithRouteChange(path) {
     UIElements.pageSettings.classList.toggle('hidden', !isSettings || !isAdmin);
     UIElements.pageSettings.classList.toggle('flex', isSettings && isAdmin);
 
-    const appContainer = UIElements.appContainer;
-
-    if (isGuide) {
-        if (appContainer) appContainer.classList.remove('header-collapsed');
+    if (isHome) {
+        refreshHome();
+    } else if (isGuide) {
         if (UIElements.guideContainer) UIElements.guideContainer.scrollTop = 0;
 
         if (blockConfigReload) {
@@ -671,8 +639,6 @@ async function proceedWithRouteChange(path) {
         }
 
     } else {
-        if (appContainer) appContainer.classList.remove('header-collapsed');
-
         if (isSettings && isAdmin) {
             if (blockConfigReload) {
                 console.log(`%c[DEBUG] RACE_CONDITION_FIX: Navigation to Settings tab occurred while config reload was blocked. Skipping reload.`, 'color: #fca5a5; font-weight: bold;');
@@ -698,6 +664,31 @@ async function proceedWithRouteChange(path) {
 }
 
 
+
+const PAGE_TITLES = [
+    ['/tvguide', 'Live TV'], ['/multiview', 'Multi-View'], ['/player', 'Open a stream URL'], ['/dvr', 'Recordings'],
+    ['/vod', 'Movies & Series'], ['/activity', 'Activity'], ['/notifications', 'Reminders'], ['/settings', 'Settings'],
+];
+let headerClockOn = false;
+
+/** Sets the top bar title, the date and time shown beside it, and the browser tab title. */
+function setPageTitle(path) {
+    const hit = PAGE_TITLES.find(([prefix]) => path.startsWith(prefix));
+    const title = hit ? hit[1] : 'Home';
+    if (UIElements.pageTitle) UIElements.pageTitle.textContent = title;
+    document.title = hit ? `${title} · VINI PLAY` : 'VINI PLAY';
+    headerClockOn = !hit || path.startsWith('/tvguide');
+    updateHeaderClock();
+}
+
+function updateHeaderClock() {
+    if (!UIElements.headerSub) return;
+    UIElements.headerSub.textContent = headerClockOn
+        ? new Date().toLocaleString([], { weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }).replace(',', ' ·')
+        : '';
+}
+setInterval(updateHeaderClock, 30000);
+
 /**
  * Pushes a new state to the browser history and triggers a route change.
  * @param {string} path - The new path to navigate to.
@@ -715,7 +706,8 @@ export const navigate = (path) => {
  */
 export const switchTab = (activeTab) => {
     let newPath;
-    if (activeTab === 'guide') newPath = '/tvguide';
+    if (activeTab === 'home') newPath = '/home';
+    else if (activeTab === 'guide') newPath = '/tvguide';
     else if (activeTab === 'multiview') newPath = '/multiview';
     else if (activeTab === 'player') newPath = '/player';
     else if (activeTab === 'dvr') newPath = '/dvr';

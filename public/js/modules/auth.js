@@ -347,7 +347,10 @@ const showApp = (user) => {
     // which acts as the single source of truth for UI state based on routes and permissions.
     // This prevents race conditions during app initialization.
     UIElements.userDisplay.textContent = user.username;
-    UIElements.userDisplay.classList.remove('hidden');
+    UIElements.userRole.textContent = user.isAdmin ? 'Administrator' : 'Member';
+    const initial = (user.username || '?').charAt(0);
+    UIElements.avatarBtn.textContent = initial;
+    UIElements.avatarMenuInitial.textContent = initial;
 
     console.log(`[AUTH_UI] User display set to: ${user.username}.`);
 

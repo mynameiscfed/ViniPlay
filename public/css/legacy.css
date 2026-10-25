@@ -469,50 +469,10 @@
             }
         }
 
-        #main-header,
         #unified-guide-header {
-            transition: transform 0.3s ease-out, opacity 0.3s ease-out, max-height 0.3s ease-out, padding 0.3s ease-out, margin 0.3s ease-out, border-width 0.3s ease-out;
-            /* Add padding, margin, border-width to transition */
-            transform: translateY(0);
-            opacity: 1;
-            max-height: 200px;
-            /* Set a generous max-height for non-collapsed state */
-            overflow: hidden;
             flex-shrink: 0;
-            box-shadow: none;
-            padding-top: initial;
-            /* Ensure padding is managed */
-            padding-bottom: initial;
-            /* Ensure padding is managed */
-            z-index: 35;
-        }
-
-        #main-header {
-            padding: 1rem;
-            z-index: 40;
-        }
-
-        #unified-guide-header {
             padding: 0.5rem 1rem;
-        }
-
-        #app-container.header-collapsed #main-header,
-        #app-container.header-collapsed #unified-guide-header {
-            transform: translateY(-100%);
-            opacity: 0;
-            max-height: 0 !important;
-            /* Force max-height to 0 */
-            padding: 0 !important;
-            /* Force padding to 0 */
-            margin: 0 !important;
-            /* Force margin to 0 */
-            border-width: 0 !important;
-            /* Force border to 0 */
-            pointer-events: none;
-        }
-
-        #page-guide {
-            transition: padding-top 0.3s ease-out;
+            z-index: 35;
         }
 
         .programme-item.has-notification {

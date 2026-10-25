@@ -1027,36 +1027,4 @@ export function setupGuideEventListeners() {
             openProgramDetails(progItem);
         }
     });
-
-    let lastScrollTop = 0;
-    let headerHeight = 0; // Will store the combined height of main-header and unified-guide-header
-
-    const handleScrollHeader = throttle(() => {
-        if (!UIElements.guideContainer || !UIElements.appContainer || !UIElements.mainHeader || !UIElements.unifiedGuideHeader) {
-            return;
-        }
-
-        // Calculate header height once, or re-calculate if it changes (e.g., on resize)
-        if (headerHeight === 0) {
-            headerHeight = UIElements.mainHeader.offsetHeight + UIElements.unifiedGuideHeader.offsetHeight;
-        }
-
-        const scrollTop = UIElements.guideContainer.scrollTop;
-        const scrollDirection = scrollTop > lastScrollTop ? 'down' : 'up';
-
-        // Define a threshold for collapsing (e.g., headerHeight or a fixed value)
-        const collapseThreshold = headerHeight / 2; // Hide after scrolling half the header height
-
-        if (scrollDirection === 'down' && scrollTop > collapseThreshold) {
-            UIElements.appContainer.classList.add('header-collapsed');
-        } else if (scrollDirection === 'up' && scrollTop < lastScrollTop) { // Reappear on any scroll up
-            UIElements.appContainer.classList.remove('header-collapsed');
-        }
-        lastScrollTop = scrollTop <= 0 ? 0 : scrollTop;
-
-    }, 100);
-
-    if (UIElements.guideContainer) {
-        UIElements.guideContainer.addEventListener('scroll', handleScrollHeader);
-    }
 }

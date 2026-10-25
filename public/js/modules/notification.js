@@ -248,6 +248,12 @@ export const renderNotifications = () => {
 
     UIElements.noNotificationsMessage.classList.toggle('hidden', upcomingNotifications.length > 0);
 
+    // Count on the bell in the top bar.
+    if (UIElements.reminderBadge) {
+        UIElements.reminderBadge.textContent = upcomingNotifications.length > 99 ? '99+' : upcomingNotifications.length;
+        UIElements.reminderBadge.classList.toggle('hidden', upcomingNotifications.length === 0);
+    }
+
     notificationListEl.innerHTML = upcomingNotifications.map(notif => {
         const programStartTime = new Date(notif.programStart);
         const notificationTime = new Date(notif.scheduledTime);
@@ -438,7 +444,7 @@ export const navigateToProgramInGuide = async (channelId, programStart, programI
         const stableChannelIdSuffix = channelId.includes('_') ? '_' + channelId.split('_').pop() : channelId;
 
         // No need to navigate again if we are already on the guide page from the deep link
-        if (window.location.pathname !== '/tvguide' && window.location.pathname !== '/') {
+        if (window.location.pathname !== '/tvguide') {
             navigate('/tvguide');
             // Wait a moment for the page switch to happen visually.
             await new Promise(resolve => setTimeout(resolve, 50));

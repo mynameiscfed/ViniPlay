@@ -38,6 +38,7 @@
     <link rel="stylesheet" href="/css/tokens.css?v=1">
     <link rel="stylesheet" href="/css/tailwind.css?v=1">
     <link rel="stylesheet" href="/css/base.css?v=1">
+    <link rel="stylesheet" href="/css/shell.css?v=1">
     <link rel="stylesheet" href="/css/legacy.css?v=1">
 
     <script src="https://cdn.jsdelivr.net/npm/mpegts.js/dist/mpegts.js"></script>
@@ -108,47 +109,76 @@
     </div>
 
     <!-- Main App Container -->
-    <div id="app-container" class="hidden flex flex-col h-screen">
-        <!-- NEW: Broadcast Message Banner Container -->
+    <div id="app-container" class="hidden h-screen">
         <div id="broadcast-banner-container"></div>
 
-        <header id="main-header"
-            class="bg-gray-800 text-white p-4 shadow-md flex-shrink-0 flex items-center justify-between">
-            <div class="flex items-center gap-3">
-                <button id="mobile-menu-toggle"
-                    class="lg:hidden text-gray-300 hover:text-white p-2 rounded-md transition-colors">
-                    <span data-icon="menu"></span>
+        <!-- Navigation rail (tablet and desktop) -->
+        <nav id="app-rail" class="rail" aria-label="Main">
+            <a class="rail-brand" href="/" aria-label="ViniPlay home"><img src="/logo.svg" alt=""></a>
+            <button id="tab-home" type="button" class="ni"><span class="pl"><span data-icon="home"></span></span><span class="lb">Home</span></button>
+            <button id="tab-guide" type="button" class="ni"><span class="pl"><span data-icon="tv"></span></span><span class="lb">Live TV</span></button>
+            <button id="tab-multiview" type="button" class="ni"><span class="pl"><span data-icon="grid"></span></span><span class="lb">Multi-View</span></button>
+            <button id="tab-vod" type="button" class="ni"><span class="pl"><span data-icon="film"></span></span><span class="lb">Movies</span></button>
+            <button id="tab-dvr" type="button" class="ni"><span class="pl"><span data-icon="rec"></span></span><span class="lb">Recordings</span></button>
+            <span class="sp"></span>
+            <button id="tab-activity" type="button" class="ni hidden"><span class="pl"><span data-icon="pulse"></span></span><span class="lb">Activity</span></button>
+            <button id="tab-settings" type="button" class="ni hidden"><span class="pl"><span data-icon="gear"></span></span><span class="lb">Settings</span></button>
+        </nav>
+
+        <div id="app-body">
+            <header id="main-header" class="top">
+                <h1 id="page-title">Home</h1>
+                <span id="header-sub" class="clock"></span>
+                <span class="grow"></span>
+                <button id="header-search-btn" type="button" class="search" aria-label="Search">
+                    <span data-icon="search"></span>
+                    <span class="search-label">Search channels, shows, movies</span>
+                    <kbd>/</kbd>
                 </button>
-                <img src="/logo.svg" alt="VINI PLAY Logo" class="h-8 w-8">
-                <h1 class="text-xl sm:text-2xl font-bold">VINI PLAY</h1>
-            </div>
-            <div class="flex items-center gap-4">
-                <span id="user-display" class="text-sm text-gray-400 hidden sm:block"></span>
-                <div class="hidden lg:flex gap-2">
-                    <button id="tab-guide"
-                        class="tab-button text-sm sm:text-base font-medium py-2 px-4 text-gray-300 hover:bg-gray-700 active rounded-md transition-colors">TV
-                        Guide</button>
-                    <button id="tab-multiview"
-                        class="tab-button text-sm sm:text-base font-medium py-2 px-4 text-gray-300 hover:bg-gray-700 rounded-md transition-colors">Multi-View</button>
-                    <button id="tab-player"
-                        class="tab-button text-sm sm:text-base font-medium py-2 px-4 text-gray-300 hover:bg-gray-700 rounded-md transition-colors">Player</button>
-                    <button id="tab-dvr"
-                        class="tab-button text-sm sm:text-base font-medium py-2 px-4 text-gray-300 hover:bg-gray-700 rounded-md transition-colors">DVR</button>
-                    <button id="tab-vod"
-                        class="tab-button text-sm sm:text-base font-medium py-2 px-4 text-gray-300 hover:bg-gray-700 rounded-md transition-colors">VODs</button>
-                    <button id="tab-activity"
-                        class="tab-button hidden text-sm sm:text-base font-medium py-2 px-4 text-gray-300 hover:bg-gray-700 rounded-md transition-colors">Activity</button>
-                    <button id="tab-notifications"
-                        class="tab-button text-sm sm:text-base font-medium py-2 px-4 text-gray-300 hover:bg-gray-700 rounded-md transition-colors">Notifications</button>
-                    <button id="tab-settings"
-                        class="tab-button text-sm sm:text-base font-medium py-2 px-4 text-gray-300 hover:bg-gray-700 rounded-md transition-colors">Settings</button>
+                <button id="tab-notifications" type="button" class="ib" aria-label="Reminders" title="Reminders">
+                    <span data-icon="bell"></span>
+                    <span id="reminder-badge" class="nb hidden">0</span>
+                </button>
+                <div class="menu-wrap">
+                    <button id="avatar-btn" type="button" class="av" aria-haspopup="true" aria-expanded="false" aria-label="Account menu">?</button>
+                    <div id="avatar-menu" class="menu hidden" role="menu">
+                        <div class="menu-head">
+                            <span class="av" aria-hidden="true" id="avatar-menu-initial">?</span>
+                            <div class="min-w-0">
+                                <div id="user-display" class="who"></div>
+                                <div id="user-role" class="role"></div>
+                            </div>
+                        </div>
+                        <button id="tab-player" type="button" class="mi" role="menuitem"><span data-icon="play"></span>Open a stream URL</button>
+                        <button id="shortcuts-btn" type="button" class="mi" role="menuitem"><span data-icon="keyboard"></span>Keyboard shortcuts<kbd>?</kbd></button>
+                        <div class="menu-row">
+                            <span class="lb">Theme</span>
+                            <div class="seg" id="theme-seg" role="group" aria-label="Theme">
+                                <button type="button" data-theme-pref="dark">Dark</button>
+                                <button type="button" data-theme-pref="light">Light</button>
+                                <button type="button" data-theme-pref="system">Auto</button>
+                            </div>
+                        </div>
+                        <div class="menu-row">
+                            <span class="lb">TV mode</span>
+                            <div class="seg" id="tv-seg" role="group" aria-label="TV mode">
+                                <button type="button" data-tv-pref="auto">Auto</button>
+                                <button type="button" data-tv-pref="on">On</button>
+                                <button type="button" data-tv-pref="off">Off</button>
+                            </div>
+                        </div>
+                        <div class="menu-sep"></div>
+                        <button id="logout-btn" type="button" class="mi danger" role="menuitem"><span data-icon="logout"></span>Sign out</button>
+                    </div>
                 </div>
-                <button id="logout-btn"
-                    class="text-sm bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-3 rounded-md transition-colors">Logout</button>
-            </div>
-        </header>
+            </header>
 
         <main class="flex-grow flex flex-col overflow-hidden">
+            <!-- Home Page -->
+            <div id="page-home" class="hidden flex-grow flex-col overflow-y-auto custom-scrollbar">
+                <div id="home-content" class="page-pad"></div>
+            </div>
+
             <!-- TV Guide Page -->
             <div id="page-guide" class="flex flex-grow flex-col overflow-hidden">
                 <div id="unified-guide-header"
@@ -1233,59 +1263,28 @@
                 </div>
             </div>
         </main>
-
-    </div>
-
-    <!-- Mobile Navigation Menu -->
-    <div id="mobile-nav-menu"
-        class="hidden fixed inset-y-0 left-0 w-64 bg-gray-900 border-r border-gray-700 z-50 flex-col py-6 px-4 transform -translate-x-full transition-transform duration-300 ease-in-out">
-        <div class="flex justify-between items-center mb-6">
-            <h2 class="text-xl font-bold text-white">Navigation</h2>
-            <button id="mobile-menu-close"
-                class="text-gray-400 hover:text-white text-3xl leading-none font-bold">&times;</button>
-        </div>
-        <nav class="flex flex-col gap-4">
-            <button id="mobile-nav-guide"
-                class="text-left tab-button text-lg font-medium py-2 px-3 text-gray-300 hover:bg-gray-800 rounded-md transition-colors active">
-                <span class="flex items-center gap-2"><span data-icon="guide"></span> TV Guide</span>
-            </button>
-            <button id="mobile-nav-multiview"
-                class="text-left tab-button text-lg font-medium py-2 px-3 text-gray-300 hover:bg-gray-800 rounded-md transition-colors">
-                <span class="flex items-center gap-2"><span data-icon="multiview"></span> Multi-View</span>
-            </button>
-            <button id="mobile-nav-player"
-                class="text-left tab-button text-lg font-medium py-2 px-3 text-gray-300 hover:bg-gray-800 rounded-md transition-colors">
-                <span class="flex items-center gap-2"><span data-icon="play"></span> Player</span>
-            </button>
-            <button id="mobile-nav-dvr"
-                class="text-left tab-button text-lg font-medium py-2 px-3 text-gray-300 hover:bg-gray-800 rounded-md transition-colors">
-                <span class="flex items-center gap-2"><span data-icon="dvr"></span> DVR</span>
-            </button>
-            <button id="mobile-nav-vod"
-                class="text-left tab-button text-lg font-medium py-2 px-3 text-gray-300 hover:bg-gray-800 rounded-md transition-colors">
-                <span class="flex items-center gap-2"><span data-icon="multiview"></span> VODs</span>
-            </button>
-            <!-- NEW: Admin Activity Tab (Mobile) -->
-            <button id="mobile-nav-activity"
-                class="hidden text-left tab-button text-lg font-medium py-2 px-3 text-gray-300 hover:bg-gray-800 rounded-md transition-colors">
-                <span class="flex items-center gap-2"><span data-icon="info"></span> Activity</span>
-            </button>
-            <button id="mobile-nav-notifications"
-                class="text-left tab-button text-lg font-medium py-2 px-3 text-gray-300 hover:bg-gray-800 rounded-md transition-colors">
-                <span class="flex items-center gap-2"><span data-icon="notifications"></span> Notifications</span>
-            </button>
-            <button id="mobile-nav-settings"
-                class="text-left tab-button text-lg font-medium py-2 px-3 text-gray-300 hover:bg-gray-800 rounded-md transition-colors">
-                <span class="flex items-center gap-2"><span data-icon="settings"></span> Settings</span>
-            </button>
-        </nav>
-        <div class="mt-auto">
-            <button id="mobile-nav-logout-btn"
-                class="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-3 rounded-md transition-colors">Logout</button>
         </div>
     </div>
 
-    <div id="mobile-menu-overlay" class="hidden fixed inset-0 bg-black/50 z-40"></div>
+    <!-- Bottom tab bar (phones) -->
+    <nav id="app-tabbar" class="tabbar hidden" aria-label="Main">
+        <button id="mobile-nav-home" type="button" class="ni"><span class="pl"><span data-icon="home"></span></span><span class="lb">Home</span></button>
+        <button id="mobile-nav-guide" type="button" class="ni"><span class="pl"><span data-icon="tv"></span></span><span class="lb">Live TV</span></button>
+        <button id="mobile-nav-vod" type="button" class="ni"><span class="pl"><span data-icon="film"></span></span><span class="lb">Movies</span></button>
+        <button id="mobile-nav-dvr" type="button" class="ni"><span class="pl"><span data-icon="rec"></span></span><span class="lb">Recordings</span></button>
+        <button id="mobile-menu-toggle" type="button" class="ni"><span class="pl"><span data-icon="menu"></span></span><span class="lb">More</span></button>
+    </nav>
+
+    <!-- "More" sheet (phones) -->
+    <div id="mobile-menu-overlay" class="hidden"></div>
+    <div id="mobile-nav-menu" class="sheet hidden" role="dialog" aria-label="More">
+        <div class="sheet-grip"></div>
+        <button id="mobile-nav-multiview" type="button" class="mi"><span data-icon="grid"></span>Multi-View</button>
+        <button id="mobile-nav-player" type="button" class="mi"><span data-icon="play"></span>Open a stream URL</button>
+        <button id="mobile-nav-activity" type="button" class="mi hidden"><span data-icon="pulse"></span>Activity</button>
+        <button id="mobile-nav-settings" type="button" class="mi hidden"><span data-icon="gear"></span>Settings</button>
+        <button id="mobile-menu-close" type="button" class="btn btn-ghost sheet-close">Close</button>
+    </div>
 
     <!-- Modals -->
     <div id="video-modal" class="hidden fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
