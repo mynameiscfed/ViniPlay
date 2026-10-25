@@ -5,7 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node --test test/syntax.test.js",
+    "test": "node --test test/*.test.js",
     "test:container": "bash test/container-smoke.sh"
   },
   "author": "Andrea Ardovini",

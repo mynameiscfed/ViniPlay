@@ -120,6 +120,12 @@ The image proxy (VOD posters) and the "test URL" button refuse to fetch internal
 -   `SSRF_ALLOW_PRIVATE_NETWORKS=true` allows private LAN ranges (loopback and metadata addresses stay blocked).
 -   `SSRF_ALLOWED_HOSTS=dispatcharr.lan,192.168.1.20` exempts specific hosts.
 
+### Database notes
+
+ViniPlay keeps users, sessions, DVR jobs, stream history and the VOD catalogue in SQLite (`/data/viniplay.db`). It runs in WAL mode, which makes writes much cheaper and lets reads proceed while a write is in progress. WAL keeps recent changes in two extra files next to the database, `viniplay.db-wal` and `viniplay.db-shm`, so when you back up `/data` by copying files, copy all three (or stop the container first).
+
+WAL does not work reliably when `/data` is on a network share (NFS/SMB). In that case add `SQLITE_JOURNAL_MODE=DELETE` to `.env` to keep the classic rollback journal. Accepted values are `WAL` (default), `DELETE`, `TRUNCATE` and `PERSIST`.
+
 ### Method 2: Using `docker`
 
 1.  **Build the Image:**

@@ -18,6 +18,9 @@ const session = require('express-session');
 const bcrypt = require('bcrypt');
 const sqlite3 = require('sqlite3').verbose();
 const SQLiteStore = require('connect-sqlite3')(session);
+const { configureConnection, INDEX_DDL } = require('./dbConfig');
+const { throttleSessionTouch } = require('./sessionTouch');
+const { createUserCache } = require('./userCache');
 const xmlJS = require('xml-js');
 const zlib = require('zlib');
 const webpush = require('web-push');
@@ -156,6 +159,11 @@ try {
 
 
 // --- Database Setup ---
+// Resolves to the journal mode in effect once the main connection is configured. The
+// session store opens its own connection and waits on this before tuning itself.
+let resolveDbConfigured;
+const dbConfigured = new Promise((resolve) => { resolveDbConfigured = resolve; });
+
 const db = new sqlite3.Database(DB_PATH, (err) => {
     if (err) {
         console.error("[DB] Error opening database:", err.message);
@@ -163,6 +171,9 @@ const db = new sqlite3.Database(DB_PATH, (err) => {
     } else {
         console.log("[DB] Connected to the SQLite database.");
         db.serialize(() => {
+            // WAL + synchronous=NORMAL, a 5 s busy timeout, and a larger page cache (see dbConfig.js).
+            // Issued first so the journal mode is switched before the schema statements run.
+            configureConnection(db, { label: 'main' }).then(resolveDbConfigured);
             db.run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE, password TEXT, isAdmin INTEGER DEFAULT 0, canUseDvr INTEGER DEFAULT 0, allowed_sources TEXT)`, (err) => {
                 if (err) {
                     console.error("[DB] Error creating 'users' table:", err.message);
@@ -325,6 +336,16 @@ const db = new sqlite3.Database(DB_PATH, (err) => {
             )`, (err) => {
                 if (err) console.error("[DB] Error creating 'watch_progress' table:", err.message);
             });
+
+            // --- Secondary indexes (idempotent; see dbConfig.js for what each one serves) ---
+            INDEX_DDL.forEach((ddl) => {
+                db.run(ddl, (indexErr) => {
+                    if (indexErr) console.error(`[DB] Error creating index (${ddl}):`, indexErr.message);
+                });
+            });
+            // Refresh planner statistics so the new indexes are picked correctly.
+            db.run('PRAGMA optimize');
+
             // --- DVR Job Loading, Scheduling and Restart Recovery ---
             console.log('[DVR] Checking and recovering pending/active DVR jobs from database...');
             db.all("SELECT * FROM dvr_jobs WHERE status IN ('recording', 'reconnecting')", [], (err, activeJobs) => {
@@ -549,9 +570,16 @@ if (sessionSecret.includes('replace_this')) {
     console.warn('[SECURITY] Using a weak or default SESSION_SECRET. Please replace it.');
 }
 
+// connect-sqlite3 opens its own connection to viniplay.db. Give it the same busy timeout
+// (and synchronous=NORMAL once WAL is confirmed) so session writes do not fail with
+// SQLITE_BUSY while the main connection is busy, and stop it from writing on every request.
+const sessionStore = new SQLiteStore({ db: 'viniplay.db', dir: DATA_DIR, table: 'sessions' });
+dbConfigured.then(() => configureConnection(sessionStore.db, { label: 'session-store', setJournalMode: false, tuneCache: false }));
+throttleSessionTouch(sessionStore);
+
 app.use(
     session({
-        store: new SQLiteStore({ db: 'viniplay.db', dir: DATA_DIR, table: 'sessions' }),
+        store: sessionStore,
         secret: sessionSecret,
         resave: false,
         saveUninitialized: false,
@@ -571,26 +599,39 @@ app.use((req, res, next) => {
     next();
 });
 
-// MODIFIED: requireAuth now checks if the user still exists in the database on every request.
-const requireAuth = (req, res, next) => {
+// User rows are cached for a few seconds (and invalidated on update/delete) so requireAuth
+// and the endpoints that need allowed_sources do not each hit the database.
+const userCache = createUserCache({
+    load: (id) => dbGet(db, "SELECT id, username, isAdmin, canUseDvr, allowed_sources FROM users WHERE id = ?", [id]),
+});
+
+// requireAuth checks that the user still exists, and keeps the role flags in the session in
+// sync with the database so a promotion or demotion takes effect without logging in again.
+const requireAuth = async (req, res, next) => {
     if (!req.session || !req.session.userId) {
         return res.status(401).json({ error: 'Authentication required.' });
     }
 
-    db.get("SELECT id FROM users WHERE id = ?", [req.session.userId], (err, user) => {
-        if (err) {
-            console.error('[AUTH_MIDDLEWARE] DB error checking user existence:', err);
-            return res.status(500).json({ error: 'Server error during authentication.' });
-        }
-        if (!user) {
-            console.warn(`[AUTH_MIDDLEWARE] User ID ${req.session.userId} from session not found in DB. Destroying session.`);
-            req.session.destroy();
-            res.clearCookie('connect.sid');
-            return res.status(401).json({ error: 'User account no longer exists. Please log in again.' });
-        }
-        // User exists, proceed.
-        next();
-    });
+    let user;
+    try {
+        user = await userCache.get(req.session.userId);
+    } catch (err) {
+        console.error('[AUTH_MIDDLEWARE] DB error checking user existence:', err);
+        return res.status(500).json({ error: 'Server error during authentication.' });
+    }
+    if (!user) {
+        console.warn(`[AUTH_MIDDLEWARE] User ID ${req.session.userId} from session not found in DB. Destroying session.`);
+        req.session.destroy();
+        res.clearCookie('connect.sid');
+        return res.status(401).json({ error: 'User account no longer exists. Please log in again.' });
+    }
+
+    const isAdmin = user.isAdmin === 1;
+    const canUseDvr = user.canUseDvr === 1;
+    if (req.session.isAdmin !== isAdmin) req.session.isAdmin = isAdmin;
+    if (req.session.canUseDvr !== canUseDvr) req.session.canUseDvr = canUseDvr;
+    if (req.session.username !== user.username) req.session.username = user.username;
+    next();
 };
 
 const requireAdmin = (req, res, next) => {
@@ -2101,6 +2142,7 @@ app.put('/api/users/:id', requireAdmin, (req, res) => {
                         req.session.canUseDvr = canUseDvr;
                         console.log(`[USER_API] Current user's session (ID: ${id}) updated.`);
                     }
+                    userCache.invalidate(id);
                     console.log(`[USER_API] User ${id} updated successfully (with password change).`);
                     res.json({ success: true });
                 });
@@ -2117,6 +2159,7 @@ app.put('/api/users/:id', requireAdmin, (req, res) => {
                     req.session.canUseDvr = canUseDvr;
                     console.log(`[USER_API] Current user's session (ID: ${id}) updated.`);
                 }
+                userCache.invalidate(id);
                 console.log(`[USER_API] User ${id} updated successfully (without password change).`);
                 res.json({ success: true });
             });
@@ -2180,6 +2223,7 @@ app.delete('/api/users/:id', requireAdmin, (req, res) => {
             console.warn(`[USER_API] User ${idToDelete} not found for deletion.`);
             return res.status(404).json({ error: 'User not found.' });
         }
+        userCache.invalidate(idToDelete);
         console.log(`[USER_API] User ${idToDelete} deleted successfully from database.`);
         res.json({ success: true });
     });
@@ -2195,7 +2239,7 @@ app.get('/api/config', requireAuth, async (req, res) => {
         // FETCH USER PERMISSIONS
         let allowedSources = null;
         try {
-            const user = await dbGet(db, "SELECT id, allowed_sources, username, isAdmin FROM users WHERE id = ?", [req.session.userId]);
+            const user = await userCache.get(req.session.userId);
             if (user) {
                 console.log(`[DEBUG_API_CONFIG] Fetching config for UserID: ${req.session.userId} (Session: ${req.sessionID})`);
                 if (user.isAdmin || req.session.isAdmin || user.id === 1 || req.session.userId === 1) {
@@ -2399,7 +2443,7 @@ app.get('/api/vod/library', requireAuth, async (req, res) => {
         // FETCH USER PERMISSIONS
         let allowedSources = null;
         try {
-            const user = await dbGet(db, "SELECT allowed_sources FROM users WHERE id = ?", [req.session.userId]);
+            const user = await userCache.get(req.session.userId);
             if (user && user.allowed_sources) {
                 allowedSources = JSON.parse(user.allowed_sources);
             }
@@ -2641,7 +2685,7 @@ app.get('/api/vod/series/:seriesId', requireAuth, async (req, res) => {
                 // CHECK PERMISSIONS
                 let permitted = true;
                 try {
-                    const user = await dbGet(db, "SELECT allowed_sources FROM users WHERE id = ?", [req.session.userId]);
+                    const user = await userCache.get(req.session.userId);
                     if (user && user.allowed_sources) {
                         const allowedSources = JSON.parse(user.allowed_sources);
                         if (allowedSources[relation.provider_id] && !allowedSources[relation.provider_id].allowed) {
@@ -3673,6 +3717,7 @@ app.delete('/api/data', requireAuth, requireAdmin, (req, res) => {
             });
         });
 
+        userCache.clear();
         console.log('[API_RESET] Hard reset complete. The application is now in a fresh-install state.');
         res.json({ success: true, message: 'All application data has been cleared.' });
 
@@ -6360,6 +6405,9 @@ detectHardwareAcceleration().then(() => {
 
         schedule.scheduleJob('0 2 * * *', autoDeleteOldRecordings);
         console.log('[DVR_STORAGE] Scheduled daily cleanup of old recordings.');
+
+        // Keep the query planner's statistics fresh (cheap; only re-analyzes tables that changed a lot).
+        schedule.scheduleJob('30 2 * * *', () => db.run('PRAGMA optimize'));
 
 
     });
