@@ -29,7 +29,10 @@ const { sendJson } = require('./sendJson');
 const { createEpgPayload } = require('./epgPayload');
 const { applyProcessed } = require('./processedSettings');
 const { validateJobWindow } = require('./dvrTime');
+const { findConflictingJobs } = require('./dvrConflict');
+const { planSourceRefreshes } = require('./sourceRefresh');
 const { resolveStreamIdentity } = require('./streamAuth');
+const { allowedSourcesFromUser, isChannelAllowed } = require('./accessControl');
 const zlib = require('zlib');
 const { pipeline } = require('stream');
 const { pipeline: pipelineAsync } = require('stream/promises');
@@ -97,6 +100,7 @@ const streamUrlKey = (url) => crypto.createHash('sha256').update(String(url)).di
 // Initialize global variables at the top-level scope
 let notificationCheckInterval = null;
 const sourceRefreshTimers = new Map();
+let sourceProcessing = Promise.resolve();
 let detectedHardware = { nvidia: null, intel_qsv: null, intel_vaapi: null, radeon_vaapi: null }; // MODIFIED: To store specific Intel GPU info
 
 // Used to validate settings.
@@ -613,45 +617,44 @@ app.use(bodyParser.urlencoded({ extended: true }));
 
 const updateAndScheduleSourceRefreshes = () => {
     console.log('[SCHEDULER] Updating and scheduling all source refreshes...');
-    const settings = getSettings();
-    const allSources = [...(settings.m3uSources || []), ...(settings.epgSources || [])];
-    const activeUrlSources = new Set();
+    const plan = planSourceRefreshes(getSettings());
+    const activeSourceIds = new Set();
 
-    allSources.forEach(source => {
-        if (source.type === 'url' && source.isActive && source.refreshHours > 0) {
-            activeUrlSources.add(source.id);
-            if (sourceRefreshTimers.has(source.id)) {
-                clearTimeout(sourceRefreshTimers.get(source.id));
-            }
-
-            console.log(`[SCHEDULER] Scheduling refresh for "${source.name}" (ID: ${source.id}) every ${source.refreshHours} hours.`);
-
-            const scheduleNext = () => {
-                const timeoutId = setTimeout(async () => {
-                    console.log(`[SCHEDULER_RUN] Auto-refresh triggered for "${source.name}".`);
-                    try {
-                        const result = await processAndMergeSources();
-                        saveProcessedSettings(result.updatedSettings);
-                        if (result.success) {
-                            console.log(`[SCHEDULER_RUN] Successfully refreshed and processed sources for "${source.name}".`);
-                        } else {
-                            console.warn(`[SCHEDULER_RUN] ${result.message}`);
-                        }
-                    } catch (error) {
-                        console.error(`[SCHEDULER_RUN] Auto-refresh for "${source.name}" failed:`, error.message);
-                    }
-                    scheduleNext();
-                }, source.refreshHours * 3600 * 1000);
-
-                sourceRefreshTimers.set(source.id, timeoutId);
-            };
-
-            scheduleNext();
+    plan.forEach((source) => {
+        activeSourceIds.add(source.id);
+        if (sourceRefreshTimers.has(source.id)) {
+            clearTimeout(sourceRefreshTimers.get(source.id));
         }
+
+        console.log(`[SCHEDULER] Scheduling refresh for "${source.name}" (ID: ${source.id}) every ${source.hours} hours.`);
+
+        const scheduleNext = () => {
+            const timeoutId = setTimeout(async () => {
+                // A settings save may already have replaced this timer while we were waiting.
+                if (sourceRefreshTimers.get(source.id) !== timeoutId) return;
+                console.log(`[SCHEDULER_RUN] Auto-refresh triggered for "${source.name}".`);
+                try {
+                    const result = await runSourceProcessing(null, source.onlyIds);
+                    saveProcessedSettings(result.updatedSettings);
+                    if (result.success) {
+                        console.log(`[SCHEDULER_RUN] Successfully refreshed and processed "${source.name}".`);
+                    } else {
+                        console.warn(`[SCHEDULER_RUN] ${result.message}`);
+                    }
+                } catch (error) {
+                    console.error(`[SCHEDULER_RUN] Auto-refresh for "${source.name}" failed:`, error.message);
+                }
+                if (sourceRefreshTimers.get(source.id) === timeoutId) scheduleNext();
+            }, source.hours * 3600 * 1000);
+
+            sourceRefreshTimers.set(source.id, timeoutId);
+        };
+
+        scheduleNext();
     });
 
     for (const [sourceId, timeoutId] of sourceRefreshTimers.entries()) {
-        if (!activeUrlSources.has(sourceId)) {
+        if (!activeSourceIds.has(sourceId)) {
             console.log(`[SCHEDULER] Clearing obsolete refresh timer for source ID: ${sourceId}`);
             clearTimeout(timeoutId);
             sourceRefreshTimers.delete(sourceId);
@@ -787,6 +790,7 @@ const requireAuth = async (req, res, next) => {
         return res.status(401).json({ error: 'User account no longer exists. Please log in again.' });
     }
 
+    req.user = user;
     const isAdmin = user.isAdmin === 1;
     const canUseDvr = user.canUseDvr === 1;
     if (req.session.isAdmin !== isAdmin) req.session.isAdmin = isAdmin;
@@ -1806,6 +1810,14 @@ async function mergeEpg(req, settings, liveChannels, onlyIds, failedSources) {
     }
 }
 
+// Processing writes the merged files, so runs must not overlap (the timer, a manual
+// refresh and the startup pass could otherwise interleave their writes).
+function runSourceProcessing(req, onlyIds) {
+    const run = sourceProcessing.then(() => processAndMergeSources(req, onlyIds));
+    sourceProcessing = run.catch(() => { });
+    return run;
+}
+
 // onlyIds: refresh just those sources; the others are merged from their cached raw copy (fetched only if it is missing).
 async function processAndMergeSources(req, onlyIds) {
     console.log('[PROCESS] Starting to process and merge all active sources.');
@@ -2569,38 +2581,14 @@ app.get('/api/config', requireAuth, async (req, res) => {
         let globalSettings = getSettings();
         config.settings = globalSettings;
 
-        // FETCH USER PERMISSIONS
-        let allowedSources = null;
+        // Permissions are already loaded by requireAuth. Keep this fail-closed if the
+        // helper ever sees a malformed row.
+        let allowedSources;
         try {
-            const user = await userCache.get(req.session.userId);
-            if (user) {
-                console.log(`[DEBUG_API_CONFIG] Fetching config for UserID: ${req.session.userId}`);
-                if (user.isAdmin === 1) {
-                    allowedSources = null;
-                    console.log(`[DEBUG_API_CONFIG] User '${user.username}' is admin (full source access).`);
-                } else if (user.allowed_sources) {
-                    try {
-                        const parsed = JSON.parse(user.allowed_sources);
-                        if (parsed && typeof parsed === 'object' && Object.keys(parsed).length > 0) {
-                            allowedSources = parsed;
-                            console.log(`[DEBUG_API_CONFIG] DB allowed_sources for user '${user.username}':`, JSON.stringify(allowedSources, null, 2));
-                        } else {
-                            // An empty whitelist means no sources, not every source. Null
-                            // (the column was never set) keeps the legacy full-access rule.
-                            allowedSources = {};
-                        }
-                    } catch (e) {
-                        allowedSources = {};
-                    }
-                } else {
-                    console.log(`[DEBUG_API_CONFIG] No allowed_sources found for user '${user.username}' (admin/full access).`);
-                }
-            } else {
-                allowedSources = {};
-            }
-        } catch (dbErr) {
-            console.error("[API] Error fetching user permissions:", dbErr);
-            // Fail closed: if the permission row cannot be read, show no sources.
+            allowedSources = allowedSourcesFromUser(req.user);
+            console.log(`[DEBUG_API_CONFIG] Config for UserID ${req.session.userId}: ${allowedSources ? 'restricted sources' : 'full source access'}.`);
+        } catch (permErr) {
+            console.error('[API] Error reading user permissions:', permErr);
             allowedSources = {};
         }
 
@@ -3583,7 +3571,7 @@ app.post('/api/process-sources', requireAuth, requireAdmin, async (req, res) => 
     }
     try {
         // An XC source is refreshed together with its managed EPG.
-        const result = await processAndMergeSources(req, sourceId && [sourceId, `epg_for_${sourceId}`]);
+        const result = await runSourceProcessing(req, sourceId && [sourceId, `epg_for_${sourceId}`]);
 
         // Save the successful sources even when another one failed; the response reports the
         // partial result instead of looking like the whole run never started.
@@ -3787,7 +3775,7 @@ app.post('/api/save/settings', requireAuth, requireAdmin, async (req, res) => {
 
         if (updatedSettings.timezoneOffset !== oldTimezone) {
             console.log("[API] Timezone setting changed, re-processing sources.");
-            const result = await processAndMergeSources();
+            const result = await runSourceProcessing(null);
             saveProcessedSettings(result.updatedSettings);
             if (!result.success) console.warn(`[API] ${result.message}`);
         }
@@ -5633,6 +5621,15 @@ async function startRecording(job) {
         return;
     }
 
+    const owner = await dbGet(db, "SELECT id, isAdmin, allowed_sources FROM users WHERE id = ?", [job.user_id]);
+    if (!owner || !isChannelAllowed(channel, allowedSourcesFromUser(owner))) {
+        const errorMsg = 'This channel is no longer available for this user.';
+        console.error(`[DVR] Cannot start recording job ${job.id}: ${errorMsg}`);
+        db.run("UPDATE dvr_jobs SET status = 'error', ffmpeg_pid = NULL, errorMessage = ? WHERE id = ?", [errorMsg, job.id]);
+        broadcastDvrUpdate(job.user_id, { jobId: job.id, status: 'error', errorMessage: errorMsg });
+        return;
+    }
+
     const recProfile = (settings.dvr.recordingProfiles || []).find(p => p.id === job.profileId);
     if (!recProfile) {
         const errorMsg = `Recording profile ID "${job.profileId}" not found.`;
@@ -5709,30 +5706,34 @@ function scheduleDvrJob(job) {
 
 // ... existing functions ...
 
-async function checkForConflicts(newJob, userId) {
+async function checkForConflicts(newJob, excludeJobId = null) {
     return new Promise((resolve, reject) => {
         const settings = getSettings();
         const maxConcurrent = settings.dvr?.maxConcurrentRecordings || 1;
 
-        db.all("SELECT * FROM dvr_jobs WHERE user_id = ? AND status = 'scheduled'", [userId], (err, scheduledJobs) => {
+        db.all("SELECT * FROM dvr_jobs WHERE status IN ('scheduled', 'recording', 'reconnecting')", [], (err, jobs) => {
             if (err) return reject(err);
 
-            const newStart = new Date(newJob.startTime).getTime();
-            const newEnd = new Date(newJob.endTime).getTime();
+            const newStart = Date.parse(newJob.startTime);
+            const newEnd = Date.parse(newJob.endTime);
+            if (!Number.isFinite(newStart) || !Number.isFinite(newEnd)) return resolve([]);
 
-            const conflictingJobs = scheduledJobs.filter(existingJob => {
-                const existingStart = new Date(existingJob.startTime).getTime();
-                const existingEnd = new Date(existingJob.endTime).getTime();
-                return newStart < existingEnd && newEnd > existingStart;
-            });
-
-            if (conflictingJobs.length >= maxConcurrent) {
-                resolve(conflictingJobs);
-            } else {
-                resolve([]);
-            }
+            const conflictingJobs = findConflictingJobs(jobs, newStart, newEnd, excludeJobId);
+            resolve(conflictingJobs.length >= maxConcurrent ? conflictingJobs : []);
         });
     });
+}
+
+// Other users' programme names must not leak in a conflict response.
+function conflictsForResponse(jobs, isAdmin) {
+    if (isAdmin) return jobs;
+    return jobs.map((job) => ({
+        id: job.id,
+        programTitle: 'Another recording',
+        channelName: 'Another channel',
+        startTime: job.startTime,
+        endTime: job.endTime,
+    }));
 }
 
 async function autoDeleteOldRecordings() {
@@ -6049,9 +6050,16 @@ app.get('/api/dvr/timeshift/:jobId', requireAuth, requireDvrAccess, (req, res) =
 const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
 app.post('/api/dvr/schedule', requireAuth, requireDvrAccess, asyncHandler(async (req, res) => {
-    const { channelId, channelName, programTitle, programStart, programStop } = req.body;
+    const { channelId, programTitle, programStart, programStop } = req.body;
     const window = validateJobWindow(programStart, programStop, { startLabel: 'programStart', endLabel: 'programStop' });
     if (!window.ok) return res.status(400).json({ error: window.error });
+
+    const channel = (readChannels() || []).find((c) => c.id === channelId);
+    if (!channel) return res.status(404).json({ error: 'Channel not found.' });
+    if (!isChannelAllowed(channel, allowedSourcesFromUser(req.user))) {
+        return res.status(403).json({ error: 'You do not have access to this channel.' });
+    }
+    const channelName = channel.displayName || channel.name;
 
     const settings = getSettings();
     const dvrSettings = settings.dvr || {};
@@ -6078,9 +6086,9 @@ app.post('/api/dvr/schedule', requireAuth, requireDvrAccess, asyncHandler(async 
         postBufferMinutes: dvrSettings.postBufferMinutes || 0
     };
 
-    const conflictingJobs = await checkForConflicts(newJob, req.session.userId);
+    const conflictingJobs = await checkForConflicts(newJob);
     if (conflictingJobs.length > 0) {
-        return res.status(409).json({ error: 'Recording conflict detected.', newJob, conflictingJobs });
+        return res.status(409).json({ error: 'Recording conflict detected.', newJob, conflictingJobs: conflictsForResponse(conflictingJobs, req.session.isAdmin) });
     }
 
     db.run(`INSERT INTO dvr_jobs (user_id, channelId, channelName, programTitle, startTime, endTime, status, profileId, userAgentId, preBufferMinutes, postBufferMinutes, programStart)
@@ -6099,9 +6107,16 @@ app.post('/api/dvr/schedule', requireAuth, requireDvrAccess, asyncHandler(async 
 }));
 
 app.post('/api/dvr/schedule/manual', requireAuth, requireDvrAccess, asyncHandler(async (req, res) => {
-    const { channelId, channelName, startTime, endTime } = req.body;
+    const { channelId, startTime, endTime } = req.body;
     const window = validateJobWindow(startTime, endTime);
     if (!window.ok) return res.status(400).json({ error: window.error });
+
+    const channel = (readChannels() || []).find((c) => c.id === channelId);
+    if (!channel) return res.status(404).json({ error: 'Channel not found.' });
+    if (!isChannelAllowed(channel, allowedSourcesFromUser(req.user))) {
+        return res.status(403).json({ error: 'You do not have access to this channel.' });
+    }
+    const channelName = channel.displayName || channel.name;
 
     const settings = getSettings();
     const dvrSettings = settings.dvr || {};
@@ -6120,9 +6135,9 @@ app.post('/api/dvr/schedule/manual', requireAuth, requireDvrAccess, asyncHandler
         postBufferMinutes: 0
     };
 
-    const conflictingJobs = await checkForConflicts(newJob, req.session.userId);
+    const conflictingJobs = await checkForConflicts(newJob);
     if (conflictingJobs.length > 0) {
-        return res.status(409).json({ error: 'Recording conflict detected.', newJob, conflictingJobs });
+        return res.status(409).json({ error: 'Recording conflict detected.', newJob, conflictingJobs: conflictsForResponse(conflictingJobs, req.session.isAdmin) });
     }
 
     db.run(`INSERT INTO dvr_jobs (user_id, channelId, channelName, programTitle, startTime, endTime, status, profileId, userAgentId, preBufferMinutes, postBufferMinutes)
@@ -6372,7 +6387,7 @@ app.post('/api/dvr/jobs/:id/stop', requireAuth, requireDvrAccess, (req, res) => 
     });
 });
 
-app.put('/api/dvr/jobs/:id', requireAuth, requireDvrAccess, asyncHandler((req, res) => {
+app.put('/api/dvr/jobs/:id', requireAuth, requireDvrAccess, asyncHandler(async (req, res) => {
     const { id } = req.params;
     const { startTime, endTime } = req.body;
     const window = validateJobWindow(startTime, endTime);
@@ -6384,23 +6399,34 @@ app.put('/api/dvr/jobs/:id', requireAuth, requireDvrAccess, asyncHandler((req, r
     const getQuery = req.session.isAdmin ? "SELECT * from dvr_jobs WHERE id = ?" : "SELECT * from dvr_jobs WHERE id = ? AND user_id = ?";
     const getParams = req.session.isAdmin ? [id] : [id, req.session.userId];
 
-    db.get(getQuery, getParams, (err, job) => {
-        if (err) return res.status(500).json({ error: 'DB error fetching job.' });
-        if (!job) return res.status(404).json({ error: 'Job not found or unauthorized.' });
-        if (job.status !== 'scheduled') return res.status(400).json({ error: 'Only scheduled jobs can be modified.' });
+    let job;
+    try {
+        job = await dbGet(db, getQuery, getParams);
+    } catch (err) {
+        console.error('[DVR_API] DB error fetching job for edit:', err.message);
+        return res.status(500).json({ error: 'DB error fetching job.' });
+    }
+    if (!job) return res.status(404).json({ error: 'Job not found or unauthorized.' });
+    if (job.status !== 'scheduled') return res.status(400).json({ error: 'Only scheduled jobs can be modified.' });
 
-        const startIso = window.start.toISOString();
-        const endIso = window.end.toISOString();
-        db.run("UPDATE dvr_jobs SET startTime = ?, endTime = ? WHERE id = ?", [startIso, endIso, id], function (err) {
-            if (err) return res.status(500).json({ error: 'Could not update job.' });
+    const startIso = window.start.toISOString();
+    const endIso = window.end.toISOString();
+    const updatedJob = { ...job, startTime: startIso, endTime: endIso };
+    const conflictingJobs = await checkForConflicts(updatedJob, job.id);
+    if (conflictingJobs.length > 0) {
+        return res.status(409).json({ error: 'Recording conflict detected.', newJob: updatedJob, conflictingJobs: conflictsForResponse(conflictingJobs, req.session.isAdmin) });
+    }
 
-            const updatedJob = { ...job, startTime: startIso, endTime: endIso };
-            scheduleDvrJob(updatedJob);
+    try {
+        await dbRun(db, "UPDATE dvr_jobs SET startTime = ?, endTime = ? WHERE id = ?", [startIso, endIso, id]);
+    } catch (err) {
+        console.error('[DVR_API] Error updating job:', err.message);
+        return res.status(500).json({ error: 'Could not update job.' });
+    }
+    scheduleDvrJob(updatedJob);
 
-            console.log(`[DVR_API] Updated and rescheduled job ${id}.`);
-            res.json({ success: true, job: updatedJob });
-        });
-    });
+    console.log(`[DVR_API] Updated and rescheduled job ${id}.`);
+    res.json({ success: true, job: updatedJob });
 }));
 
 app.delete('/api/dvr/jobs/:id/history', requireAuth, requireDvrAccess, (req, res) => {
@@ -6901,7 +6927,7 @@ detectHardwareAcceleration().then(() => {
         console.log(` VINI PLAY server listening at http://localhost:${port}`);
         console.log(`======================================================\n`);
 
-        processAndMergeSources().then((result) => {
+        runSourceProcessing(null).then((result) => {
             console.log('[INIT] Initial source processing complete.');
             saveProcessedSettings(result.updatedSettings);
             if (!result.success) console.warn(`[INIT] ${result.message}`);
