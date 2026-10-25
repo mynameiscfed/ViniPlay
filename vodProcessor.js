@@ -1,16 +1,26 @@
 // vodProcessor.js
 const XtreamClient = require('./xtreamClient');
 
+const yearFrom = (releaseDate, name) => {
+    if (releaseDate) {
+        const year = new Date(releaseDate).getFullYear();
+        if (Number.isFinite(year)) return year;
+    }
+    const yearMatch = name && String(name).match(/\((\d{4})\)/);
+    return yearMatch ? parseInt(yearMatch[1], 10) : null;
+};
+
 /**
  * Main function to refresh all VOD content for a given provider.
- * @param {sqlite.Database} db - The database instance.
- * @param {object} provider - The provider object (id, server_url, username, password).
+ * @param {object} store - The VOD store (see vodStore.js).
+ * @param {object} provider - The provider object (id, name, xc_data).
  * @param {function} sendStatus - Function to send status updates to the client.
+ * @param {string} userAgent - User agent for requests to the provider.
  */
-async function refreshVodContent(db, dbGet, dbAll, dbRun, provider, sendStatus = () => {}, userAgent) {
+async function refreshVodContent(store, provider, sendStatus = () => {}, userAgent) {
     console.log(`[VOD Processor] Starting VOD refresh for: ${provider.name}`);
     const scanStartTime = new Date().toISOString();
-    
+
     let server_url, username, password;
     try {
         if (!provider.xc_data) {
@@ -32,29 +42,13 @@ async function refreshVodContent(db, dbGet, dbAll, dbRun, provider, sendStatus =
     const client = new XtreamClient(server_url, username, password, userAgent);
     const providerId = provider.id;
 
-    // --- Schema Migration ---
-    try {
-        await dbRun(db, "ALTER TABLE movies ADD COLUMN provider_unique_id TEXT");
-    } catch (e) {
-        if (!e.message.includes('duplicate column name')) {
-            console.error('[VOD Processor] Schema migration for movies failed:', e.message);
-        }
-    }
-    try {
-        await dbRun(db, "ALTER TABLE series ADD COLUMN provider_unique_id TEXT");
-    } catch (e) {
-        if (!e.message.includes('duplicate column name')) {
-            console.error('[VOD Processor] Schema migration for series failed:', e.message);
-        }
-    }
-
     // --- 0. Process Categories ---
     const categoryMap = new Map();
     try {
         sendStatus(`Fetching VOD and Series categories for ${provider.name}...`, 'info');
         const vodCategories = await client.getVodCategories();
         const seriesCategories = await client.getSeriesCategories();
-        
+
         const allCategories = {};
         if (vodCategories && Array.isArray(vodCategories)) {
             vodCategories.forEach(cat => allCategories[cat.category_id] = cat);
@@ -62,92 +56,54 @@ async function refreshVodContent(db, dbGet, dbAll, dbRun, provider, sendStatus =
         if (seriesCategories && Array.isArray(seriesCategories)) {
             seriesCategories.forEach(cat => allCategories[cat.category_id] = cat);
         }
-        const combinedCategories = Object.values(allCategories);
+        const combinedCategories = Object.values(allCategories).filter(cat => cat.category_id && cat.category_name);
 
         if (combinedCategories.length > 0) {
             console.log(`[VOD Processor] Fetched ${combinedCategories.length} combined VOD/Series categories from provider.`);
             sendStatus(`Processing ${combinedCategories.length} VOD/Series categories...`, 'info');
-            
-            await dbRun(db, "BEGIN TRANSACTION");
-            const categoryInsertStmt = db.prepare(`INSERT OR IGNORE INTO vod_categories (category_id, category_name) VALUES (?, ?)`);
-            for (const catData of combinedCategories) {
-                if (catData.category_id && catData.category_name) {
-                    await new Promise((resolve, reject) => {
-                        categoryInsertStmt.run(catData.category_id, catData.category_name, function(err) {
-                            if (err) return reject(err);
-                            resolve(this);
-                        });
-                    });
-                    categoryMap.set(String(catData.category_id), catData.category_name);
-                }
-            }
-            await new Promise(resolve => categoryInsertStmt.finalize(resolve));
-            await dbRun(db, "COMMIT");
+
+            await store.upsertCategories(combinedCategories.map(cat => ({ categoryId: cat.category_id, categoryName: cat.category_name })));
+            combinedCategories.forEach(cat => categoryMap.set(String(cat.category_id), cat.category_name));
         }
     } catch (error) {
-        await dbRun(db, "ROLLBACK");
         console.error(`[VOD Processor] Category processing FAILED for ${provider.name}:`, error.message);
         sendStatus(`Category processing FAILED for ${provider.name}: ${error.message}`, 'error');
         return; // Stop if categories fail
     }
 
+    // A kind of content is only cleaned up if its whole scan went through. Otherwise a failed or
+    // empty response from the provider would look like "everything was removed".
+    let moviesScanned = false;
+    let seriesScanned = false;
+
     // --- 1. Process Movies ---
     try {
         sendStatus(`Fetching movies for ${provider.name}...`, 'info');
         const movies = await client.getVodStreams();
-        
+
         if (movies && Array.isArray(movies)) {
             console.log(`[VOD Processor] Fetched ${movies.length} movies from provider.`);
             sendStatus(`Processing ${movies.length} movies...`, 'info');
 
-            await dbRun(db, "BEGIN TRANSACTION");
-
-            const existingMovies = await dbAll(db, 'SELECT id, provider_unique_id FROM movies WHERE provider_unique_id IS NOT NULL');
-            const providerUniqueIdMap = new Map(existingMovies.map(m => [m.provider_unique_id, m.id]));
-
-            const movieInsertStmt = db.prepare(`INSERT INTO movies (name, year, description, logo, category_name, provider_unique_id) VALUES (?, ?, ?, ?, ?, ?)`);
-            const movieUpdateStmt = db.prepare(`UPDATE movies SET name = ?, year = ?, description = ?, logo = ?, category_name = ? WHERE id = ?`);
-            const relationInsertStmt = db.prepare(`INSERT OR REPLACE INTO provider_movie_relations (provider_id, movie_id, stream_id, container_extension, last_seen) VALUES (?, ?, ?, ?, ?)`);
-            
+            const rows = [];
             for (const movieData of movies) {
                 const { name, plot, stream_icon, stream_id, container_extension, category_id } = movieData;
                 if (!stream_id) continue;
-
-                const providerUniqueId = `movie_${providerId}_${stream_id}`;
-                let year = null;
-                if (movieData.releaseDate) year = new Date(movieData.releaseDate).getFullYear();
-                else if (name) {
-                    const yearMatch = name.match(/\((\d{4})\)/);
-                    if (yearMatch) year = parseInt(yearMatch[1]);
-                }
-                const categoryName = categoryMap.get(String(category_id)) || 'VOD';
-
-                let movieId = providerUniqueIdMap.get(providerUniqueId);
-
-                if (movieId) {
-                    // Update existing movie
-                    await new Promise((resolve, reject) => movieUpdateStmt.run(name, year, plot, stream_icon, categoryName, movieId, (err) => err ? reject(err) : resolve()));
-                } else {
-                    // Create new movie
-                    const result = await new Promise((resolve, reject) => {
-                        movieInsertStmt.run(name, year, plot, stream_icon, categoryName, providerUniqueId, function(err) {
-                            if (err) return reject(err);
-                            resolve(this);
-                        });
-                    });
-                    movieId = result.lastID;
-                    providerUniqueIdMap.set(providerUniqueId, movieId);
-                }
-                
-                await new Promise((resolve, reject) => relationInsertStmt.run(providerId, movieId, stream_id, container_extension || 'mp4', scanStartTime, (err) => err ? reject(err) : resolve()));
+                rows.push({
+                    providerUniqueId: `movie_${providerId}_${stream_id}`,
+                    name,
+                    year: yearFrom(movieData.releaseDate, name),
+                    description: plot,
+                    logo: stream_icon,
+                    categoryName: categoryMap.get(String(category_id)) || 'VOD',
+                    streamId: stream_id,
+                    containerExtension: container_extension
+                });
             }
-            await new Promise(resolve => movieInsertStmt.finalize(resolve));
-            await new Promise(resolve => movieUpdateStmt.finalize(resolve));
-            await new Promise(resolve => relationInsertStmt.finalize(resolve));
-            await dbRun(db, "COMMIT");
+            await store.upsertMovies(providerId, rows, scanStartTime);
+            moviesScanned = true;
         }
     } catch (error) {
-        await dbRun(db, "ROLLBACK");
         console.error(`[VOD Processor] Movie processing FAILED for ${provider.name}:`, error.message);
         sendStatus(`Movie processing FAILED for ${provider.name}: ${error.message}`, 'error');
     }
@@ -156,228 +112,59 @@ async function refreshVodContent(db, dbGet, dbAll, dbRun, provider, sendStatus =
     try {
         sendStatus(`Fetching series for ${provider.name}...`, 'info');
         const series = await client.getSeries();
-        
+
         if (series && Array.isArray(series)) {
             console.log(`[VOD Processor] Fetched ${series.length} series from provider.`);
             sendStatus(`Processing ${series.length} series...`, 'info');
 
-            await dbRun(db, "BEGIN TRANSACTION");
-
-            const existingSeries = await dbAll(db, 'SELECT id, provider_unique_id FROM series WHERE provider_unique_id IS NOT NULL');
-            const providerUniqueIdMap = new Map(existingSeries.map(s => [s.provider_unique_id, s.id]));
-
-            const seriesInsertStmt = db.prepare(`INSERT INTO series (name, year, description, logo, category_name, provider_unique_id) VALUES (?, ?, ?, ?, ?, ?)`);
-            const seriesUpdateStmt = db.prepare(`UPDATE series SET name = ?, year = ?, description = ?, logo = ?, category_name = ? WHERE id = ?`);
-            const seriesRelationInsertStmt = db.prepare(`INSERT OR REPLACE INTO provider_series_relations (provider_id, series_id, external_series_id, last_seen) VALUES (?, ?, ?, ?)`);
-
+            const rows = [];
             for (const seriesData of series) {
                 const { name, plot, cover, series_id: external_series_id, category_id } = seriesData;
                 if (!external_series_id) continue;
-
-                const providerUniqueId = `series_${providerId}_${external_series_id}`;
-                let year = null;
-                if (seriesData.releaseDate) year = new Date(seriesData.releaseDate).getFullYear();
-                else if (name) {
-                    const yearMatch = name.match(/\((\d{4})\)/);
-                    if (yearMatch) year = parseInt(yearMatch[1]);
-                }
-                const categoryName = categoryMap.get(String(category_id)) || 'Series';
-
-                let seriesId = providerUniqueIdMap.get(providerUniqueId);
-
-                if (seriesId) {
-                    // Update existing series
-                    await new Promise((resolve, reject) => seriesUpdateStmt.run(name, year, plot, cover, categoryName, seriesId, (err) => err ? reject(err) : resolve()));
-                } else {
-                    // Create new series
-                    const result = await new Promise((resolve, reject) => {
-                        seriesInsertStmt.run(name, year, plot, cover, categoryName, providerUniqueId, function(err) {
-                            if (err) return reject(err);
-                            resolve(this);
-                        });
-                    });
-                    seriesId = result.lastID;
-                    providerUniqueIdMap.set(providerUniqueId, seriesId);
-                }
-
-                await new Promise((resolve, reject) => seriesRelationInsertStmt.run(providerId, seriesId, external_series_id, scanStartTime, (err) => err ? reject(err) : resolve()));
+                rows.push({
+                    providerUniqueId: `series_${providerId}_${external_series_id}`,
+                    name,
+                    year: yearFrom(seriesData.releaseDate, name),
+                    description: plot,
+                    logo: cover,
+                    categoryName: categoryMap.get(String(category_id)) || 'Series',
+                    externalSeriesId: external_series_id
+                });
             }
-            await new Promise(resolve => seriesInsertStmt.finalize(resolve));
-            await new Promise(resolve => seriesUpdateStmt.finalize(resolve));
-            await new Promise(resolve => seriesRelationInsertStmt.finalize(resolve));
-            await dbRun(db, "COMMIT");
+            await store.upsertSeries(providerId, rows, scanStartTime);
+            seriesScanned = true;
         }
     } catch (error) {
-        await dbRun(db, "ROLLBACK");
         console.error(`[VOD Processor] Series processing FAILED for ${provider.name}:`, error.message);
         sendStatus(`Series processing FAILED for ${provider.name}: ${error.message}`, 'error');
     }
 
-    // --- 4. Cleanup Stale Content ---
+    // --- 3. Cleanup Stale and Orphaned Content ---
+    let cleanedUp = true;
     try {
         console.log(`[VOD Processor] Cleaning up stale VOD content for ${provider.name}...`);
         sendStatus(`Cleaning up old VOD entries for ${provider.name}...`, 'info');
-        
-        await dbRun(db, "BEGIN TRANSACTION");
-        
-        const staleMovies = await dbRun(db, 'DELETE FROM provider_movie_relations WHERE provider_id = ? AND last_seen < ?', [providerId, scanStartTime]);
-        if (staleMovies.changes > 0) console.log(`[VOD Processor] Removed ${staleMovies.changes} stale movie relations.`);
 
-        const staleSeries = await dbRun(db, 'DELETE FROM provider_series_relations WHERE provider_id = ? AND last_seen < ?', [providerId, scanStartTime]);
-        if (staleSeries.changes > 0) console.log(`[VOD Processor] Removed ${staleSeries.changes} stale series relations.`);
-
-        const staleEpisodes = await dbRun(db, 'DELETE FROM provider_episode_relations WHERE provider_id = ? AND last_seen < ?', [providerId, scanStartTime]);
-        if (staleEpisodes.changes > 0) console.log(`[VOD Processor] Removed ${staleEpisodes.changes} stale episode relations.`);
-
-        // --- 5. Cleanup Orphaned Content ---
-        await dbRun(db, `DELETE FROM movies WHERE id NOT IN (SELECT DISTINCT movie_id FROM provider_movie_relations)`);
-        await dbRun(db, `DELETE FROM series WHERE id NOT IN (SELECT DISTINCT series_id FROM provider_series_relations)`);
-        await dbRun(db, `DELETE FROM episodes WHERE id NOT IN (SELECT DISTINCT episode_id FROM provider_episode_relations)`);
-        
-        await dbRun(db, "COMMIT");
+        // Cached episodes are rebuilt on demand when a series is opened, so they go whenever the
+        // series list was refreshed.
+        const removed = await store.removeStale(providerId, scanStartTime, { movies: moviesScanned, series: seriesScanned, episodes: seriesScanned });
+        if (removed.movies > 0) console.log(`[VOD Processor] Removed ${removed.movies} stale movie relations.`);
+        if (removed.series > 0) console.log(`[VOD Processor] Removed ${removed.series} stale series relations.`);
+        if (removed.episodes > 0) console.log(`[VOD Processor] Removed ${removed.episodes} stale episode relations.`);
         console.log(`[VOD Processor] VOD cleanup completed for: ${provider.name}`);
     } catch (error) {
-        await dbRun(db, "ROLLBACK");
+        cleanedUp = false;
         console.error(`[VOD Processor] Cleanup FAILED for ${provider.name}:`, error.message);
         sendStatus(`Cleanup FAILED for ${provider.name}: ${error.message}`, 'error');
     }
-    
-    console.log(`[VOD Processor] VOD refresh completed for: ${provider.name}`);
-    sendStatus(`VOD refresh successful for ${provider.name}.`, 'success');
-}
 
-/**
- * Processes VOD content from a raw M3U file string.
- * @param {sqlite.Database} db - The database instance.
- * @param {function} dbGet - Promisified db.get.
- * @param {function} dbAll - Promisified db.all.
- * @param {function} dbRun - Promisified db.run.
- * @param {string} m3uContent - The full M3U file content as a string.
- * @param {object} provider - The provider object from settings.
- * @param {function} sendStatus - Function to send status updates to the client.
- */
-async function processM3uVod(db, dbGet, dbAll, dbRun, m3uContent, provider, sendStatus = () => {}) {
-    console.log(`[VOD Processor M3U] Starting VOD processing for M3U source: ${provider.name}`);
-    const scanStartTime = new Date().toISOString();
-    const providerId = provider.id;
-
-    try {
-        const lines = m3uContent.split('\n');
-        let currentExtInf = null;
-        const movies = [];
-        const series = [];
-
-        // Regex to extract attributes from #EXTINF
-        const attributeRegex = /([a-zA-Z0-9_-]+)="([^"]*)"/g;
-
-        for (const line of lines) {
-            if (line.startsWith('#EXTINF:')) {
-                currentExtInf = { line: line.trim(), attributes: {} };
-                let match;
-                while ((match = attributeRegex.exec(line)) !== null) {
-                    currentExtInf.attributes[match[1]] = match[2];
-                }
-                const nameMatch = line.match(/,(.*)$/);
-                currentExtInf.name = nameMatch ? nameMatch[1].trim() : 'Untitled';
-            } else if (line.trim().startsWith('http') && currentExtInf) {
-                const url = line.trim();
-                const isMovie = url.includes('/movie/') || currentExtInf.attributes['tvg-type'] === 'movie';
-                const isSeries = url.includes('/series/') || currentExtInf.attributes['tvg-type'] === 'series';
-
-                if (isMovie) {
-                    movies.push({ ...currentExtInf, url });
-                } else if (isSeries) {
-                    series.push({ ...currentExtInf, url });
-                }
-                currentExtInf = null; // Reset after processing a URL
-            }
-        }
-
-        console.log(`[VOD Processor M3U] Found ${movies.length} movies and ${series.length} series in M3U.`);
-        sendStatus(`Processing ${movies.length} movies and ${series.length} series from ${provider.name}...`, 'info');
-
-        // Use a transaction for efficiency
-        await dbRun(db, "BEGIN TRANSACTION");
-
-        // Process Movies
-        if (movies.length > 0) {
-            const movieInsertStmt = db.prepare(`INSERT OR IGNORE INTO movies (name, year, logo, category_name, provider_unique_id) VALUES (?, ?, ?, ?, ?)`);
-            const movieRelationInsertStmt = db.prepare(`INSERT OR REPLACE INTO provider_movie_relations (provider_id, movie_id, stream_id, container_extension, last_seen) VALUES (?, ?, ?, ?, ?)`);
-            const existingMovies = await dbAll(db, 'SELECT id, provider_unique_id FROM movies WHERE provider_unique_id IS NOT NULL');
-            const providerUniqueIdMap = new Map(existingMovies.map(m => [m.provider_unique_id, m.id]));
-
-            for (const movieData of movies) {
-                const { name, attributes, url } = movieData;
-                const streamId = url.substring(url.lastIndexOf('/') + 1).split('.')[0];
-                const providerUniqueId = `movie_${providerId}_${streamId}`;
-                const yearMatch = name.match(/\((\d{4})\)/);
-                const year = yearMatch ? parseInt(yearMatch[1]) : null;
-                const logo = attributes['tvg-logo'] || null;
-                const categoryName = attributes['group-title'] || 'VOD';
-
-                let movieId = providerUniqueIdMap.get(providerUniqueId);
-                if (!movieId) {
-                    const result = await new Promise((resolve, reject) => {
-                        movieInsertStmt.run(name, year, logo, categoryName, providerUniqueId, function(err) {
-                            if (err) return reject(err);
-                            resolve(this);
-                        });
-                    });
-                    movieId = result.lastID;
-                    providerUniqueIdMap.set(providerUniqueId, movieId);
-                }
-                
-                const extension = url.split('.').pop() || 'mp4';
-                await new Promise((resolve, reject) => movieRelationInsertStmt.run(providerId, movieId, streamId, extension, scanStartTime, (err) => err ? reject(err) : resolve()));
-            }
-            await new Promise(resolve => movieInsertStmt.finalize(resolve));
-            await new Promise(resolve => movieRelationInsertStmt.finalize(resolve));
-        }
-
-        // Process Series (basic info, not episodes from M3U)
-        if (series.length > 0) {
-            const seriesInsertStmt = db.prepare(`INSERT OR IGNORE INTO series (name, year, logo, category_name, provider_unique_id) VALUES (?, ?, ?, ?, ?)`);
-            const seriesRelationInsertStmt = db.prepare(`INSERT OR REPLACE INTO provider_series_relations (provider_id, series_id, external_series_id, last_seen) VALUES (?, ?, ?, ?)`);
-            const existingSeries = await dbAll(db, 'SELECT id, provider_unique_id FROM series WHERE provider_unique_id IS NOT NULL');
-            const providerUniqueIdMap = new Map(existingSeries.map(s => [s.provider_unique_id, s.id]));
-
-            for (const seriesData of series) {
-                const { name, attributes, url } = seriesData;
-                // For M3U, we might not have a distinct series_id, so we create one from the name
-                const externalSeriesId = name.replace(/\s+/g, '_').toLowerCase();
-                const providerUniqueId = `series_${providerId}_${externalSeriesId}`;
-                const yearMatch = name.match(/\((\d{4})\)/);
-                const year = yearMatch ? parseInt(yearMatch[1]) : null;
-                const logo = attributes['tvg-logo'] || null;
-                const categoryName = attributes['group-title'] || 'Series';
-
-                let seriesId = providerUniqueIdMap.get(providerUniqueId);
-                if (!seriesId) {
-                    const result = await new Promise((resolve, reject) => {
-                        seriesInsertStmt.run(name, year, logo, categoryName, providerUniqueId, function(err) {
-                            if (err) return reject(err);
-                            resolve(this);
-                        });
-                    });
-                    seriesId = result.lastID;
-                    providerUniqueIdMap.set(providerUniqueId, seriesId);
-                }
-                
-                await new Promise((resolve, reject) => seriesRelationInsertStmt.run(providerId, seriesId, externalSeriesId, scanStartTime, (err) => err ? reject(err) : resolve()));
-            }
-            await new Promise(resolve => seriesInsertStmt.finalize(resolve));
-            await new Promise(resolve => seriesRelationInsertStmt.finalize(resolve));
-        }
-
-        await dbRun(db, "COMMIT");
-        sendStatus(`Successfully processed VOD content from ${provider.name}.`, 'success');
-
-    } catch (error) {
-        await dbRun(db, "ROLLBACK");
-        console.error(`[VOD Processor M3U] Processing FAILED for ${provider.name}:`, error.message);
-        sendStatus(`M3U VOD processing FAILED for ${provider.name}: ${error.message}`, 'error');
+    if (moviesScanned && seriesScanned && cleanedUp) {
+        console.log(`[VOD Processor] VOD refresh completed for: ${provider.name}`);
+        sendStatus(`VOD refresh successful for ${provider.name}.`, 'success');
+    } else {
+        console.warn(`[VOD Processor] VOD refresh for ${provider.name} finished with problems (movies: ${moviesScanned}, series: ${seriesScanned}, cleanup: ${cleanedUp}).`);
+        sendStatus(`VOD refresh for ${provider.name} finished with problems. Existing entries were kept where the provider could not be read.`, 'warning');
     }
 }
 
-
-module.exports = { refreshVodContent, processM3uVod };
+module.exports = { refreshVodContent };
