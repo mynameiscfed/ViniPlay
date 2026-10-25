@@ -110,7 +110,11 @@ self.addEventListener('notificationclick', event => {
                 // If a client is found that matches our origin, focus it without hard-reloading the page
                 if (client.url.startsWith(self.location.origin)) {
                     notificationChannel.postMessage({ type: 'refresh-notifications' });
-                    return client.focus();
+                    // Follow the reminder's deep link, then focus. Focusing alone left the
+                    // user on whatever page the app already had open.
+                    return client.navigate(urlToOpen)
+                        .then((navigated) => (navigated || client).focus())
+                        .catch(() => client.focus());
                 }
             }
             // If no client is found or no suitable client to navigate, open a new tab/window.

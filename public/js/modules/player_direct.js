@@ -301,18 +301,16 @@ export function isDirectPlayerActive() {
  * Main dispatcher function that detects stream type and routes to appropriate player.
  * @param {string} url The URL of the stream or video file.
  */
-function playDirectStream(url) {
+async function playDirectStream(url) {
     console.log(`[DEBUG] playDirectStream: Called with URL: ${url}`);
 
-    // Only stop the current stream if we're playing a different URL
-    if (currentStreamUrl && currentStreamUrl !== url) {
-        console.log(`[DEBUG] playDirectStream: Stopping previous stream (different URL).`);
-        stopAndCleanupDirectPlayer();
-    } else if (!currentStreamUrl) {
-        console.log(`[DEBUG] playDirectStream: No active stream to stop.`);
-        stopAndCleanupDirectPlayer();
-    } else {
+    // Cleanup is async: it waits for /api/stream/stop. Starting the new player before
+    // it finishes lets cleanup destroy the new player and hide the controls.
+    if (currentStreamUrl && currentStreamUrl === url) {
         console.log(`[DEBUG] playDirectStream: Same URL already playing, not stopping.`);
+    } else {
+        console.log(`[DEBUG] playDirectStream: Stopping previous stream before starting the new one.`);
+        await stopAndCleanupDirectPlayer();
     }
 
     const consoleEl = UIElements.directPlayerConsole;

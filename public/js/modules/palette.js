@@ -8,7 +8,8 @@ import { appState, guideState } from './state.js';
 import { playChannel } from './player.js';
 import { navigate } from './ui.js';
 import { findMatches, applyGuideSearch, openProgramDetails, progData } from './guide.js';
-import { formatTimeWithOffset, escapeHtml } from './utils.js';
+import { escapeHtml } from './utils.js';
+import { formatTimeInZone, dayKeyInZone, isValidTimeZone } from './time.js';
 import { settingsSearchIndex, showSettingsPage } from './settings.js';
 
 const MAX_CHANNELS = 6;
@@ -26,10 +27,12 @@ export const closePalette = () => {
 
 /** "Today" and "Tomorrow" are dropped or named; other days show the weekday. */
 const dayLabel = (date) => {
-    const offsetMs = (guideState.settings.timezoneOffset || 0) * 3600000;
-    const days = Math.round((new Date(date.getTime() + offsetMs).setUTCHours(0, 0, 0, 0) - new Date(Date.now() + offsetMs).setUTCHours(0, 0, 0, 0)) / 86400000);
+    const zone = guideState.settings.timeZone;
+    const days = Math.round((Date.parse(dayKeyInZone(date, zone)) - Date.parse(dayKeyInZone(new Date(), zone))) / 86400000);
     if (days <= 0) return '';
-    return days === 1 ? 'Tomorrow ' : `${new Date(date.getTime() + offsetMs).toLocaleDateString([], { weekday: 'short', timeZone: 'UTC' })} `;
+    if (days === 1) return 'Tomorrow ';
+    const weekday = new Intl.DateTimeFormat([], isValidTimeZone(zone) ? { weekday: 'short', timeZone: zone } : { weekday: 'short' }).format(date);
+    return `${weekday} `;
 };
 
 const renderResults = () => {
@@ -57,7 +60,7 @@ const renderResults = () => {
         html += programRows.map(({ channel, prog }, i) => {
             const start = new Date(prog.start);
             const live = start <= Date.now();
-            return `<button type="button" class="pr" data-program="${i}"><span class="t">${escapeHtml(prog.title)}<br><small>${escapeHtml(channel.displayName || channel.name)}</small></span>${live ? '<span class="pill pill-live">Live</span>' : `<small>${dayLabel(start)}${formatTimeWithOffset(start, offset)}</small>`}</button>`;
+            return `<button type="button" class="pr" data-program="${i}"><span class="t">${escapeHtml(prog.title)}<br><small>${escapeHtml(channel.displayName || channel.name)}</small></span>${live ? '<span class="pill pill-live">Live</span>' : `<small>${dayLabel(start)}${formatTimeInZone(start, guideState.settings.timeZone, offset)}</small>`}</button>`;
         }).join('');
     }
     const words = term.toLowerCase().split(/\s+/);

@@ -14,6 +14,7 @@ import { ICONS } from './icons.js';
 import { escapeHtml } from './utils.js';
 import { renderEpgMap, setupEpgMap } from './epgmap.js';
 import { renderEpgAi, setupEpgAi } from './epgai.js';
+import { zoneOffsetHours } from './time.js';
 
 let currentSourceTypeForEditor = 'url';
 let hardwareChecked = false; // Flag to prevent re-checking hardware on every UI update
@@ -628,11 +629,32 @@ const switchGroupFilterTab = (type) => {
 /**
  * Populates the timezone selector dropdown.
  */
+const FALLBACK_TIME_ZONES = [
+    'UTC', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
+    'America/Sao_Paulo', 'Europe/London', 'Europe/Berlin', 'Europe/Paris', 'Europe/Madrid',
+    'Europe/Rome', 'Europe/Warsaw', 'Europe/Moscow', 'Africa/Cairo', 'Africa/Johannesburg',
+    'Asia/Dubai', 'Asia/Karachi', 'Asia/Kolkata', 'Asia/Dhaka', 'Asia/Bangkok',
+    'Asia/Shanghai', 'Asia/Tokyo', 'Asia/Seoul', 'Australia/Sydney', 'Pacific/Auckland',
+];
+
 export const populateTimezoneSelector = () => {
-    UIElements.timezoneOffsetSelect.innerHTML = '';
-    for (let i = 14; i >= -12; i--) {
-        UIElements.timezoneOffsetSelect.innerHTML += `<option value="${i}">UTC${i >= 0 ? '+' : ''}${i}:00</option>`;
+    const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    const current = guideState.settings.timeZone || browserZone;
+    let zones = [];
+    try {
+        zones = Intl.supportedValuesOf ? Intl.supportedValuesOf('timeZone') : FALLBACK_TIME_ZONES;
+    } catch (e) {
+        zones = FALLBACK_TIME_ZONES;
     }
+    if (!zones.includes(current)) zones = [current, ...zones];
+
+    UIElements.timezoneOffsetSelect.innerHTML = '';
+    zones.forEach((zone) => {
+        const option = document.createElement('option');
+        option.value = zone;
+        option.textContent = zone;
+        UIElements.timezoneOffsetSelect.appendChild(option);
+    });
 };
 
 /**
@@ -784,31 +806,26 @@ export const renderSettingsNav = () => {
 };
 
 export const updateUIFromSettings = async () => {
+    // Hardware detection may save new profiles and replace guideState.settings.
+    const hardware = await handleHardwareDetection();
     const settings = guideState.settings;
 
-    // Run hardware detection which may add new profiles to the state
-    const hardware = await handleHardwareDetection();
-
-    // One-time timezone auto-detection and setting.
-    const timezoneSetFlag = localStorage.getItem('vini_timezone_auto_set');
-    if (!timezoneSetFlag) {
-        const browserOffset = Math.round(-(new Date().getTimezoneOffset() / 60));
+    // First run (or a settings file from before IANA zones): store the browser zone.
+    // The numeric offset stays as a fallback for old clients and EPG sources without one.
+    const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    const browserOffset = -(new Date().getTimezoneOffset() / 60);
+    if (!settings.timeZone) {
+        settings.timeZone = browserZone;
         settings.timezoneOffset = browserOffset;
-        console.log(`[SETTINGS] First-run timezone detection. Setting to browser offset: ${browserOffset} and saving.`);
-        if (appState.currentUser?.isAdmin) saveGlobalSetting({ timezoneOffset: browserOffset }); // global setting: admin-only on the server
-        localStorage.setItem('vini_timezone_auto_set', 'true');
+        console.log(`[SETTINGS] First-run timezone detection. Setting to ${browserZone} (UTC${browserOffset >= 0 ? '+' : ''}${browserOffset}) and saving.`);
+        if (appState.currentUser?.isAdmin) saveGlobalSetting({ timeZone: browserZone, timezoneOffset: browserOffset });
     } else {
-        settings.timezoneOffset = settings.timezoneOffset ?? Math.round(-(new Date().getTimezoneOffset() / 60));
+        settings.timezoneOffset = settings.timezoneOffset ?? browserOffset;
     }
 
-    try {
-        const userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-        if (userTimezone && UIElements.detectedTimezoneInfo) {
-            UIElements.detectedTimezoneInfo.textContent = `We've pre-selected your browser's timezone (${userTimezone}).`;
-            UIElements.detectedTimezoneInfo.classList.remove('hidden');
-        }
-    } catch (e) {
-        console.warn("Could not detect user's IANA timezone.", e);
+    if (UIElements.detectedTimezoneInfo) {
+        UIElements.detectedTimezoneInfo.textContent = `Guide times use ${settings.timeZone}.`;
+        UIElements.detectedTimezoneInfo.classList.remove('hidden');
     }
 
     settings.searchScope = settings.searchScope || 'all_channels_unfiltered';
@@ -828,7 +845,7 @@ export const updateUIFromSettings = async () => {
     settings.liveRewind = settings.liveRewind || { enabled: false, minutes: 15, diskCapMb: 4096 };
 
     // Update dropdowns and inputs
-    UIElements.timezoneOffsetSelect.value = settings.timezoneOffset;
+    UIElements.timezoneOffsetSelect.value = settings.timeZone;
     fetchAndDisplayPublicIp();
     fetchAndDisplayAppVersion();
     UIElements.searchScopeSelect.value = settings.searchScope;
@@ -917,7 +934,6 @@ export const updateUIFromSettings = async () => {
         return true; // Show custom profiles
     });
 
-    populateSelect('streamProfileSelect', filteredProfiles, settings.activeStreamProfileId);
     populateSelect('streamProfileSelect', filteredProfiles, settings.activeStreamProfileId);
 
     // Filter DVR profiles based on detected hardware
@@ -1131,72 +1147,6 @@ const openSourceEditor = (sourceType, source = null) => {
         if (btnSpan) {
             btnSpan.textContent = count > 0 ? `${count} Groups Selected` : 'Select Groups';
         }
-    }
-
-    // Attach listener for the new button
-    const filterGroupsBtn = document.getElementById('source-editor-filter-groups-btn');
-    if (filterGroupsBtn) {
-        filterGroupsBtn.addEventListener('click', async () => {
-            const selectedGroupsInput = document.getElementById('source-editor-selected-groups');
-            const currentSelected = JSON.parse(selectedGroupsInput.value || '[]');
-            const sourceName = UIElements.sourceEditorName.value || 'Source';
-
-            // Initial UI state
-            const originalText = filterGroupsBtn.querySelector('span').textContent;
-            filterGroupsBtn.querySelector('span').textContent = 'Loading...';
-            filterGroupsBtn.disabled = true;
-
-            currentGroupEditorContext = 'source-editor';
-            currentGroupSourceId = null; // Not needed for source editor as we read from form
-
-            try {
-                const payload = {
-                    type: currentSourceTypeForEditor, // Use 'type' not 'sourceType'
-                };
-
-                if (currentSourceTypeForEditor === 'url') {
-                    payload.url = UIElements.sourceEditorUrl.value;
-                } else if (currentSourceTypeForEditor === 'xc') {
-                    payload.xc = JSON.stringify({
-                        server: UIElements.sourceEditorXcUrl.value,
-                        username: UIElements.sourceEditorXcUsername.value,
-                        password: UIElements.sourceEditorXcPassword.value,
-                    });
-                }
-                // File sources: fetch-groups only works if file is already on server (has ID or path knewn)
-                if (source && source.id) {
-                    payload.sourceId = source.id;
-                    if (currentSourceTypeForEditor === 'file' && source.path) {
-                        payload.url = source.path; // Server expects path in 'url' field for file type
-                    }
-                }
-
-                const res = await apiFetch('/api/sources/fetch-groups', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
-                });
-
-                if (res && res.ok) {
-                    const data = await res.json();
-                    let allGroups = [];
-                    if (Array.isArray(data)) allGroups = data;
-                    else if (data.groups) allGroups = data.groups;
-
-                    UIElements.groupFilterModal.querySelector('h3').textContent = `Select Groups for ${sourceName}`;
-                    populateGroupFilterModal(allGroups, currentSelected);
-                    openModal(UIElements.groupFilterModal);
-                } else {
-                    showNotification("Failed to fetch groups. Ensure URL/Source is valid.", true);
-                }
-            } catch (e) {
-                console.error("Group fetch error:", e);
-                showNotification("Error fetching groups: " + e.message, true);
-            } finally {
-                filterGroupsBtn.querySelector('span').textContent = originalText;
-                filterGroupsBtn.disabled = false;
-            }
-        });
     }
 
     // Hide refresh interval for file-based sources
@@ -1583,7 +1533,10 @@ export function setupSettingsEventListeners() {
     UIElements.epgSourcesTbody.addEventListener('click', (e) => handleSourceTableClick(e, 'epg'));
 
     // --- General Settings Inputs ---
-    UIElements.timezoneOffsetSelect.addEventListener('change', (e) => saveSettingAndNotify(saveGlobalSetting, { timezoneOffset: parseInt(e.target.value, 10) }));
+    UIElements.timezoneOffsetSelect.addEventListener('change', (e) => {
+        const timeZone = e.target.value;
+        saveSettingAndNotify(saveGlobalSetting, { timeZone, timezoneOffset: zoneOffsetHours(new Date(), timeZone) });
+    });
     UIElements.searchScopeSelect.addEventListener('change', (e) => saveSettingAndNotify(saveGlobalSetting, { searchScope: e.target.value }));
     UIElements.playerLogLevelSelect.addEventListener('change', (e) => saveSettingAndNotify(saveGlobalSetting, { playerLogLevel: e.target.value }));
     UIElements.dvrLogLevelSelect.addEventListener('change', (e) => saveSettingAndNotify(saveGlobalSetting, { dvrLogLevel: e.target.value }));
@@ -2222,7 +2175,10 @@ export function setupSettingsEventListeners() {
             // Check if the "Select Groups" button was clicked
             if (e.target.closest('#source-editor-filter-groups-btn')) {
                 console.log('[SETTINGS] "Select Groups" button clicked (via delegation).');
-                const btn = e.target;
+                const btn = e.target.closest('#source-editor-filter-groups-btn');
+                // The save handler writes to the source editor, not a stale user-editor button.
+                currentGroupEditorContext = 'source-editor';
+                currentGroupSourceId = null;
                 // Store the original HTML content (using innerHTML as setButtonLoadingState uses it)
                 const originalContent = btn.innerHTML;
 

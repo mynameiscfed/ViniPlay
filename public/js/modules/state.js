@@ -38,8 +38,9 @@ export const guideState = {
         liveRewind: { enabled: false, minutes: 15, diskCapMb: 4096 },
         playerFallbackProfileId: null,
         allowUserQualitySwitch: false,
-        // Default timezone offset based on browser's timezone (will be overridden by server settings)
-        timezoneOffset: Math.round(-(new Date().getTimezoneOffset() / 60)),
+        // IANA zone plus its current offset as a fallback (will be overridden by server settings).
+        timeZone: null,
+        timezoneOffset: -(new Date().getTimezoneOffset() / 60),
     }, // This will hold both GLOBAL and USER settings, merged.
     hardware: null,
     guideDurationHours: 48,

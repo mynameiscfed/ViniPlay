@@ -12,6 +12,8 @@ import { playVOD } from './player.js';
 import { escapeHtml } from './utils.js';
 
 // Local state for VOD page
+let listenersBound = false;
+
 const vodState = {
     // This will hold the parsed and combined list of all movies and series objects
     fullLibrary: [],
@@ -139,8 +141,11 @@ export async function initVodPage() {
     // 4. Render the grid
     renderVodGrid();
 
-    // 5. Set up all event listeners for the page
-    setupVodEventListeners();
+    // 5. Bind the page controls once. Re-opening the tab only refreshes the library.
+    if (!listenersBound) {
+        setupVodEventListeners();
+        listenersBound = true;
+    }
 }
 
 

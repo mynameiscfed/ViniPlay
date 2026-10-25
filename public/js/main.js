@@ -649,6 +649,9 @@ function setupCoreEventListeners() {
 
 
 // --- App Start ---
+// The entry point must be wired once even if this module is imported through two URLs.
+if (!window.viniplayBooted) {
+window.viniplayBooted = true;
 document.addEventListener('DOMContentLoaded', () => {
     initTelemetry();
     // main.js is evaluated twice (index.html loads it with ?v=, auth.js without), so wire the UI layer once.
@@ -683,12 +686,10 @@ document.addEventListener('DOMContentLoaded', () => {
             .then(swReg => {
                 console.log('[APP_START] Service Worker registered successfully:', swReg);
                 appState.swRegistration = swReg;
-                // The following function is now INSIDE the .then() block
-                // This ensures it only runs after the service worker is ready.
-                return subscribeUserToPush();
-            })
-            .then(() => {
-                console.log('[MAIN] Push notification subscription process initiated after SW registration.');
+                // Push subscription starts in initMainApp, after authentication. Running it here
+                // called an authenticated endpoint on the login screen and showed a false
+                // "session has expired" error.
+                console.log('[MAIN] Service Worker ready; push subscription waits for login.');
             })
             .catch(error => {
                 console.error('[APP_START] Service Worker registration or Push Subscription failed:', error);
@@ -704,3 +705,4 @@ document.addEventListener('DOMContentLoaded', () => {
     console.log('[APP_START] Checking authentication status...');
     checkAuthStatus(); // This initiates the main app flow
 });
+}

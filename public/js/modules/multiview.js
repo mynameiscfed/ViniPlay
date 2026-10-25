@@ -111,6 +111,13 @@ async function pauseAndClearAllPlayers() {
         }
     }
 
+    // Redirect streams have their own server sessions and heartbeats.
+    for (const historyId of redirectHistoryIds.values()) {
+        stopPromises.push(stopRedirectStream(historyId));
+    }
+    redirectHistoryIds.clear();
+    checkAndStopMultiviewHeartbeats();
+
     // Wait for all server stop requests to be sent
     await Promise.all(stopPromises);
     console.log('[MultiView] Tab Hide: All server streams have been requested to stop.');
@@ -710,7 +717,7 @@ async function playChannelInWidget(widgetId, channel, gridstackItemContentEl) {
 
     if (isVOD) {
         // For VOD files, auto-select fMP4 profile (same as Direct Player)
-        const hasNVIDIA = guideState.hardware?.nvidia;
+        const hasNVIDIA = !!guideState.hardware?.nvidia;
         profileIdToUse = hasNVIDIA ? 'ffmpeg-fmp4-nvidia' : 'ffmpeg-fmp4';
         console.log(`[MultiView] Auto-selected ${hasNVIDIA ? 'NVIDIA' : 'CPU'} fMP4 profile for VOD`);
 
