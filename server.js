@@ -29,6 +29,7 @@ const { sendJson } = require('./sendJson');
 const { createEpgPayload } = require('./epgPayload');
 const { applyProcessed } = require('./processedSettings');
 const { validateJobWindow } = require('./dvrTime');
+const { resolveStreamIdentity } = require('./streamAuth');
 const zlib = require('zlib');
 const { pipeline } = require('stream');
 const { pipeline: pipelineAsync } = require('stream/promises');
@@ -630,9 +631,11 @@ const updateAndScheduleSourceRefreshes = () => {
                     console.log(`[SCHEDULER_RUN] Auto-refresh triggered for "${source.name}".`);
                     try {
                         const result = await processAndMergeSources();
+                        saveProcessedSettings(result.updatedSettings);
                         if (result.success) {
-                            saveProcessedSettings(result.updatedSettings);
                             console.log(`[SCHEDULER_RUN] Successfully refreshed and processed sources for "${source.name}".`);
+                        } else {
+                            console.warn(`[SCHEDULER_RUN] ${result.message}`);
                         }
                     } catch (error) {
                         console.error(`[SCHEDULER_RUN] Auto-refresh for "${source.name}" failed:`, error.message);
@@ -1680,6 +1683,7 @@ async function mergeEpg(req, settings, liveChannels, onlyIds, failedSources) {
     // Pass 1: make every guide readable and list the channels it declares, so channels can be matched by name.
     const epgChannels = new Map(); // XMLTV channel id -> {id, names}, across all guides
     const syntheticChannelIds = new Set(); // guide channels whose <channel id=""> had to be synthesized from the name
+    const fallbackEpgSources = new Set(); // guides that failed to refresh and are being re-merged from their cache
     for (const source of activeEpgSources) {
         console.log(`[EPG] Processing source: "${source.name}" (ID: ${source.id}, Type: ${source.type}, Path: ${source.path})`);
         const cached = onlyIds && !onlyIds.includes(source.id);
@@ -1700,8 +1704,16 @@ async function mergeEpg(req, settings, liveChannels, onlyIds, failedSources) {
                 const cachePath = path.join(RAW_CACHE_DIR, `raw_${source.id}.epg_cache`);
                 if (!(cached && fs.existsSync(cachePath))) {
                     sendProcessingStatus(req, ` -> Fetching content from URL...`, 'info');
-                    await pipelineAsync(await fetchUrlContent(source.path, source.fetchOptions || {}, true), fs.createWriteStream(`${cachePath}.tmp`));
-                    fs.renameSync(`${cachePath}.tmp`, cachePath);
+                    try {
+                        await pipelineAsync(await fetchUrlContent(source.path, source.fetchOptions || {}, true), fs.createWriteStream(`${cachePath}.tmp`));
+                        fs.renameSync(`${cachePath}.tmp`, cachePath);
+                    } catch (fetchError) {
+                        if (!fs.existsSync(cachePath)) throw fetchError;
+                        fallbackEpgSources.add(source.id);
+                        failedSources.push(source.name);
+                        console.warn(`[EPG] Refresh failed for "${source.name}", using the last cached guide: ${fetchError.message}`);
+                        sendProcessingStatus(req, ` -> Refresh failed (${fetchError.message}); using the last cached guide.`, 'warning');
+                    }
                 }
                 source.cachedRawPath = cachePath;
                 epgFiles.set(source.id, cachePath);
@@ -1717,7 +1729,7 @@ async function mergeEpg(req, settings, liveChannels, onlyIds, failedSources) {
             epgFiles.delete(source.id);
             failEpg(source, error);
         }
-        if (!source.isXcEpg && !cached) {
+        if (!source.isXcEpg && !cached && !fallbackEpgSources.has(source.id)) {
             source.lastUpdated = new Date().toISOString();
         }
     }
@@ -1762,8 +1774,13 @@ async function mergeEpg(req, settings, liveChannels, onlyIds, failedSources) {
                 sendProcessingStatus(req, `Warning: No programs found in "${source.name}".`, 'info');
             }
             if (!source.isXcEpg) {
-                source.status = 'Success';
-                source.statusMessage = `Processed ${programCount} programs, added ${epgAddedCount} to live guide.`;
+                if (fallbackEpgSources.has(source.id)) {
+                    source.status = 'Error';
+                    source.statusMessage = 'Refresh failed; kept the last cached guide.';
+                } else {
+                    source.status = 'Success';
+                    source.statusMessage = `Processed ${programCount} programs, added ${epgAddedCount} to live guide.`;
+                }
                 console.log(`[EPG] Source "${source.name}" processed successfully from ${source.path}.`);
             }
             sendProcessingStatus(req, ` -> Processed ${programCount} programs, added ${epgAddedCount} to live guide from "${source.name}".`, 'info');
@@ -1824,6 +1841,7 @@ async function processAndMergeSources(req, onlyIds) {
         }
         // ---
 
+        let usedCachedFallback = false;
         try {
             let content = '';
             let sourcePathForLog = source.path;
@@ -1847,26 +1865,34 @@ async function processAndMergeSources(req, onlyIds) {
                 sendProcessingStatus(req, ` -> Using cached content.`, 'info');
             } else if (source.type === 'url') {
                 sendProcessingStatus(req, ` -> Fetching content from URL...`, 'info');
-                content = await fetchUrlContent(source.path);
-                // Save raw content to cache (URL) ---
                 try {
-                    // Define cache path (ensure it's unique per source)
-                    const cacheFileName = `raw_${source.id}.m3u_cache`; // Use a distinct extension
-                    const cacheFilePath = path.join(RAW_CACHE_DIR, cacheFileName);
-
-                    // Write the fetched content to the cache file
-                    fs.writeFileSync(cacheFilePath, content);
-                    console.log(`[PROCESS_CACHE] Saved raw content for source "${source.name}" to ${cacheFilePath}`);
-
-                    // Store the path in the source object (this will be saved later when settings are saved)
-                    source.cachedRawPath = cacheFilePath;
-
-                } catch (cacheWriteError) {
-                    console.error(`[PROCESS_CACHE] Failed to write raw cache for source "${source.name}" (URL):`, cacheWriteError.message);
-                    // Clear any potentially stale cache path if writing failed
-                    delete source.cachedRawPath;
+                    content = await fetchUrlContent(source.path);
+                } catch (fetchError) {
+                    if (!source.cachedRawPath || !fs.existsSync(source.cachedRawPath)) throw fetchError;
+                    content = fs.readFileSync(source.cachedRawPath, 'utf-8');
+                    usedCachedFallback = true;
+                    console.warn(`[M3U] Refresh failed for "${source.name}", using the last cached playlist: ${fetchError.message}`);
+                    sendProcessingStatus(req, ` -> Refresh failed (${fetchError.message}); using the last cached playlist.`, 'warning');
                 }
-                sendProcessingStatus(req, ` -> Successfully fetched M3U content.`, 'info');
+                // Save raw content to cache (URL); keep the old file when this run fell back to it.
+                if (!usedCachedFallback) {
+                    try {
+                        const cacheFileName = `raw_${source.id}.m3u_cache`; // Use a distinct extension
+                        const cacheFilePath = path.join(RAW_CACHE_DIR, cacheFileName);
+
+                        fs.writeFileSync(cacheFilePath, content);
+                        console.log(`[PROCESS_CACHE] Saved raw content for source "${source.name}" to ${cacheFilePath}`);
+
+                        // Store the path in the source object (this will be saved later when settings are saved)
+                        source.cachedRawPath = cacheFilePath;
+
+                    } catch (cacheWriteError) {
+                        console.error(`[PROCESS_CACHE] Failed to write raw cache for source "${source.name}" (URL):`, cacheWriteError.message);
+                        // Clear any potentially stale cache path if writing failed
+                        delete source.cachedRawPath;
+                    }
+                    sendProcessingStatus(req, ` -> Successfully fetched M3U content.`, 'info');
+                }
             } else if (source.type === 'xc') {
                 if (!source.xc_data) {
                     throw new Error("XC source is missing credential data (xc_data).");
@@ -1883,6 +1909,7 @@ async function processAndMergeSources(req, onlyIds) {
 
                 // Fetch live streams from XC API
                 const liveStreamsUrl = `${server}/player_api.php?username=${username}&password=${password}&action=get_live_streams`;
+                let xcLiveError = null;
                 try {
                     sendProcessingStatus(req, ` -> Fetching live categories from XC server...`, 'info');
                     const liveCategoriesUrl = `${server}/player_api.php?username=${username}&password=${password}&action=get_live_categories`;
@@ -1926,27 +1953,36 @@ async function processAndMergeSources(req, onlyIds) {
                         sendProcessingStatus(req, ` -> No live streams found with stream_type = 'live'.`, 'info');
                     }
                 } catch (liveError) {
+                    xcLiveError = liveError;
                     console.error(`[XC Live] Error fetching live streams for "${source.name}": ${liveError.message}`);
                     sendProcessingStatus(req, ` -> Warning: Could not fetch live streams: ${liveError.message}`, 'warning');
                 }
 
-                // Save raw content to cache (XC) ---
-                try {
-                    // Define cache path (ensure it's unique per source)
-                    const cacheFileName = `raw_${source.id}.m3u_cache`; // Use a distinct extension
-                    const cacheFilePath = path.join(RAW_CACHE_DIR, cacheFileName);
+                if (xcLiveError && !content.trim()) {
+                    if (!source.cachedRawPath || !fs.existsSync(source.cachedRawPath)) throw xcLiveError;
+                    content = fs.readFileSync(source.cachedRawPath, 'utf-8');
+                    usedCachedFallback = true;
+                    console.warn(`[XC] Refresh failed for "${source.name}", using the last cached live playlist: ${xcLiveError.message}`);
+                    sendProcessingStatus(req, ` -> Refresh failed; using the last cached live playlist.`, 'warning');
+                }
 
-                    // Write the fetched content to the cache file
-                    fs.writeFileSync(cacheFilePath, content);
-                    console.log(`[PROCESS_CACHE] Saved raw content for source "${source.name}" to ${cacheFilePath}`);
+                // Save raw content to cache (XC); an empty or fallback result must not replace the last good copy.
+                if (content.trim() && !usedCachedFallback) {
+                    try {
+                        const cacheFileName = `raw_${source.id}.m3u_cache`; // Use a distinct extension
+                        const cacheFilePath = path.join(RAW_CACHE_DIR, cacheFileName);
 
-                    // Store the path in the source object (this will be saved later when settings are saved)
-                    source.cachedRawPath = cacheFilePath;
+                        fs.writeFileSync(cacheFilePath, content);
+                        console.log(`[PROCESS_CACHE] Saved raw content for source "${source.name}" to ${cacheFilePath}`);
 
-                } catch (cacheWriteError) {
-                    console.error(`[PROCESS_CACHE] Failed to write raw cache for source "${source.name}" (XC):`, cacheWriteError.message);
-                    // Clear any potentially stale cache path if writing failed
-                    delete source.cachedRawPath;
+                        // Store the path in the source object (this will be saved later when settings are saved)
+                        source.cachedRawPath = cacheFilePath;
+
+                    } catch (cacheWriteError) {
+                        console.error(`[PROCESS_CACHE] Failed to write raw cache for source "${source.name}" (XC):`, cacheWriteError.message);
+                        // Clear any potentially stale cache path if writing failed
+                        delete source.cachedRawPath;
+                    }
                 }
 
                 sourcePathForLog = liveStreamsUrl;
@@ -2017,8 +2053,14 @@ async function processAndMergeSources(req, onlyIds) {
                 }
             }
 
-            source.status = 'Success';
-            source.statusMessage = `Processed ${liveStreamCount} Live channels.`;
+            if (usedCachedFallback) {
+                source.status = 'Error';
+                source.statusMessage = 'Refresh failed; kept the last cached copy.';
+                failedSources.push(source.name);
+            } else {
+                source.status = 'Success';
+                source.statusMessage = `Processed ${liveStreamCount} Live channels.`;
+            }
             console.log(`[M3U] Source "${source.name}" processed successfully from ${sourcePathForLog}.`);
             sendProcessingStatus(req, ` -> Processed ${liveStreamCount} Live channels from "${source.name}".`, 'info');
 
@@ -2039,7 +2081,7 @@ async function processAndMergeSources(req, onlyIds) {
             source.status = 'Error';
             source.statusMessage = `Processing failed: ${error.message.substring(0, 100)}...`;
         }
-        if (!cached) source.lastUpdated = new Date().toISOString();
+        if (!cached && !usedCachedFallback) source.lastUpdated = new Date().toISOString();
     }
 
     // --- Save the new separated files ---
@@ -2062,7 +2104,14 @@ async function processAndMergeSources(req, onlyIds) {
         sendProcessingStatus(req, 'All sources processed successfully!', 'final_success');
     }
 
-    return { success: true, message: 'Sources merged successfully.', updatedSettings: settings };
+    return {
+        success: failedSources.length === 0,
+        failedSources,
+        message: failedSources.length
+            ? `Sources merged with ${failedSources.length} failed source(s): ${failedSources.join(', ')}.`
+            : 'Sources merged successfully.',
+        updatedSettings: settings,
+    };
 }
 
 // ... existing helper functions ...
@@ -3536,13 +3585,11 @@ app.post('/api/process-sources', requireAuth, requireAdmin, async (req, res) => 
         // An XC source is refreshed together with its managed EPG.
         const result = await processAndMergeSources(req, sourceId && [sourceId, `epg_for_${sourceId}`]);
 
-        if (result.success) {
-            saveProcessedSettings(result.updatedSettings);
-            console.log('[API] Source processing completed and settings saved (manual trigger).');
-            res.json({ success: true, message: 'Sources merged successfully.' });
-        } else {
-            res.status(500).json({ error: result.message || 'Failed to process sources.' });
-        }
+        // Save the successful sources even when another one failed; the response reports the
+        // partial result instead of looking like the whole run never started.
+        saveProcessedSettings(result.updatedSettings);
+        console.log('[API] Source processing completed and settings saved (manual trigger).');
+        res.json({ success: result.success, message: result.message, failedSources: result.failedSources });
     }
     catch (error) {
         console.error("[API] Error during manual source processing:", error);
@@ -3741,9 +3788,8 @@ app.post('/api/save/settings', requireAuth, requireAdmin, async (req, res) => {
         if (updatedSettings.timezoneOffset !== oldTimezone) {
             console.log("[API] Timezone setting changed, re-processing sources.");
             const result = await processAndMergeSources();
-            if (result.success) {
-                saveProcessedSettings(result.updatedSettings);
-            }
+            saveProcessedSettings(result.updatedSettings);
+            if (!result.success) console.warn(`[API] ${result.message}`);
         }
 
         res.json({ success: true, message: 'Settings saved.', settings: getSettings() });
@@ -4138,75 +4184,27 @@ app.delete('/api/data', requireAuth, requireAdmin, (req, res) => {
 // Middleware to allow local network access OR authenticated access OR cast token
 // This enables Chromecast devices to access streams using temporary tokens
 function allowLocalOrAuth(req, res, next) {
-    // Check if authenticated via session
-    if (req.session && req.session.userId) {
-        return next();
+    const identity = resolveStreamIdentity(req, { castTokens: activeCastTokens, trustProxy: TRUST_PROXY });
+    if (!identity.ok) {
+        console.warn(`[STREAM_AUTH] ✗ ${identity.message} from ${req.ip || req.socket.remoteAddress || 'unknown'}.`);
+        return res.status(identity.status).send(identity.message);
     }
-
-    // Check for Cast token (priority for Chromecast)
-    const { castToken } = req.query;
-    if (castToken) {
-        const tokenData = activeCastTokens.get(castToken);
-
-        if (!tokenData) {
-            console.warn('[STREAM_AUTH] Invalid cast token.');
-            return res.status(401).send('Invalid cast token');
-        }
-
-        if (tokenData.expiresAt < Date.now()) {
-            console.warn('[STREAM_AUTH] Expired cast token.');
-            activeCastTokens.delete(castToken);
-            return res.status(401).send('Expired cast token');
-        }
-
-        console.log(`[STREAM_AUTH] ✓ Valid cast token for user ${tokenData.userId}`);
-
-        // Set session from token
-        req.session = req.session || {};
-        req.session.userId = tokenData.userId;
-        req.session.username = 'Cast User';
-
-        // One-time use: delete token after successful auth
-        activeCastTokens.delete(castToken);
-
-        return next();
-    }
-
-    // Fail closed: forwarded headers with no configured trusted proxy mean the socket address is
-    // the proxy's, not the client's, so "local" cannot be established.
-    if (req.headers['x-forwarded-for'] && !TRUST_PROXY) {
-        console.warn('[STREAM_AUTH] ✗ X-Forwarded-For present but TRUST_PROXY is not set; refusing local-network bypass.');
-        return res.status(401).send('Authentication required');
-    }
-
-    const clientIp = req.ip || req.socket.remoteAddress || '';
-    console.log(`[STREAM_AUTH] Checking IP: ${clientIp}`);
-
-    const m = clientIp.match(/^(?:::ffff:)?(\d+)\.(\d+)\.\d+\.\d+$/);
-    const isLocal = clientIp === '::1' || (m && (
-        m[1] === '127' || m[1] === '10' ||
-        (m[1] === '192' && m[2] === '168') ||
-        (m[1] === '172' && +m[2] >= 16 && +m[2] <= 31)
-    ));
-
-    if (isLocal) {
-        console.log(`[STREAM_AUTH] ✓ Allowing unauthenticated access from local network: ${clientIp}`);
-        // Set a dummy session for logging purposes
-        req.session = req.session || {};
-        req.session.userId = 1; // Default to admin user for local access
-        req.session.username = 'Local Network';
-        return next();
-    }
-
-    console.warn(`[STREAM_AUTH] ✗ Unauthorized access attempt from: ${clientIp}`);
-    res.status(401).send('Authentication required');
+    // These fields describe this stream only. The real session is never modified, so a
+    // local request cannot persist a user identity in the session cookie.
+    req.streamUserId = identity.userId;
+    req.streamUsername = identity.username;
+    req.localAccess = identity.localAccess;
+    console.log(identity.localAccess
+        ? `[STREAM_AUTH] ✓ Allowing unauthenticated access from local network: ${req.ip || req.socket.remoteAddress}`
+        : `[STREAM_AUTH] ✓ Stream authorized for user ${identity.userId ?? 'cast'}`);
+    next();
 }
 
 // MODIFIED: Stream endpoint now allows local network access for Chromecast and supports fast input seeking
 app.get('/stream', allowLocalOrAuth, async (req, res) => {
     const { url: streamUrl, profileId, userAgentId, vodName, vodLogo, startTime: seekParam } = req.query;
-    const userId = req.session.userId;
-    const username = req.session.username;
+    const userId = req.streamUserId ?? null;
+    const username = req.streamUsername || 'Local Network';
     const clientIp = req.clientIp;
 
     const seekSec = parseFloat(seekParam);
@@ -4336,40 +4334,43 @@ app.get('/stream', allowLocalOrAuth, async (req, res) => {
 
     //-- ENHANCEMENT: Log richer stream start data to history.
     const startTime = new Date().toISOString();
-    db.run(
-        `INSERT INTO stream_history (user_id, username, channel_id, channel_name, start_time, status, client_ip, channel_logo, stream_profile_name) VALUES (?, ?, ?, ?, ?, 'playing', ?, ?, ?)`,
-        [userId, username, channelId, channelName, startTime, clientIp, channelLogo, streamProfileName],
-        function (err) {
-            if (err) {
-                console.error('[STREAM_HISTORY] Error logging stream start:', err.message);
-            } else {
-                const historyId = this.lastID;
-                console.log(`[STREAM_HISTORY] Logged stream start with history ID: ${historyId}`);
+    const newStreamInfo = {
+        process: ffmpeg,
+        references: 1,
+        lastAccess: Date.now(),
+        userId,
+        username,
+        channelId,
+        channelName,
+        channelLogo,
+        streamProfileName,
+        startTime,
+        historyId: null,
+        clientIp,
+        streamKey,
+        isTranscoded,
+    };
 
-                // Now that we have the history ID, store it with the process
-                const newStreamInfo = {
-                    process: ffmpeg,
-                    references: 1,
-                    lastAccess: Date.now(),
-                    userId,
-                    username,
-                    channelId,
-                    channelName,
-                    channelLogo, // Store logo
-                    streamProfileName, // Store profile name
-                    startTime,
-                    historyId,
-                    clientIp,
-                    streamKey,
-                    isTranscoded, // NEW: Store transcoding status
-                };
-                activeStreamProcesses.set(streamKey, newStreamInfo);
-                console.log(`[STREAM] Started FFMPEG process with PID: ${ffmpeg.pid} for user ${userId} for stream key: ${streamKey}.`);
-                //-- ENHANCEMENT: Notify admins that a new stream has started.
-                broadcastAdminUpdate();
+    const trackStream = (historyId) => {
+        newStreamInfo.historyId = historyId;
+        activeStreamProcesses.set(streamKey, newStreamInfo);
+        console.log(`[STREAM] Started FFMPEG process with PID: ${ffmpeg.pid} for user ${userId ?? 'local'} for stream key: ${streamKey}.`);
+        broadcastAdminUpdate();
+    };
+
+    if (userId === null) {
+        // stream_history.user_id is NOT NULL; local playback has no user row to attribute it to.
+        trackStream(null);
+    } else {
+        db.run(
+            `INSERT INTO stream_history (user_id, username, channel_id, channel_name, start_time, status, client_ip, channel_logo, stream_profile_name) VALUES (?, ?, ?, ?, ?, 'playing', ?, ?, ?)`,
+            [userId, username, channelId, channelName, startTime, clientIp, channelLogo, streamProfileName],
+            function (err) {
+                if (err) console.error('[STREAM_HISTORY] Error logging stream start:', err.message);
+                trackStream(err ? null : this.lastID);
             }
-        }
-    );
+        );
+    }
 
     // Set appropriate Content-Type based on output format
     if (profile.command.includes('-f mp4')) {
@@ -6902,7 +6903,8 @@ detectHardwareAcceleration().then(() => {
 
         processAndMergeSources().then((result) => {
             console.log('[INIT] Initial source processing complete.');
-            if (result.success) saveProcessedSettings(result.updatedSettings);
+            saveProcessedSettings(result.updatedSettings);
+            if (!result.success) console.warn(`[INIT] ${result.message}`);
             updateAndScheduleSourceRefreshes();
         }).catch(error => console.error('[INIT] Initial source processing failed:', error.message));
 
