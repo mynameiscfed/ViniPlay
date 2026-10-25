@@ -18,14 +18,24 @@ const session = require('express-session');
 const bcrypt = require('bcrypt');
 const sqlite3 = require('sqlite3').verbose();
 const SQLiteStore = require('connect-sqlite3')(session);
-const xmlJS = require('xml-js');
+const { configureConnection, INDEX_DDL, ORPHAN_CLEANUP_SQL } = require('./dbConfig');
+const { throttleSessionTouch } = require('./sessionTouch');
+const { createUserCache } = require('./userCache');
+const { createVodStore } = require('./vodStore');
+const { createLibraryCache } = require('./vodLibraryCache');
+const { cachedFile, writeFileAtomic } = require('./fileStore');
+const { sendJson } = require('./sendJson');
+const { createEpgPayload } = require('./epgPayload');
+const { applyProcessed } = require('./processedSettings');
 const zlib = require('zlib');
+const { pipeline } = require('stream');
+const { forEachProgramme } = require('./epgStream');
 const webpush = require('web-push');
 const schedule = require('node-schedule');
 const disk = require('diskusage');
 const si = require('systeminformation'); // NEW: For system health monitoring
 //vod processor
-const { refreshVodContent, processM3uVod } = require('./vodProcessor');
+const { refreshVodContent } = require('./vodProcessor');
 const XtreamClient = require('./xtreamClient');
 
 
@@ -117,6 +127,10 @@ const LIVE_EPG_JSON_PATH = path.join(DATA_DIR, 'epg.json'); // Renamed
 const VOD_MOVIES_JSON_PATH = path.join(DATA_DIR, 'vod_movies.json'); // New
 const VOD_SERIES_JSON_PATH = path.join(DATA_DIR, 'vod_series.json'); // New
 const SETTINGS_PATH = path.join(DATA_DIR, 'settings.json');
+const writeSettings = (settings) => writeFileAtomic(SETTINGS_PATH, JSON.stringify(settings, null, 2));
+// Parsed once per change of the file instead of on every request; callers must not modify what they get.
+const readChannels = cachedFile(LIVE_CHANNELS_M3U_PATH, parseM3U);
+const epgPayload = createEpgPayload(cachedFile(LIVE_EPG_JSON_PATH, (text) => text));
 
 console.log(`[INIT] Application starting. Data directory: ${DATA_DIR}, Public directory: ${PUBLIC_DIR}`);
 
@@ -156,6 +170,11 @@ try {
 
 
 // --- Database Setup ---
+// Resolves to the journal mode in effect once the main connection is configured. The
+// session store opens its own connection and waits on this before tuning itself.
+let resolveDbConfigured;
+const dbConfigured = new Promise((resolve) => { resolveDbConfigured = resolve; });
+
 const db = new sqlite3.Database(DB_PATH, (err) => {
     if (err) {
         console.error("[DB] Error opening database:", err.message);
@@ -163,6 +182,9 @@ const db = new sqlite3.Database(DB_PATH, (err) => {
     } else {
         console.log("[DB] Connected to the SQLite database.");
         db.serialize(() => {
+            // WAL + synchronous=NORMAL, a 5 s busy timeout, and a larger page cache (see dbConfig.js).
+            // Issued first so the journal mode is switched before the schema statements run.
+            configureConnection(db, { label: 'main' }).then(resolveDbConfigured);
             db.run(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE, password TEXT, isAdmin INTEGER DEFAULT 0, canUseDvr INTEGER DEFAULT 0, allowed_sources TEXT)`, (err) => {
                 if (err) {
                     console.error("[DB] Error creating 'users' table:", err.message);
@@ -325,6 +347,32 @@ const db = new sqlite3.Database(DB_PATH, (err) => {
             )`, (err) => {
                 if (err) console.error("[DB] Error creating 'watch_progress' table:", err.message);
             });
+
+            // --- Secondary indexes (idempotent; see dbConfig.js for what each one serves) ---
+            INDEX_DDL.forEach((ddl) => {
+                db.run(ddl, (indexErr) => {
+                    if (indexErr) console.error(`[DB] Error creating index (${ddl}):`, indexErr.message);
+                });
+            });
+            // Refresh planner statistics so the new indexes are picked correctly.
+            db.run('PRAGMA optimize');
+            // vodStore.ready() adds the unique keys the VOD upserts rely on (and removes duplicate episodes first).
+            // The callback fires once every statement above has run, so all tables exist: a statement queued
+            // here directly can be prepared before the CREATE TABLE ahead of it has executed (fresh databases).
+            db.run('SELECT 1', () => {
+                vodStore.ready().catch(() => { });
+                ORPHAN_CLEANUP_SQL.forEach((sql) => {
+                    db.run(sql, (cleanupErr) => {
+                        if (cleanupErr) console.error(`[DB] Orphan cleanup failed (${sql}):`, cleanupErr.message);
+                    });
+                });
+                // Nothing is streaming right after a start, so 'playing' rows are left over from a crash or restart.
+                // The real end is unknown, so they are closed with zero length.
+                db.run("UPDATE stream_history SET status = 'stopped', end_time = start_time, duration_seconds = 0 WHERE status = 'playing'", (reconcileErr) => {
+                    if (reconcileErr) console.error('[DB] Could not close stale stream_history rows:', reconcileErr.message);
+                });
+            });
+
             // --- DVR Job Loading, Scheduling and Restart Recovery ---
             console.log('[DVR] Checking and recovering pending/active DVR jobs from database...');
             db.all("SELECT * FROM dvr_jobs WHERE status IN ('recording', 'reconnecting')", [], (err, activeJobs) => {
@@ -489,7 +537,7 @@ const updateAndScheduleSourceRefreshes = () => {
                     try {
                         const result = await processAndMergeSources();
                         if (result.success) {
-                            fs.writeFileSync(SETTINGS_PATH, JSON.stringify(result.updatedSettings, null, 2));
+                            saveProcessedSettings(result.updatedSettings);
                             console.log(`[SCHEDULER_RUN] Successfully refreshed and processed sources for "${source.name}".`);
                         }
                     } catch (error) {
@@ -515,9 +563,11 @@ const updateAndScheduleSourceRefreshes = () => {
     console.log(`[SCHEDULER] Finished scheduling. Active timers: ${sourceRefreshTimers.size}`);
 };
 
+const saveProcessedSettings = (processed) => writeSettings(applyProcessed(getSettings(), processed));
+
 function saveSettings(settings) {
     try {
-        fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2));
+        writeSettings(settings);
         console.log('[SETTINGS] Settings saved successfully.');
         updateAndScheduleSourceRefreshes();
     } catch (e) {
@@ -549,9 +599,16 @@ if (sessionSecret.includes('replace_this')) {
     console.warn('[SECURITY] Using a weak or default SESSION_SECRET. Please replace it.');
 }
 
+// connect-sqlite3 opens its own connection to viniplay.db. Give it the same busy timeout
+// (and synchronous=NORMAL once WAL is confirmed) so session writes do not fail with
+// SQLITE_BUSY while the main connection is busy, and stop it from writing on every request.
+const sessionStore = new SQLiteStore({ db: 'viniplay.db', dir: DATA_DIR, table: 'sessions' });
+dbConfigured.then(() => configureConnection(sessionStore.db, { label: 'session-store', setJournalMode: false, tuneCache: false }));
+throttleSessionTouch(sessionStore);
+
 app.use(
     session({
-        store: new SQLiteStore({ db: 'viniplay.db', dir: DATA_DIR, table: 'sessions' }),
+        store: sessionStore,
         secret: sessionSecret,
         resave: false,
         saveUninitialized: false,
@@ -571,26 +628,39 @@ app.use((req, res, next) => {
     next();
 });
 
-// MODIFIED: requireAuth now checks if the user still exists in the database on every request.
-const requireAuth = (req, res, next) => {
+// User rows are cached for a few seconds (and invalidated on update/delete) so requireAuth
+// and the endpoints that need allowed_sources do not each hit the database.
+const userCache = createUserCache({
+    load: (id) => dbGet(db, "SELECT id, username, isAdmin, canUseDvr, allowed_sources FROM users WHERE id = ?", [id]),
+});
+
+// requireAuth checks that the user still exists, and keeps the role flags in the session in
+// sync with the database so a promotion or demotion takes effect without logging in again.
+const requireAuth = async (req, res, next) => {
     if (!req.session || !req.session.userId) {
         return res.status(401).json({ error: 'Authentication required.' });
     }
 
-    db.get("SELECT id FROM users WHERE id = ?", [req.session.userId], (err, user) => {
-        if (err) {
-            console.error('[AUTH_MIDDLEWARE] DB error checking user existence:', err);
-            return res.status(500).json({ error: 'Server error during authentication.' });
-        }
-        if (!user) {
-            console.warn(`[AUTH_MIDDLEWARE] User ID ${req.session.userId} from session not found in DB. Destroying session.`);
-            req.session.destroy();
-            res.clearCookie('connect.sid');
-            return res.status(401).json({ error: 'User account no longer exists. Please log in again.' });
-        }
-        // User exists, proceed.
-        next();
-    });
+    let user;
+    try {
+        user = await userCache.get(req.session.userId);
+    } catch (err) {
+        console.error('[AUTH_MIDDLEWARE] DB error checking user existence:', err);
+        return res.status(500).json({ error: 'Server error during authentication.' });
+    }
+    if (!user) {
+        console.warn(`[AUTH_MIDDLEWARE] User ID ${req.session.userId} from session not found in DB. Destroying session.`);
+        req.session.destroy();
+        res.clearCookie('connect.sid');
+        return res.status(401).json({ error: 'User account no longer exists. Please log in again.' });
+    }
+
+    const isAdmin = user.isAdmin === 1;
+    const canUseDvr = user.canUseDvr === 1;
+    if (req.session.isAdmin !== isAdmin) req.session.isAdmin = isAdmin;
+    if (req.session.canUseDvr !== canUseDvr) req.session.canUseDvr = canUseDvr;
+    if (req.session.username !== user.username) req.session.username = user.username;
+    next();
 };
 
 const requireAdmin = (req, res, next) => {
@@ -670,6 +740,10 @@ const dbAll = (db, sql, params = []) => {
     });
 };
 // --- End Database Helper Functions ---
+
+// Serialized /api/vod/library responses, dropped whenever the VOD catalog changes.
+const vodLibraryCache = createLibraryCache();
+const vodStore = createVodStore({ db, dbRun, dbAll, dbGet });
 
 
 /**
@@ -943,7 +1017,7 @@ function getSettings() {
 
     if (!fs.existsSync(SETTINGS_PATH)) {
         console.log('[SETTINGS] settings.json not found, creating default settings.');
-        fs.writeFileSync(SETTINGS_PATH, JSON.stringify(defaultSettings, null, 2));
+        writeSettings(defaultSettings);
         return defaultSettings;
     }
     try {
@@ -1092,7 +1166,7 @@ function getSettings() {
                 console.log('[SETTINGS_MIGRATE] Settings are all valid.');
                 if (needsSave) {
                     console.log('[SETTINGS_MIGRATE] Saving updated settings file after migration.');
-                    fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2));
+                    writeSettings(settings);
                 }
             } else {
                 console.log('[SETTINGS_MIGRATE_ERROR] Settings are not all valid.');
@@ -1324,10 +1398,9 @@ initializeLogSystem();
 /**
  * Initiates the VOD refresh process for a given XC provider.
  * @param {object} provider - The M3U source object (must be type 'xc').
- * @param {sqlite3.Database} dbInstance - The active database connection.
  * @param {function} sendStatus - Function to send status updates.
  */
-async function triggerVodRefreshForProvider(provider, dbInstance, sendStatus = () => { }) {
+async function triggerVodRefreshForProvider(provider, sendStatus = () => { }) {
     if (!provider || provider.type !== 'xc' || !provider.xc_data) {
         console.error(`[VOD Trigger] Invalid provider object passed for VOD refresh. ID: ${provider?.id}`);
         return;
@@ -1340,20 +1413,22 @@ async function triggerVodRefreshForProvider(provider, dbInstance, sendStatus = (
         const settings = getSettings();
         const activeUserAgent = settings.userAgents.find(ua => ua.id === settings.activeUserAgentId)?.value || 'VLC/3.0.20 (Linux; x86_64)';
         // Call the main processing function from vodProcessor.js
-        await refreshVodContent(dbInstance, dbGet, dbAll, dbRun, provider, sendStatus, activeUserAgent);
+        await refreshVodContent(vodStore, provider, sendStatus, activeUserAgent);
 
         console.log(`[VOD Trigger] Successfully finished VOD refresh for provider: ${provider.name}`);
 
     } catch (error) {
         console.error(`[VOD Trigger] Error during VOD refresh for ${provider.name}: ${error.message}`);
         sendStatus(`VOD refresh FAILED for ${provider.name}: ${error.message}`, 'error');
+    } finally {
+        vodLibraryCache.invalidate();
     }
 }
 
 
 // ... existing helper functions (fetchUrlContent, parseEpgTime, processAndMergeSources) remain the same ...
 
-function fetchUrlContent(url, options = {}, asBuffer = false) { // <-- MODIFIED
+function fetchUrlContent(url, options = {}, asStream = false) { // asStream resolves with the response stream, unread
     return new Promise((resolve, reject) => {
         const protocol = url.startsWith('https') ? https : http;
         const TIMEOUT_DURATION = 60000;
@@ -1363,30 +1438,22 @@ function fetchUrlContent(url, options = {}, asBuffer = false) { // <-- MODIFIED
             if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
                 console.log(`[FETCH] Redirecting to: ${res.headers.location}`);
                 request.abort();
-                // Pass the asBuffer flag through redirects
-                return fetchUrlContent(new URL(res.headers.location, url).href, options, asBuffer).then(resolve, reject);
+                return fetchUrlContent(new URL(res.headers.location, url).href, options, asStream).then(resolve, reject);
             }
             if (res.statusCode !== 200) {
                 console.error(`[FETCH] Failed to fetch ${url}: Status Code ${res.statusCode}`);
                 return reject(new Error(`Failed to fetch: Status Code ${res.statusCode}`));
             }
 
-            if (asBuffer) {
-                const chunks = [];
-                res.on('data', (chunk) => chunks.push(chunk));
-                res.on('end', () => {
-                    console.log(`[FETCH] Successfully fetched content as buffer from: ${url}`);
-                    resolve(Buffer.concat(chunks));
-                });
-            } else {
-                let data = '';
-                res.setEncoding('utf8');
-                res.on('data', (chunk) => { data += chunk; });
-                res.on('end', () => {
-                    console.log(`[FETCH] Successfully fetched content from: ${url}`);
-                    resolve(data);
-                });
-            }
+            if (asStream) return resolve(res);
+
+            let data = '';
+            res.setEncoding('utf8');
+            res.on('data', (chunk) => { data += chunk; });
+            res.on('end', () => {
+                console.log(`[FETCH] Successfully fetched content from: ${url}`);
+                resolve(data);
+            });
         });
 
         request.on('timeout', () => {
@@ -1440,6 +1507,7 @@ async function processAndMergeSources(req) {
 
     const activeM3uSources = settings.m3uSources.filter(s => s.isActive);
     const activeEpgSources = settings.epgSources.filter(s => s.isActive);
+    const failedSources = []; // names, for the final summary
 
     if (activeM3uSources.length === 0) {
         console.log('[PROCESS] No active M3U sources found.');
@@ -1473,6 +1541,7 @@ async function processAndMergeSources(req) {
                     sendProcessingStatus(req, `Error: ${errorMsg}`, 'error');
                     source.status = 'Error';
                     source.statusMessage = 'File not found.';
+                    failedSources.push(source.name);
                     continue;
                 }
             } else if (source.type === 'url') {
@@ -1583,14 +1652,6 @@ async function processAndMergeSources(req) {
                 sendProcessingStatus(req, ` -> Successfully fetched M3U content from XC server.`, 'info');
             }
 
-            // --- NEW: Trigger VOD Refresh for all non-XC Sources ---
-            if (source.type === 'file' || source.type === 'url') {
-                console.log(`[PROCESS] Source "${source.name}" is a non-XC M3U. Triggering VOD processing.`);
-                sendProcessingStatus(req, ` -> Triggering VOD content processing for M3U source "${source.name}"...`, 'info');
-                await processM3uVod(db, dbGet, dbAll, dbRun, content, source, (msg, type) => sendProcessingStatus(req, msg, type));
-            }
-            // --- END VOD Trigger ---
-
             const lines = content.split('\n');
             let currentExtInf = '';
             let liveStreamCount = 0;
@@ -1664,8 +1725,7 @@ async function processAndMergeSources(req) {
                 console.log(`[PROCESS] Source "${source.name}" is XC. Triggering VOD refresh.`);
                 sendProcessingStatus(req, ` -> Triggering VOD content refresh for XC source "${source.name}"...`, 'info');
                 // Use setImmediate to run the VOD refresh *after* the current M3U processing finishes
-                // Pass the source object and the global db instance
-                await triggerVodRefreshForProvider(source, db, (msg, type) => sendProcessingStatus(req, msg, type));
+                await triggerVodRefreshForProvider(source, (msg, type) => sendProcessingStatus(req, msg, type));
             }
             // --- END VOD Trigger ---
 
@@ -1673,6 +1733,7 @@ async function processAndMergeSources(req) {
             const errorMsg = `Failed to process source "${source.name}" from ${source.path}: ${error.message}`;
             console.error(`[M3U] ${errorMsg}`);
             sendProcessingStatus(req, `Error: ${errorMsg}`, 'error');
+            failedSources.push(source.name);
             source.status = 'Error';
             source.statusMessage = `Processing failed: ${error.message.substring(0, 100)}...`;
         }
@@ -1681,7 +1742,7 @@ async function processAndMergeSources(req) {
 
     // --- Save the new separated files ---
     try { // Try block for saving LIVE M3U
-        fs.writeFileSync(LIVE_CHANNELS_M3U_PATH, mergedLiveM3uContent);
+        writeFileAtomic(LIVE_CHANNELS_M3U_PATH, mergedLiveM3uContent);
         console.log(`[M3U] Merged LIVE CHANNELS content saved to ${LIVE_CHANNELS_M3U_PATH}.`);
         sendProcessingStatus(req, `Successfully merged all live channels.`, 'success');
     } catch (writeErr) { // Catch block for saving LIVE M3U
@@ -1702,54 +1763,33 @@ async function processAndMergeSources(req) {
         console.log(`[EPG] Processing source: "${source.name}" (ID: ${source.id}, Type: ${source.type}, Path: ${source.path})`);
         sendProcessingStatus(req, `Processing EPG source: "${source.name}"...`, 'info');
         try {
-            let xmlString = '';
-            let epgFilePath = path.join(SOURCES_DIR, `epg_${source.id}.xml`);
+            let stream;
 
             if (source.type === 'file') {
                 if (fs.existsSync(source.path)) {
-                    xmlString = fs.readFileSync(source.path, 'utf-8');
+                    stream = fs.createReadStream(source.path);
                 } else {
                     const errorMsg = `File not found for source "${source.name}". Skipping.`;
                     sendProcessingStatus(req, `Error: ${errorMsg}`, 'error');
                     source.status = 'Error';
                     source.statusMessage = 'File not found.';
+                    failedSources.push(source.name);
                     continue;
                 }
             } else if (source.type === 'url') {
                 sendProcessingStatus(req, ` -> Fetching content from URL...`, 'info');
-
-                // Use a different function to fetch raw buffer for compressed files
-                if (source.path.endsWith('.gz')) {
-                    const buffer = await fetchUrlContent(source.path, source.fetchOptions || {}, true); // Fetch as buffer
-                    xmlString = zlib.gunzipSync(buffer).toString('utf-8');
-                    sendProcessingStatus(req, ` -> Successfully fetched and decompressed EPG content.`, 'info');
-                } else {
-                    xmlString = await fetchUrlContent(source.path, source.fetchOptions || {});
-                    sendProcessingStatus(req, ` -> Successfully fetched EPG content.`, 'info');
-                }
-
-                try {
-                    fs.writeFileSync(epgFilePath, xmlString);
-                    console.log(`[EPG] Downloaded EPG for "${source.name}" saved to ${epgFilePath}.`);
-                } catch (writeErr) {
-                    console.error(`[EPG] Error saving EPG file from URL for "${source.name}": ${writeErr.message}`);
-                }
+                stream = await fetchUrlContent(source.path, source.fetchOptions || {}, true);
             }
+            // The guide is parsed as a stream: big ones don't fit in a single string.
+            if (source.path.endsWith('.gz')) stream = pipeline(stream, zlib.createGunzip(), () => {});
 
-            const epgJson = xmlJS.xml2js(xmlString, { compact: true });
-            const programs = epgJson.tv && epgJson.tv.programme ? [].concat(epgJson.tv.programme) : [];
             let programCount = 0;
             let epgAddedCount = 0; // NEW: Count only added programs
-
-            if (programs.length === 0) {
-                sendProcessingStatus(req, `Warning: No programs found in "${source.name}".`, 'info');
-            }
-
             const m3uSourceProviders = settings.m3uSources.filter(m3u => m3u.isActive);
 
-            for (const prog of programs) {
+            await forEachProgramme(stream, (prog) => {
                 const originalChannelId = prog._attributes?.channel;
-                if (!originalChannelId) continue;
+                if (!originalChannelId) return;
                 programCount++;
 
                 for (const m3uSource of m3uSourceProviders) {
@@ -1778,6 +1818,10 @@ async function processAndMergeSources(req) {
                         desc: descNode.trim()
                     });
                 }
+            });
+
+            if (programCount === 0) {
+                sendProcessingStatus(req, `Warning: No programs found in "${source.name}".`, 'info');
             }
             if (!source.isXcEpg) {
                 source.status = 'Success';
@@ -1790,6 +1834,7 @@ async function processAndMergeSources(req) {
             const errorMsg = `Failed to process source "${source.name}" from ${source.path}: ${error.message}`;
             console.error(`[EPG] ${errorMsg}`);
             sendProcessingStatus(req, `Error: ${errorMsg}`, 'error');
+            failedSources.push(source.name);
             if (!source.isXcEpg) {
                 source.status = 'Error';
                 source.statusMessage = `Processing failed: ${error.message.substring(0, 100)}...`;
@@ -1803,7 +1848,7 @@ async function processAndMergeSources(req) {
         mergedProgramData[channelId].sort((a, b) => new Date(a.start) - new Date(b.start));
     }
     try { // Try block for saving EPG JSON
-        fs.writeFileSync(LIVE_EPG_JSON_PATH, JSON.stringify(mergedProgramData));
+        writeFileAtomic(LIVE_EPG_JSON_PATH, JSON.stringify(mergedProgramData));
         console.log(`[EPG] Merged EPG JSON content saved to ${LIVE_EPG_JSON_PATH}.`);
         sendProcessingStatus(req, `Successfully merged all EPG data for live channels.`, 'success');
     } catch (writeErr) { // Catch block for saving EPG JSON
@@ -1813,7 +1858,11 @@ async function processAndMergeSources(req) {
 
     settings.sourcesLastUpdated = new Date().toISOString();
     console.log(`[PROCESS] Finished processing. New 'sourcesLastUpdated' timestamp: ${settings.sourcesLastUpdated}`);
-    sendProcessingStatus(req, 'All sources processed successfully!', 'final_success');
+    if (failedSources.length) {
+        sendProcessingStatus(req, `Finished with ${failedSources.length} failed source(s): ${failedSources.join(', ')}.`, 'error');
+    } else {
+        sendProcessingStatus(req, 'All sources processed successfully!', 'final_success');
+    }
 
     return { success: true, message: 'Sources merged successfully.', updatedSettings: settings };
 }
@@ -2101,6 +2150,7 @@ app.put('/api/users/:id', requireAdmin, (req, res) => {
                         req.session.canUseDvr = canUseDvr;
                         console.log(`[USER_API] Current user's session (ID: ${id}) updated.`);
                     }
+                    userCache.invalidate(id);
                     console.log(`[USER_API] User ${id} updated successfully (with password change).`);
                     res.json({ success: true });
                 });
@@ -2117,6 +2167,7 @@ app.put('/api/users/:id', requireAdmin, (req, res) => {
                     req.session.canUseDvr = canUseDvr;
                     console.log(`[USER_API] Current user's session (ID: ${id}) updated.`);
                 }
+                userCache.invalidate(id);
                 console.log(`[USER_API] User ${id} updated successfully (without password change).`);
                 res.json({ success: true });
             });
@@ -2180,22 +2231,28 @@ app.delete('/api/users/:id', requireAdmin, (req, res) => {
             console.warn(`[USER_API] User ${idToDelete} not found for deletion.`);
             return res.status(404).json({ error: 'User not found.' });
         }
+        userCache.invalidate(idToDelete);
         console.log(`[USER_API] User ${idToDelete} deleted successfully from database.`);
         res.json({ success: true });
     });
 });
 // --- Protected IPTV API Endpoints ---
+// The EPG arrives as ready-made JSON text, so it is spliced into the response instead of being serialized again.
+const sendConfig = (req, res, config, epgJson = 'null') =>
+    sendJson(req, res, Buffer.from(`${JSON.stringify(config).slice(0, -1)},"epgContent":${epgJson}}`));
+
 app.get('/api/config', requireAuth, async (req, res) => {
     try {
         // ADDED vodMovies and vodSeries
-        let config = { m3uContent: null, epgContent: null, settings: {}, vodMovies: [], vodSeries: [] };
+        let config = { m3uContent: null, settings: {}, vodMovies: [], vodSeries: [] }; // epgContent is added by sendConfig
+        let epgJson;
         let globalSettings = getSettings();
         config.settings = globalSettings;
 
         // FETCH USER PERMISSIONS
         let allowedSources = null;
         try {
-            const user = await dbGet(db, "SELECT id, allowed_sources, username, isAdmin FROM users WHERE id = ?", [req.session.userId]);
+            const user = await userCache.get(req.session.userId);
             if (user) {
                 console.log(`[DEBUG_API_CONFIG] Fetching config for UserID: ${req.session.userId} (Session: ${req.sessionID})`);
                 if (user.isAdmin || req.session.isAdmin || user.id === 1 || req.session.userId === 1) {
@@ -2293,39 +2350,10 @@ app.get('/api/config', requireAuth, async (req, res) => {
         }
 
         // LOAD EPG
-        if (fs.existsSync(LIVE_EPG_JSON_PATH)) {
-            try {
-                const fullEpg = JSON.parse(fs.readFileSync(LIVE_EPG_JSON_PATH, 'utf-8'));
-                if (allowedSources) {
-                    const filteredEpg = {};
-                    for (const channelId in fullEpg) {
-                        const underscoreIndex = channelId.indexOf('_');
-                        if (underscoreIndex !== -1) {
-                            const sourceId = channelId.substring(0, underscoreIndex);
-                            if (allowedSources[sourceId] && allowedSources[sourceId].allowed) {
-                                // For EPG, we can't easily filter by group unless we look up the channel's group from M3U
-                                // But EPG entries don't have group info. 
-                                // However, the frontend matches EPG to M3U channels. 
-                                // If M3U channel is hidden, EPG doesn't matter much, but good to filter for payload size.
-                                // Limiting factor: We don't know the group here easily without re-parsing M3U or having a mapping.
-                                // DECISION: Filter EPG by Source ID only. Granular group filtering happens naturally because the M3U won't have the channel.
-                                filteredEpg[channelId] = fullEpg[channelId];
-                            }
-                        }
-                    }
-                    config.epgContent = filteredEpg;
-                    console.log(`[API] Loaded and FILTERED EPG content for user ${req.session.username}.`);
-                } else {
-                    config.epgContent = fullEpg;
-                    console.log(`[API] Loaded EPG content from ${LIVE_EPG_JSON_PATH}.`);
-                }
-            } catch (parseError) {
-                console.error(`[API] Error parsing merged EPG JSON from ${LIVE_EPG_JSON_PATH}: ${parseError.message}`);
-                config.epgContent = {};
-            }
-        } else {
-            console.log(`[API] No merged EPG JSON file found at ${LIVE_EPG_JSON_PATH}.`);
-        }
+        epgJson = epgPayload(allowedSources);
+        console.log(epgJson === undefined
+            ? `[API] No merged EPG JSON file found at ${LIVE_EPG_JSON_PATH}.`
+            : `[API] Loaded${allowedSources ? ' and FILTERED' : ''} EPG content from ${LIVE_EPG_JSON_PATH}.`);
 
         // --- NEW: Load VOD Files (Legacy) ---
         // VOD filtering is complex here as it uses legacy JSON files. 
@@ -2349,7 +2377,7 @@ app.get('/api/config', requireAuth, async (req, res) => {
         db.all(`SELECT key, value FROM user_settings WHERE user_id = ?`, [req.session.userId], (err, rows) => {
             if (err) {
                 console.error("[API] Error fetching user settings:", err);
-                return res.status(200).json(config);
+                return sendConfig(req, res, config, epgJson);
             }
             if (rows) {
                 const userSettings = {};
@@ -2383,7 +2411,7 @@ app.get('/api/config', requireAuth, async (req, res) => {
             console.log(`[API] Serving config with permissions signature: ${userPermissionsSignature}`);
             // --------------------------------
 
-            res.status(200).json(config);
+            sendConfig(req, res, config, epgJson);
         });
 
     } catch (error) {
@@ -2392,6 +2420,105 @@ app.get('/api/config', requireAuth, async (req, res) => {
     }
 });
 
+// Builds the /api/vod/library payload from the database. Only runs on a cache miss.
+async function buildVodLibrary(providerMap, allowedSources) {
+    const activeProviderIds = Array.from(providerMap.keys());
+    const providerIdPlaceholders = activeProviderIds.map(() => '?').join(',');
+
+    // 2. Fetch all movies from active providers
+    const movieQuery = `
+        SELECT m.provider_unique_id, m.name, m.year, m.description, m.logo, m.tmdb_id, m.imdb_id, m.category_name, r.stream_id, r.container_extension, r.provider_id
+        FROM movies m
+        JOIN provider_movie_relations r ON m.id = r.movie_id
+        WHERE r.provider_id IN (${providerIdPlaceholders})
+        ORDER BY m.name
+    `;
+    const movies = await dbAll(db, movieQuery, activeProviderIds);
+
+    const processedMovies = movies.map(m => {
+        const provider = providerMap.get(m.provider_id);
+        if (!provider) return null; // Skip if provider is not active
+
+        // PERMISSION CHECK: Filter by category if strict groups are defined
+        if (allowedSources) {
+            const perms = allowedSources[m.provider_id];
+            if (perms && perms.allowed) {
+                const allowedGroups = perms.groups || [];
+                // If whitelist exists (length > 0) AND this category is NOT in it, skip
+                if (allowedGroups.length > 0 && !allowedGroups.includes(m.category_name)) {
+                    return null;
+                }
+            }
+        }
+
+        const ext = m.container_extension || 'mp4';
+        // Build the full playable URL
+        const url = `${provider.baseUrl}/movie/${provider.username}/${provider.password}/${m.stream_id}.${ext}`;
+        return {
+            id: m.provider_unique_id, // Use the stable provider_unique_id
+            name: m.name,
+            year: m.year,
+            description: m.description,
+            logo: m.logo,
+            tmdb_id: m.tmdb_id,
+            imdb_id: m.imdb_id,
+            url: url, // The all-important URL
+            type: 'movie',
+            group: m.category_name
+        };
+    }).filter(Boolean); // Filter out null entries
+    console.log(`[API_VOD] Fetched ${processedMovies.length} movies from DB.`);
+
+    // 3. Fetch all series headers from active providers
+    // Added r.provider_id to SELECT so we can filter permissions
+    const seriesQuery = `
+        SELECT DISTINCT s.provider_unique_id, s.name, s.year, s.description, s.logo, s.tmdb_id, s.imdb_id, s.category_name, r.provider_id
+        FROM series s
+        JOIN provider_series_relations r ON s.id = r.series_id
+        WHERE r.provider_id IN (${providerIdPlaceholders})
+        ORDER BY s.name
+    `;
+    const seriesList = await dbAll(db, seriesQuery, activeProviderIds);
+
+    // Process series headers with permission checks
+    const processedSeries = seriesList.map(series => {
+        // PERMISSION CHECK: Filter by category if strict groups are defined
+        if (allowedSources) {
+            const perms = allowedSources[series.provider_id];
+            if (perms && perms.allowed) {
+                const allowedGroups = perms.groups || [];
+                // If whitelist exists (length > 0) AND this category is NOT in it, skip
+                if (allowedGroups.length > 0 && !allowedGroups.includes(series.category_name)) {
+                    return null;
+                }
+            }
+        }
+
+        return {
+            ...series,
+            type: 'series',
+            id: series.provider_unique_id, // Use the stable provider_unique_id
+            group: series.category_name
+            // seasons property removed as it is lazy loaded
+        };
+    }).filter(Boolean);
+
+    console.log(`[API_VOD] Processed ${processedSeries.length} series headers (filtered). Episodes will be lazy-loaded.`);
+
+    // FIX: Derive categories from the filtered content to ensure we only show relevant groups
+    const uniqueCategories = new Set();
+    processedMovies.forEach(m => {
+        if (m.group) uniqueCategories.add(m.group);
+    });
+    processedSeries.forEach(s => {
+        if (s.group) uniqueCategories.add(s.group);
+    });
+
+    const categoryNames = Array.from(uniqueCategories).sort();
+
+    return { movies: processedMovies, series: processedSeries, categories: categoryNames };
+}
+
 // --- NEW: VOD Library Endpoint (Reads from DB and builds URLs) ---
 app.get('/api/vod/library', requireAuth, async (req, res) => {
     console.log('[API_VOD] Request received for /api/vod/library (DB Query)');
@@ -2399,7 +2526,7 @@ app.get('/api/vod/library', requireAuth, async (req, res) => {
         // FETCH USER PERMISSIONS
         let allowedSources = null;
         try {
-            const user = await dbGet(db, "SELECT allowed_sources FROM users WHERE id = ?", [req.session.userId]);
+            const user = await userCache.get(req.session.userId);
             if (user && user.allowed_sources) {
                 allowedSources = JSON.parse(user.allowed_sources);
             }
@@ -2447,106 +2574,14 @@ app.get('/api/vod/library', requireAuth, async (req, res) => {
             return res.json({ movies: [], series: [] });
         }
 
-        const providerIdPlaceholders = activeProviderIds.map(() => '?').join(',');
+        // Everything the response depends on: the providers and their credentials (they end up in the
+        // stream URLs) and, per provider, the categories this user is allowed to see.
+        const cacheKey = crypto.createHash('sha1').update(JSON.stringify(
+            activeProviderIds.map(id => [id, providerMap.get(id), allowedSources ? [...(allowedSources[id]?.groups || [])].sort() : null])
+        )).digest('hex');
 
-        // 2. Fetch all movies from active providers
-        const movieQuery = `
-            SELECT m.provider_unique_id, m.name, m.year, m.description, m.logo, m.tmdb_id, m.imdb_id, m.category_name, r.stream_id, r.container_extension, r.provider_id
-            FROM movies m
-            JOIN provider_movie_relations r ON m.id = r.movie_id
-            WHERE r.provider_id IN (${providerIdPlaceholders})
-            ORDER BY m.name
-        `;
-        const movies = await dbAll(db, movieQuery, activeProviderIds);
-
-        const processedMovies = movies.map(m => {
-            const provider = providerMap.get(m.provider_id);
-            if (!provider) return null; // Skip if provider is not active
-
-            // PERMISSION CHECK: Filter by category if strict groups are defined
-            if (allowedSources) {
-                const perms = allowedSources[m.provider_id];
-                if (perms && perms.allowed) {
-                    const allowedGroups = perms.groups || [];
-                    // If whitelist exists (length > 0) AND this category is NOT in it, skip
-                    if (allowedGroups.length > 0 && !allowedGroups.includes(m.category_name)) {
-                        return null;
-                    }
-                }
-            }
-
-            const ext = m.container_extension || 'mp4';
-            // Build the full playable URL
-            const url = `${provider.baseUrl}/movie/${provider.username}/${provider.password}/${m.stream_id}.${ext}`;
-            return {
-                id: m.provider_unique_id, // Use the stable provider_unique_id
-                name: m.name,
-                year: m.year,
-                description: m.description,
-                logo: m.logo,
-                tmdb_id: m.tmdb_id,
-                imdb_id: m.imdb_id,
-                url: url, // The all-important URL
-                type: 'movie',
-                group: m.category_name
-            };
-        }).filter(Boolean); // Filter out null entries
-        console.log(`[API_VOD] Fetched ${processedMovies.length} movies from DB.`);
-
-        // 3. Fetch all series headers from active providers
-        // Added r.provider_id to SELECT so we can filter permissions
-        const seriesQuery = `
-            SELECT DISTINCT s.provider_unique_id, s.name, s.year, s.description, s.logo, s.tmdb_id, s.imdb_id, s.category_name, r.provider_id
-            FROM series s
-            JOIN provider_series_relations r ON s.id = r.series_id
-            WHERE r.provider_id IN (${providerIdPlaceholders})
-            ORDER BY s.name
-        `;
-        const seriesList = await dbAll(db, seriesQuery, activeProviderIds);
-
-        // Process series headers with permission checks
-        const processedSeries = seriesList.map(series => {
-            // PERMISSION CHECK: Filter by category if strict groups are defined
-            if (allowedSources) {
-                const perms = allowedSources[series.provider_id];
-                if (perms && perms.allowed) {
-                    const allowedGroups = perms.groups || [];
-                    // If whitelist exists (length > 0) AND this category is NOT in it, skip
-                    if (allowedGroups.length > 0 && !allowedGroups.includes(series.category_name)) {
-                        return null;
-                    }
-                }
-            }
-
-            return {
-                ...series,
-                type: 'series',
-                id: series.provider_unique_id, // Use the stable provider_unique_id
-                group: series.category_name
-                // seasons property removed as it is lazy loaded
-            };
-        }).filter(Boolean);
-
-        console.log(`[API_VOD] Processed ${processedSeries.length} series headers (filtered). Episodes will be lazy-loaded.`);
-
-        // 5. Respond
-        // 5. Respond
-        // FIX: Derive categories from the filtered content to ensure we only show relevant groups
-        const uniqueCategories = new Set();
-        processedMovies.forEach(m => {
-            if (m.group) uniqueCategories.add(m.group);
-        });
-        processedSeries.forEach(s => {
-            if (s.group) uniqueCategories.add(s.group);
-        });
-
-        const categoryNames = Array.from(uniqueCategories).sort();
-
-        res.json({
-            movies: processedMovies,
-            series: processedSeries,
-            categories: categoryNames
-        });
+        const library = await vodLibraryCache.get(cacheKey, () => buildVodLibrary(providerMap, allowedSources));
+        await sendJson(req, res, library);
 
     } catch (error) {
         console.error(`[API_VOD] Error fetching VOD library from DB: ${error.message}`, error);
@@ -2641,7 +2676,7 @@ app.get('/api/vod/series/:seriesId', requireAuth, async (req, res) => {
                 // CHECK PERMISSIONS
                 let permitted = true;
                 try {
-                    const user = await dbGet(db, "SELECT allowed_sources FROM users WHERE id = ?", [req.session.userId]);
+                    const user = await userCache.get(req.session.userId);
                     if (user && user.allowed_sources) {
                         const allowedSources = JSON.parse(user.allowed_sources);
                         if (allowedSources[relation.provider_id] && !allowedSources[relation.provider_id].allowed) {
@@ -2683,7 +2718,10 @@ app.get('/api/vod/series/:seriesId', requireAuth, async (req, res) => {
                             const director = seriesDetails.info.director || seriesInfo.director || null;
                             const cast = seriesDetails.info.cast || seriesInfo.cast || null;
                             if ((director && director !== seriesInfo.director) || (cast && cast !== seriesInfo.cast)) {
-                                db.run("UPDATE series SET director = COALESCE(?, director), cast = COALESCE(?, cast) WHERE id = ?", [director, cast, numericSeriesId], () => { });
+                                // "cast" is quoted because CAST is an SQL keyword: unquoted, this statement was a syntax error whose failure the empty callback hid.
+                                db.run('UPDATE series SET director = COALESCE(?, director), "cast" = COALESCE(?, "cast") WHERE id = ?', [director, cast, numericSeriesId], (updateErr) => {
+                                    if (updateErr) console.error(`[API_VOD_SERIES] Could not save director/cast for Series ID ${numericSeriesId}: ${updateErr.message}`);
+                                });
                                 seriesInfo.director = director || seriesInfo.director;
                                 seriesInfo.cast = cast || seriesInfo.cast;
                             }
@@ -2691,63 +2729,35 @@ app.get('/api/vod/series/:seriesId', requireAuth, async (req, res) => {
 
                         if (seriesDetails && seriesDetails.episodes && typeof seriesDetails.episodes === 'object') {
                             console.log(`[API_VOD_SERIES] Processing episodes and metadata from provider for Series ID ${numericSeriesId}...`);
-                            const episodeInsertStmt = db.prepare(`INSERT OR IGNORE INTO episodes (series_id, season_num, episode_num, name, description, air_date, duration, duration_secs, tmdb_id, imdb_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-                            const episodeRelationInsertStmt = db.prepare(`INSERT OR IGNORE INTO provider_episode_relations (provider_id, episode_id, provider_stream_id, container_extension, last_seen) VALUES (?, ?, ?, ?, ?)`);
-                            const lastSeen = new Date().toISOString();
-
-                            await dbRun(db, "BEGIN TRANSACTION");
-                            try {
-                                for (const seasonNum in seriesDetails.episodes) {
-                                    const epList = seriesDetails.episodes[seasonNum];
-                                    if (!Array.isArray(epList)) continue;
-                                    for (const epData of epList) {
-                                        const actualSeason = epData.season !== undefined ? epData.season : parseInt(seasonNum, 10);
-                                        const actualEpisode = epData.episode_num !== undefined ? epData.episode_num : 1;
-                                        const durationSecs = parseInt(epData.info?.duration_secs || epData.duration_secs || 0, 10) || null;
-                                        const durationStr = epData.info?.duration || epData.duration || (durationSecs ? `${Math.floor(durationSecs / 60)} min` : null);
-                                        const airDate = epData.info?.releasedate || epData.info?.air_date || epData.releasedate || epData.air_date || null;
-                                        const plot = epData.info?.plot || epData.plot || null;
-                                        const title = epData.title || epData.name || `Episode ${actualEpisode}`;
-
-                                        let episodeId;
-                                        const existingEp = await dbGet(db, `SELECT id, duration, duration_secs, air_date FROM episodes WHERE series_id = ? AND season_num = ? AND episode_num = ?`, [numericSeriesId, actualSeason, actualEpisode]);
-
-                                        if (existingEp) {
-                                            episodeId = existingEp.id;
-                                            if ((durationSecs || durationStr || airDate) && (!existingEp.duration && !existingEp.duration_secs)) {
-                                                await new Promise((resolve) => {
-                                                    db.run("UPDATE episodes SET duration = COALESCE(?, duration), duration_secs = COALESCE(?, duration_secs), air_date = COALESCE(air_date, ?) WHERE id = ?",
-                                                        [durationStr, durationSecs, airDate, episodeId],
-                                                        () => resolve()
-                                                    );
-                                                });
-                                            }
-                                        } else {
-                                            const epResult = await new Promise((resolve, reject) => {
-                                                episodeInsertStmt.run(numericSeriesId, actualSeason, actualEpisode, title, plot, airDate, durationStr, durationSecs, null, null, function (err) {
-                                                    if (err) reject(err);
-                                                    else resolve(this);
-                                                });
-                                            });
-                                            episodeId = epResult.lastID;
-                                        }
-
-                                        await new Promise((resolve, reject) => {
-                                            episodeRelationInsertStmt.run(relation.provider_id, episodeId, String(epData.id), epData.container_extension || 'mp4', lastSeen, function (err) {
-                                                if (err) reject(err);
-                                                else resolve(this);
-                                            });
-                                        });
-                                    }
+                            const toInt = (value) => Number.parseInt(value, 10);
+                            const episodeRows = [];
+                            for (const seasonNum in seriesDetails.episodes) {
+                                const epList = seriesDetails.episodes[seasonNum];
+                                if (!Array.isArray(epList)) continue;
+                                for (const epData of epList) {
+                                    const actualSeason = toInt(epData.season !== undefined ? epData.season : seasonNum);
+                                    const actualEpisode = toInt(epData.episode_num !== undefined ? epData.episode_num : 1);
+                                    if (!Number.isFinite(actualSeason) || !Number.isFinite(actualEpisode) || epData.id === undefined || epData.id === null) continue;
+                                    const durationSecs = parseInt(epData.info?.duration_secs || epData.duration_secs || 0, 10) || null;
+                                    episodeRows.push({
+                                        season: actualSeason,
+                                        episode: actualEpisode,
+                                        name: epData.title || epData.name || `Episode ${actualEpisode}`,
+                                        description: epData.info?.plot || epData.plot || null,
+                                        airDate: epData.info?.releasedate || epData.info?.air_date || epData.releasedate || epData.air_date || null,
+                                        duration: epData.info?.duration || epData.duration || (durationSecs ? `${Math.floor(durationSecs / 60)} min` : null),
+                                        durationSecs,
+                                        streamId: epData.id,
+                                        containerExtension: epData.container_extension
+                                    });
                                 }
-                                await dbRun(db, "COMMIT");
+                            }
+
+                            try {
+                                await vodStore.saveEpisodes(numericSeriesId, relation.provider_id, episodeRows);
                                 console.log(`[API_VOD_SERIES] Successfully updated episodes and metadata for Series ID ${numericSeriesId}.`);
                             } catch (dbError) {
-                                await dbRun(db, "ROLLBACK");
                                 console.error(`[API_VOD_SERIES] DB Error saving episodes for Series ID ${numericSeriesId}: ${dbError.message}`);
-                            } finally {
-                                episodeInsertStmt.finalize();
-                                episodeRelationInsertStmt.finalize();
                             }
 
                             episodesToReturn = await dbAll(db, `
@@ -3225,20 +3235,9 @@ app.delete('/api/sources/:sourceType/:id', requireAuth, requireAdmin, async (req
     if (sourceType === 'm3u' && source.type === 'xc') {
         try {
             console.log(`[SOURCES_API] Deleting VOD relations for provider: ${id}`);
-            await dbRun(db, "BEGIN TRANSACTION");
-            await dbRun(db, `DELETE FROM provider_movie_relations WHERE provider_id = ?`, [id]);
-            await dbRun(db, `DELETE FROM provider_series_relations WHERE provider_id = ?`, [id]);
-            await dbRun(db, `DELETE FROM provider_episode_relations WHERE provider_id = ?`, [id]);
-
-            // Cleanup orphans
-            await dbRun(db, `DELETE FROM movies WHERE id NOT IN (SELECT DISTINCT movie_id FROM provider_movie_relations)`);
-            await dbRun(db, `DELETE FROM series WHERE id NOT IN (SELECT DISTINCT series_id FROM provider_series_relations)`);
-            await dbRun(db, `DELETE FROM episodes WHERE id NOT IN (SELECT DISTINCT episode_id FROM provider_episode_relations)`);
-
-            await dbRun(db, "COMMIT");
+            await vodStore.removeProvider(id);
             console.log(`[SOURCES_API] Successfully cleaned up VOD data for provider: ${id}`);
         } catch (dbErr) {
-            await dbRun(db, "ROLLBACK");
             console.error(`[SOURCES_API] Error cleaning up VOD data for provider ${id}:`, dbErr.message);
         }
     }
@@ -3253,7 +3252,7 @@ app.post('/api/process-sources', requireAuth, requireAdmin, async (req, res) => 
         const result = await processAndMergeSources(req); // <-- MODIFIED: Pass req
 
         if (result.success) {
-            fs.writeFileSync(SETTINGS_PATH, JSON.stringify(result.updatedSettings, null, 2));
+            saveProcessedSettings(result.updatedSettings);
             console.log('[API] Source processing completed and settings saved (manual trigger).');
             res.json({ success: true, message: 'Sources merged successfully.' });
         } else {
@@ -3290,7 +3289,7 @@ app.post('/api/save/settings', requireAuth, requireAdmin, async (req, res) => {
             console.log("[API] Timezone setting changed, re-processing sources.");
             const result = await processAndMergeSources();
             if (result.success) {
-                fs.writeFileSync(SETTINGS_PATH, JSON.stringify(result.updatedSettings, null, 2));
+                saveProcessedSettings(result.updatedSettings);
             }
         }
 
@@ -3664,7 +3663,7 @@ app.delete('/api/data', requireAuth, requireAdmin, (req, res) => {
         });
 
         console.log('[API_RESET] Wiping all database tables...');
-        const tables = ['stream_history', 'dvr_recordings', 'dvr_jobs', 'notification_deliveries', 'notifications', 'push_subscriptions', 'multiview_layouts', 'user_settings', 'users', 'sessions'];
+        const tables = ['stream_history', 'dvr_recordings', 'dvr_jobs', 'notification_deliveries', 'notifications', 'push_subscriptions', 'multiview_layouts', 'user_settings', 'watch_progress', 'provider_episode_relations', 'provider_series_relations', 'provider_movie_relations', 'episodes', 'series', 'movies', 'vod_categories', 'users', 'sessions'];
         db.serialize(() => {
             tables.forEach(table => {
                 db.run(`DELETE FROM ${table}`, (err) => {
@@ -3673,6 +3672,7 @@ app.delete('/api/data', requireAuth, requireAdmin, (req, res) => {
             });
         });
 
+        userCache.clear();
         console.log('[API_RESET] Hard reset complete. The application is now in a fresh-install state.');
         res.json({ success: true, message: 'All application data has been cleared.' });
 
@@ -3840,7 +3840,7 @@ app.get('/stream', allowLocalOrAuth, async (req, res) => {
         console.log(`[STREAM] VOD stream detected for logging: Name='${channelName}'`);
     } else {
         // It's a live channel stream, use existing M3U parsing logic
-        const allChannels = parseM3U(fs.existsSync(LIVE_CHANNELS_M3U_PATH) ? fs.readFileSync(LIVE_CHANNELS_M3U_PATH, 'utf-8') : '');
+        const allChannels = readChannels() || [];
         const channel = allChannels.find(c => c.url === streamUrl);
         channelName = channel ? channel.displayName || channel.name : 'Direct Stream';
         channelId = channel ? channel.id : null;
@@ -4823,8 +4823,8 @@ class DvrSupervisor {
 
     resolveStreamUrl() {
         try {
-            if (fs.existsSync(LIVE_CHANNELS_M3U_PATH)) {
-                const channels = parseM3U(fs.readFileSync(LIVE_CHANNELS_M3U_PATH, 'utf-8'));
+            const channels = readChannels();
+            if (channels) {
                 const freshChannel = channels.find(c => c.id === this.job.channelId);
                 if (freshChannel && freshChannel.url) {
                     return freshChannel.url;
@@ -5161,7 +5161,7 @@ function stopRecording(jobId) {
 async function startRecording(job) {
     console.log(`[DVR] Starting recording for job ${job.id}: "${job.programTitle}"`);
     const settings = getSettings();
-    const allChannels = parseM3U(fs.existsSync(LIVE_CHANNELS_M3U_PATH) ? fs.readFileSync(LIVE_CHANNELS_M3U_PATH, 'utf-8') : '');
+    const allChannels = readChannels() || [];
     const channel = allChannels.find(c => c.id === job.channelId);
 
     if (!channel) {
@@ -6347,7 +6347,7 @@ detectHardwareAcceleration().then(() => {
 
         processAndMergeSources().then((result) => {
             console.log('[INIT] Initial source processing complete.');
-            if (result.success) fs.writeFileSync(SETTINGS_PATH, JSON.stringify(result.updatedSettings, null, 2));
+            if (result.success) saveProcessedSettings(result.updatedSettings);
             updateAndScheduleSourceRefreshes();
         }).catch(error => console.error('[INIT] Initial source processing failed:', error.message));
 
@@ -6360,6 +6360,18 @@ detectHardwareAcceleration().then(() => {
 
         schedule.scheduleJob('0 2 * * *', autoDeleteOldRecordings);
         console.log('[DVR_STORAGE] Scheduled daily cleanup of old recordings.');
+
+        // stream_history and notifications were never pruned. Set STREAM_HISTORY_RETENTION_DAYS=0 to keep history forever.
+        schedule.scheduleJob('15 2 * * *', () => {
+            const cutoff = (days) => new Date(Date.now() - days * 86400000).toISOString();
+            const onError = (err) => { if (err) console.error('[DB] Nightly prune failed:', err.message); };
+            const historyDays = parseInt(process.env.STREAM_HISTORY_RETENTION_DAYS ?? '90', 10);
+            if (historyDays > 0) db.run('DELETE FROM stream_history WHERE start_time < ?', [cutoff(historyDays)], onError);
+            db.run('DELETE FROM notifications WHERE notificationTime < ?', [cutoff(30)], onError); // their deliveries go with them
+        });
+
+        // Keep the query planner's statistics fresh (cheap; only re-analyzes tables that changed a lot).
+        schedule.scheduleJob('30 2 * * *', () => db.run('PRAGMA optimize'));
 
 
     });
