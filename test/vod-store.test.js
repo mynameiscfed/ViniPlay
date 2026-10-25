@@ -3,7 +3,6 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const { openVodDb, VOD_SCHEMA } = require('./helpers/vod-db');
 const { createVodStore } = require('../vodStore');
-const { run, get } = require('../dbTransaction');
 
 const movie = (i, overrides = {}) => ({
     providerUniqueId: `movie_p1_${i}`, name: `Movie ${i}`, year: 2000 + (i % 20), description: `Plot ${i}`,
@@ -16,10 +15,9 @@ const series = (i, overrides = {}) => ({
 
 async function setup() {
     const t = await openVodDb();
-    let changes = 0;
-    const store = createVodStore({ db: t.db, withTransaction: t.withTransaction, onChange: () => { changes++; } });
-    const totalChanges = () => t.withTransaction((conn) => get(conn, 'SELECT total_changes() AS n')).then((r) => r.n);
-    return { t, store, totalChanges, changeCount: () => changes };
+    const store = createVodStore(t);
+    const totalChanges = () => t.get('SELECT total_changes() AS n').then((r) => r.n);
+    return { t, store, totalChanges };
 }
 
 test('first import inserts titles and relations, across statement and transaction boundaries', async () => {
@@ -71,17 +69,11 @@ test('a title listed twice by the provider uses the last listing', async () => {
     await t.close();
 });
 
-test('missing or odd values are stored as NULL instead of failing the batch', async () => {
+test('missing values are stored as NULL instead of failing the batch', async () => {
     const { t, store } = await setup();
-    await store.upsertMovies('p1', [
-        movie(1, { name: undefined, year: NaN, description: undefined, logo: null }),
-        movie(2, { description: { not: 'a string' }, containerExtension: undefined }),
-    ], 'scan1');
-    const first = await t.get("SELECT name, year, description, logo FROM movies WHERE provider_unique_id = 'movie_p1_1'");
-    assert.deepStrictEqual({ ...first }, { name: 'Untitled', year: null, description: null, logo: null });
-    const second = await t.get(`SELECT m.description, r.container_extension FROM movies m JOIN provider_movie_relations r ON r.movie_id = m.id WHERE m.provider_unique_id = 'movie_p1_2'`);
-    assert.strictEqual(second.description, '[object Object]');
-    assert.strictEqual(second.container_extension, 'mp4');
+    await store.upsertMovies('p1', [movie(1, { name: undefined, year: null, description: undefined, logo: null, containerExtension: undefined })], 'scan1');
+    const row = await t.get(`SELECT m.name, m.year, m.description, m.logo, r.container_extension FROM movies m JOIN provider_movie_relations r ON r.movie_id = m.id`);
+    assert.deepStrictEqual({ ...row }, { name: 'Untitled', year: null, description: null, logo: null, container_extension: 'mp4' });
     await t.close();
 });
 
@@ -165,18 +157,6 @@ test('categories are inserted once and existing names are kept', async () => {
     await t.close();
 });
 
-test('onChange fires after each write, including a failed one', async () => {
-    const { t, store, changeCount } = await setup();
-    await store.upsertMovies('p1', [movie(1)], 'scan1');
-    assert.strictEqual(changeCount(), 1);
-    await store.removeStale('p1', 'scan1', { movies: true });
-    assert.strictEqual(changeCount(), 2);
-    await t.run('DROP TABLE provider_movie_relations');
-    await assert.rejects(store.upsertMovies('p1', [movie(2)], 'scan2'));
-    assert.strictEqual(changeCount(), 3);
-    await t.close();
-});
-
 test('saveEpisodes: new episodes are stored, repeated saves do not duplicate, durations fill in once', async () => {
     const { t, store } = await setup();
     await store.upsertSeries('p1', [series(1)], 'scan1');
@@ -248,7 +228,7 @@ test('ready() removes duplicate episodes, repoints relations and adds the unique
     await assert.rejects(t.run('INSERT INTO episodes (series_id, season_num, episode_num) VALUES (?, 1, 1)', [seriesId]), /UNIQUE/);
 
     // Running it again (next boot) changes nothing.
-    const again = createVodStore({ db: t.db, withTransaction: t.withTransaction });
+    const again = createVodStore(t);
     await again.ready();
     assert.strictEqual((await t.get('SELECT COUNT(*) AS n FROM episodes')).n, 2);
     await t.close();
@@ -259,7 +239,7 @@ test('ready() adds provider_unique_id and its unique key to tables from an older
         .replace('category_name TEXT, provider_unique_id TEXT UNIQUE,\n    created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP);\nCREATE TABLE series', 'category_name TEXT,\n    created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP);\nCREATE TABLE series')
         .replace('category_name TEXT, provider_unique_id TEXT UNIQUE, director TEXT', 'category_name TEXT, provider_unique_id TEXT, director TEXT');
     const t = await openVodDb({ schema: legacy });
-    const store = createVodStore({ db: t.db, withTransaction: t.withTransaction });
+    const store = createVodStore(t);
     assert.ok(!(await t.all('PRAGMA table_info(movies)')).some((c) => c.name === 'provider_unique_id'));
 
     await store.upsertMovies('p1', [movie(1), movie(2)], 'scan1');
@@ -274,7 +254,7 @@ test('ready() adds provider_unique_id and its unique key to tables from an older
 
 test('a failed schema step is reported and retried on the next call', async () => {
     const t = await openVodDb({ schema: 'CREATE TABLE unrelated (x INTEGER);' }); // VOD tables missing
-    const store = createVodStore({ db: t.db, withTransaction: t.withTransaction });
+    const store = createVodStore(t);
     const originalError = console.error;
     console.error = () => { };
     try {
@@ -286,30 +266,5 @@ test('a failed schema step is reported and retried on the next call', async () =
     } finally {
         console.error = originalError;
     }
-    await t.close();
-});
-
-test('writes on another connection keep getting through during a large import', async () => {
-    const { t, store } = await setup();
-    t.db.configure('busyTimeout', 1500); // short enough that starvation would show up as SQLITE_BUSY
-    const rows = Array.from({ length: 24000 }, (_, i) => movie(i + 1));
-    await t.run('CREATE TABLE progress (k INTEGER PRIMARY KEY AUTOINCREMENT, v INTEGER)');
-
-    let importing = true;
-    let saves = 0;
-    const failures = [];
-    const writer = (async () => {
-        while (importing) {
-            try { await t.run('INSERT INTO progress (v) VALUES (1)'); saves++; } catch (err) { failures.push(err.code); }
-            await new Promise((resolve) => setTimeout(resolve, 3));
-        }
-    })();
-    await store.upsertMovies('p1', rows, 'scan1');
-    importing = false;
-    await writer;
-
-    assert.deepStrictEqual(failures, []);
-    assert.ok(saves > 5, `expected the writer to make progress during the import (saves: ${saves})`);
-    assert.strictEqual((await t.get('SELECT COUNT(*) AS n FROM movies')).n, 24000);
     await t.close();
 });

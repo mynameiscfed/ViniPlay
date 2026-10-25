@@ -4,7 +4,11 @@ const os = require('node:os');
 const path = require('node:path');
 const sqlite3 = require('sqlite3');
 const { configureConnection } = require('../../dbConfig');
-const { createTransactionRunner, openConnection, all, get, run } = require('../../dbTransaction');
+
+// Same shape as server.js's dbRun/dbAll/dbGet.
+const dbRun = (db, sql, params = []) => new Promise((resolve, reject) => db.run(sql, params, function (err) { return err ? reject(err) : resolve(this); }));
+const dbAll = (db, sql, params = []) => new Promise((resolve, reject) => db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows))));
+const dbGet = (db, sql, params = []) => new Promise((resolve, reject) => db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row))));
 
 // Keep in step with the CREATE TABLE statements in server.js.
 const VOD_SCHEMA = `
@@ -39,27 +43,21 @@ CREATE TABLE provider_episode_relations (
 
 const tmpDbPath = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'viniplay-vod-')), 'test.db');
 
-// Opens a main connection the way server.js does (WAL, tuned) plus a transaction runner on the same file.
+// Opens a connection the way server.js does (WAL, tuned) with the VOD tables created.
 async function openVodDb({ schema = VOD_SCHEMA } = {}) {
-    const file = tmpDbPath();
     const db = await new Promise((resolve, reject) => {
-        const conn = new sqlite3.Database(file, (err) => (err ? reject(err) : resolve(conn)));
+        const conn = new sqlite3.Database(tmpDbPath(), (err) => (err ? reject(err) : resolve(conn)));
     });
-    await configureConnection(db, { label: 'test-main' });
+    await configureConnection(db, { label: 'test' });
     if (schema) await new Promise((resolve, reject) => db.exec(schema, (err) => (err ? reject(err) : resolve())));
-    const runner = createTransactionRunner(() => openConnection(file, 'test-tx'));
     return {
-        file,
         db,
-        withTransaction: runner.withTransaction,
-        all: (sql, params) => all(db, sql, params),
-        get: (sql, params) => get(db, sql, params),
-        run: (sql, params) => run(db, sql, params),
-        async close() {
-            await runner.close();
-            await new Promise((resolve) => db.close(resolve));
-        },
+        dbRun, dbAll, dbGet,
+        all: (sql, params) => dbAll(db, sql, params),
+        get: (sql, params) => dbGet(db, sql, params),
+        run: (sql, params) => dbRun(db, sql, params),
+        close: () => new Promise((resolve) => db.close(resolve)),
     };
 }
 
-module.exports = { openVodDb, VOD_SCHEMA, tmpDbPath };
+module.exports = { openVodDb, VOD_SCHEMA };

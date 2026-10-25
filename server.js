@@ -21,7 +21,6 @@ const SQLiteStore = require('connect-sqlite3')(session);
 const { configureConnection, INDEX_DDL } = require('./dbConfig');
 const { throttleSessionTouch } = require('./sessionTouch');
 const { createUserCache } = require('./userCache');
-const { createTransactionRunner, openConnection } = require('./dbTransaction');
 const { createVodStore } = require('./vodStore');
 const { createLibraryCache } = require('./vodLibraryCache');
 const xmlJS = require('xml-js');
@@ -718,16 +717,9 @@ const dbAll = (db, sql, params = []) => {
 };
 // --- End Database Helper Functions ---
 
-// Multi-statement transactions run on a connection of their own, one at a time, so they can no
-// longer interleave with other requests' statements on the shared `db` (see dbTransaction.js).
-const { withTransaction } = createTransactionRunner(async () => {
-    await dbConfigured; // the main connection sets the journal mode first
-    return openConnection(DB_PATH, 'tx');
-});
-
 // Serialized /api/vod/library responses, dropped whenever the VOD catalog changes.
 const vodLibraryCache = createLibraryCache();
-const vodStore = createVodStore({ db, withTransaction, onChange: () => vodLibraryCache.invalidate() });
+const vodStore = createVodStore({ db, dbRun, dbAll, dbGet });
 
 
 /**
@@ -1404,6 +1396,8 @@ async function triggerVodRefreshForProvider(provider, sendStatus = () => { }) {
     } catch (error) {
         console.error(`[VOD Trigger] Error during VOD refresh for ${provider.name}: ${error.message}`);
         sendStatus(`VOD refresh FAILED for ${provider.name}: ${error.message}`, 'error');
+    } finally {
+        vodLibraryCache.invalidate();
     }
 }
 
@@ -2604,15 +2598,7 @@ app.get('/api/vod/library', requireAuth, async (req, res) => {
         )).digest('hex');
 
         const library = await vodLibraryCache.get(cacheKey, () => buildVodLibrary(providerMap, allowedSources));
-        res.set({ 'Content-Type': 'application/json; charset=utf-8', 'Vary': 'Accept-Encoding' });
-        if (req.acceptsEncodings('gzip')) {
-            const compressed = await library.gzip();
-            res.set({ 'Content-Encoding': 'gzip', 'ETag': library.gzipEtag });
-            res.send(compressed);
-        } else {
-            res.set('ETag', library.etag);
-            res.send(library.body);
-        }
+        res.type('json').send(library);
 
     } catch (error) {
         console.error(`[API_VOD] Error fetching VOD library from DB: ${error.message}`, error);
@@ -3704,7 +3690,6 @@ app.delete('/api/data', requireAuth, requireAdmin, (req, res) => {
         });
 
         userCache.clear();
-        vodLibraryCache.invalidate();
         console.log('[API_RESET] Hard reset complete. The application is now in a fresh-install state.');
         res.json({ success: true, message: 'All application data has been cleared.' });
 

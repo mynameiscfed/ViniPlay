@@ -35,7 +35,7 @@ const catalog = () => ({
 
 async function setup() {
     const t = await openVodDb();
-    const store = createVodStore({ db: t.db, withTransaction: t.withTransaction });
+    const store = createVodStore(t);
     const statuses = [];
     const run = () => refreshVodContent(store, source, (message, type) => statuses.push({ message, type }), 'test-agent');
     return { t, store, statuses, run };
