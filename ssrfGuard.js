@@ -207,4 +207,4 @@ function safeGet(rawUrl, options = {}) {
     });
 }
 
-module.exports = { safeGet, assertSafeUrl, blockedReason, SsrfBlockedError };
+module.exports = { safeGet, assertSafeUrl, blockedReason, isExemptHost, SsrfBlockedError };

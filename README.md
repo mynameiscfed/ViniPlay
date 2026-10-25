@@ -53,7 +53,10 @@ The server-side backend resolves common CORS and browser compatibility issues by
  - 🚀 **High Performance UI**: The frontend is built with performance in mind, using UI virtualization for the guide and efficient state management to ensure a fast and responsive experience.
  - 🐳 **Dockerized Deployment**: The entire application is packaged in a single Docker container for simple, one-command deployment using Docker or Docker Compose.
  - ▶️ **Picture-in-Picture**: Pop out the player to keep watching while you work on other things.
- - 🎥 **DVR**: Record programs using FFMPEG. Schedule recording via the TV Guide, or set specific channels and time with ease.
+ - 🎥 **DVR**: Record programs using FFMPEG. Schedule from the TV Guide, the DVR page, or the record button in the player. Set pre/post padding, a global concurrent-recording limit, a free-disk reserve and optional size-based retention. Create a **series recording** rule for a programme title to schedule every upcoming match on that channel.
+ - ⏪ **Live rewind**: When enabled in Settings → Playback & Downloads, ViniPlay keeps a shared rolling HLS buffer for each tuned channel so live TV can be paused, rewound and returned to live. It is off by default because it uses one upstream connection and disk per channel.
+ - ⬇️ **Downloads**: Download a finished recording, movie or episode, or queue a whole season with **Download Season**. VOD downloads go through the server so the configured User-Agent and source permissions are respected.
+ - 🔊 **Audio tracks**: For HTTP transcoded live streams, the player can probe the provider for alternate audio tracks and restart FFmpeg with the chosen one. Native/direct playback continues to use the browser's own audio-track list.
  - 📽️ **Single player**: Play .m3u8 and .ts links directly from the browser, with detailed console logs and recorded history
  - 👥 **Admin monitoring page**: Monitor users watch stream in real time, store historical plays, and broadcast messages to all users.
  - 📺 **VODs support**: Play your VODs from your provider, divided cleanly in the UI with a scalable grid, with filters and tabs for Movies and Series (IMPORTANT: this only workd with XC API log in)
@@ -116,7 +119,7 @@ To match the owner of your host folders, set `PUID` and `PGID` in your `.env` fi
 
 ### Fetching images and validating URLs from your LAN
 
-The image proxy (VOD posters) and the "test URL" button refuse to fetch internal addresses (loopback, link-local/cloud metadata, and private LAN ranges such as `192.168.x.x`) and only follow `http`/`https` redirects that pass the same checks. If your posters or sources live on your own network, add one of these to `.env`:
+The image proxy (VOD posters), the player `/stream` proxy, the VOD duration probe, VOD downloads and the "test URL" button refuse to fetch internal addresses (loopback, link-local/cloud metadata, and private LAN ranges such as `192.168.x.x`) and only follow `http`/`https` redirects that pass the same checks. If your posters or sources live on your own network, add one of these to `.env`:
 
 -   `SSRF_ALLOW_PRIVATE_NETWORKS=true` allows private LAN ranges (loopback and metadata addresses stay blocked).
 -   `SSRF_ALLOWED_HOSTS=dispatcharr.lan,192.168.1.20` exempts specific hosts.
@@ -174,7 +177,9 @@ All configuration is done via the web interface in the **Settings** tab.
 -   **Data Sources:** Add your M3U and EPG sources from remote URLs, XC Codes, uploaded files.
 -   **Processing:** A new source is downloaded and merged as soon as you add it. Use the refresh button on a source's row to refresh just that source, or **Process Sources & View Guide** to download, parse, and merge all of them.
 -   **Channel EPG (Admin):** Lists channels with no guide data. **Suggest matches** proposes guide channels by name; accept or dismiss each, or accept all confident ones at once. The pencil picks a guide channel by hand, and your choice always wins over automatic matching. Run **Process Sources** once after upgrading so the list of guide channels exists. Tick **Also ask AI** to put the doubtful channels to a small model on [OpenRouter](https://openrouter.ai): save your API key and pick a model (the list comes from OpenRouter, with prices) in **Settings → AI Matching**, and use **Save & test** to check them with a real request. The key is stored on the server only and never shown again. Only channel and guide-channel names are sent, and the model can only choose among matches ViniPlay already found.
--   **Player Settings:** Manage User-Agent strings and define `ffmpeg` stream profiles.
+-   **Player Settings:** Manage User-Agent strings, define `ffmpeg` stream profiles and pick an optional fallback profile used when the active profile keeps failing.
+-   **Playback & Downloads (Admin):** Turn downloads on or off, limit concurrent VOD downloads, and enable live TV rewind with a 5–60 minute window and a per-channel disk cap. Keep this off if the provider only allows one connection or the `/dvr` volume is small.
+-   **DVR Settings:** Besides padding and the global concurrent-recording limit, set a free-disk reserve, a maximum recording length and size-based retention. A recording is refused before FFmpeg starts when the reserve would be crossed.
 -   **User Management (Admin):** Admins can create, edit, and delete user accounts.
 
 ---

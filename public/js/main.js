@@ -10,7 +10,7 @@ import { apiFetch, fetchConfig, getDeviceSetting, saveDeviceSetting } from './mo
 import { checkAuthStatus, setupAuthEventListeners } from './modules/auth.js';
 import { handleGuideLoad, finalizeGuideLoad, setupGuideEventListeners } from './modules/guide.js';
 //-- ENHANCEMENT: Import playChannel to handle the remote channel change event.
-import { setupPlayerEventListeners, playChannel, stopAndCleanupPlayer, shouldMaintainAspectRatio } from './modules/player.js';
+import { setupPlayerEventListeners, playChannel, stopAndCleanupPlayer, shouldMaintainAspectRatio, refreshPlayerRecordState } from './modules/player.js';
 import { setupSettingsEventListeners, populateTimezoneSelector, updateUIFromSettings } from './modules/settings.js';
 // MODIFIED: Imported showBroadcastMessage
 import { makeModalResizable, handleRouteChange, switchTab, handleConfirm, closeModal, makeColumnResizable, openMobileMenu, closeMobileMenu, showNotification, showBroadcastMessage, updateProcessingStatus, showConfirm, refreshGuideAfterProcessing } from './modules/ui.js';
@@ -164,6 +164,7 @@ function initializeSse() {
     // NEW: Listen for real-time DVR recording updates
     eventSource.addEventListener('dvr-update', (event) => {
         console.log('[SSE] Received "dvr-update" event from server.');
+        refreshPlayerRecordState();
         if (window.location.pathname.startsWith('/dvr')) {
             initDvrPage();
         }
@@ -212,6 +213,9 @@ export async function initMainApp() {
 
         console.log('[MAIN] Configuration loaded:', config);
         Object.assign(guideState.settings, config.settings || {}); // Merge server settings into guideState
+        apiFetch('/api/hardware').then(res => res && res.ok ? res.json() : null).then(hardware => {
+            if (hardware) guideState.hardware = hardware;
+        }).catch(() => { });
 
         // --- NEW: Load VOD data into state ---
         guideState.vodMovies = config.vodMovies || [];
