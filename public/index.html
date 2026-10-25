@@ -42,7 +42,7 @@
     <link rel="stylesheet" href="/css/guide.css?v=5">
     <link rel="stylesheet" href="/css/home.css?v=6">
     <link rel="stylesheet" href="/css/legacy.css?v=7">
-    <link rel="stylesheet" href="/css/player.css?v=5">
+    <link rel="stylesheet" href="/css/player.css?v=6">
     <link rel="stylesheet" href="/css/tv.css?v=1">
 
     <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.8.2/dist/mpegts.js" integrity="sha384-sQp+4cJv0jChNCYvgy6W0RSfQZB/w6d3ZTDoIBlY4Uorfw4PLS56T2yM2z47bSkl" crossorigin="anonymous"></script>
@@ -1640,6 +1640,7 @@
                             <button id="pb-play" type="button" class="pbtn pb-main" title="Play / Pause (Space)"></button>
                             <button id="pb-fwd" type="button" class="pbtn pb-skip" title="Forward 15 seconds (Right)">+15</button>
                             <button id="pb-next" type="button" class="pbtn hidden" title="Next channel (Page Down)"><span data-icon="next"></span></button>
+                            <span class="pb-break"></span>
                             <button id="pb-speed" type="button" class="pb-chip hidden" title="Playback speed"></button>
                         </div>
                         <div class="pb-grp">
@@ -1650,6 +1651,12 @@
                             <button id="pb-panel-btn" type="button" class="pbtn" title="Playback options" aria-haspopup="dialog"><span data-icon="more"></span></button>
                             <button id="player-fullscreen-btn" type="button" class="pbtn" title="Fullscreen (F)"><span data-icon="fullscreen"></span></button>
                         </div>
+                    </div>
+                    <div class="pb-hints" aria-hidden="true">
+                        <span class="pb-hint-seek"><kbd>&#9664; &#9654;</kbd>Skip 15s</span>
+                        <span><kbd>&#9650;</kbd>Controls</span>
+                        <span><kbd>OK</kbd>Play / pause</span>
+                        <span><kbd>Back</kbd>Close</span>
                     </div>
                 </div>
 
@@ -1750,9 +1757,14 @@
                 <div>
                     <p class="eyebrow mb-2">Player</p>
                     <dl class="shortcut-list">
-                        <div><dt><kbd>Page Up</kbd><kbd>Page Down</kbd></dt><dd>Previous or next channel (CH +/- on a remote)</dd></div>
+                        <div><dt><kbd>Space</kbd><kbd>K</kbd></dt><dd>Play or pause (media keys too)</dd></div>
+                        <div><dt><kbd>&larr;</kbd><kbd>&rarr;</kbd></dt><dd>Back or forward 15 seconds (Shift: 60)</dd></div>
+                        <div><dt><kbd>&uarr;</kbd><kbd>&darr;</kbd></dt><dd>Volume (on a TV: show the controls)</dd></div>
+                        <div><dt><kbd>M</kbd><kbd>F</kbd></dt><dd>Mute, fullscreen</dd></div>
+                        <div><dt><kbd>C</kbd><kbd>L</kbd></dt><dd>Subtitles, jump to live</dd></div>
+                        <div><dt><kbd>Page Up</kbd><kbd>Page Down</kbd></dt><dd>Previous or next channel or episode (CH +/- on a remote)</dd></div>
                         <div><dt><kbd>0-9</kbd></dt><dd>Switch to a channel number</dd></div>
-                        <div><dt><kbd>Esc</kbd></dt><dd>Close the channel list, then the player</dd></div>
+                        <div><dt><kbd>Esc</kbd></dt><dd>Close the open panel, then the player</dd></div>
                     </dl>
                 </div>
             </div>

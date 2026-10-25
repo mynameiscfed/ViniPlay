@@ -179,7 +179,15 @@ export function setupBar() {
 
     const v = video();
     v.addEventListener('click', (e) => { if (src && e.pointerType === 'mouse') togglePlay(); });
-    v.addEventListener('dblclick', () => $('player-fullscreen-btn').click());
+    // A double tap on the left or right of the picture skips back or forward, like every phone player.
+    let lastTap = 0;
+    v.addEventListener('pointerup', (e) => {
+        if (e.pointerType !== 'touch' || !src) return;
+        const side = (e.clientX - v.getBoundingClientRect().left) / v.clientWidth;
+        if (e.timeStamp - lastTap < 300 && (side < .4 || side > .6)) skip(side < .5 ? -SKIP : SKIP);
+        lastTap = e.timeStamp;
+    });
+    v.addEventListener('dblclick', () => { if (performance.now() - lastTap > 600) $('player-fullscreen-btn').click(); });
 }
 
 export { SKIP, SKIP_LONG };

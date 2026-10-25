@@ -177,6 +177,11 @@
     margin-left: auto;
 }
 
+.pb-break,
+.pb-hints {
+    display: none;
+}
+
 .pb-t {
     flex: none;
     min-width: 3.4em;
@@ -698,6 +703,31 @@ html.tv #player-bar {
     padding-left: 3.5vw;
 }
 
+/* What the remote does inside the player; it fades with the bar. */
+html.tv .pb-hints {
+    display: flex;
+    justify-content: center;
+    gap: 2.4em;
+    margin-top: .5em;
+    color: rgba(255, 255, 255, .72);
+    font: 600 .8rem var(--f-ui);
+}
+
+html.tv .pb-hints span {
+    display: inline-flex;
+    align-items: center;
+    gap: .6em;
+}
+
+html.tv .pb-hints kbd {
+    height: 2.1em;
+    min-width: 2.1em;
+}
+
+html.tv #player-bar:not(.is-seekable) .pb-hint-seek {
+    display: none;
+}
+
 /* The scrubber keeps its own height; the page-wide TV rule would make every input a slab. */
 html.tv #player-bar input[type="range"] {
     min-height: 0;
@@ -718,13 +748,62 @@ html.tv #player-fullscreen-btn {
     #player-upnext {
         right: 1em;
         left: 1em;
-        bottom: 9.4em;
+        bottom: 15em;
         max-width: none;
     }
 
     #player-bar {
         padding-right: .9em;
         padding-left: .9em;
+    }
+
+    /* Thumb-sized targets: the transport sits centred on its own line, the small controls on the line below. */
+    #player-bar .pb-row {
+        justify-content: center;
+        gap: .5rem 1rem;
+        margin-top: .2rem;
+    }
+
+    #player-bar .pb-grp {
+        display: contents;
+    }
+
+    .pb-break {
+        display: block;
+        flex-basis: 100%;
+        height: 0;
+    }
+
+    #player-bar .pbtn {
+        width: 2.9rem;
+        height: 2.9rem;
+    }
+
+    #player-bar .pbtn.pb-main {
+        width: 3.6rem;
+        height: 3.6rem;
+    }
+
+    #player-bar .pb-skip {
+        font-size: .9rem;
+    }
+
+    #player-bar .pb-chip {
+        height: 2.75rem;
+        font-size: .9rem;
+    }
+
+    #player-bar input[type="range"] {
+        height: 2.75rem;
+    }
+
+    #video-modal video {
+        touch-action: manipulation;
+    }
+
+    #video-modal-header .pbtn {
+        width: 2.75rem;
+        height: 2.75rem;
     }
 
     #player-panel {
