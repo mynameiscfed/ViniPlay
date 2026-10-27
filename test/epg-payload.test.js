@@ -21,7 +21,7 @@ test('builds each result once per file change', () => {
     try {
         const allowed = { b: { allowed: true } };
         payload(allowed); payload(allowed); payload(null); payload(null);
-        assert.strictEqual(parses, 2);
+        assert.strictEqual(parses, 1); // only the restricted copy is parsed
         text = JSON.stringify({ b_new: [] });
         assert.deepStrictEqual(JSON.parse(payload(allowed)), { b_new: [] });
     } finally {
@@ -31,5 +31,6 @@ test('builds each result once per file change', () => {
 
 test('a damaged file gives an empty guide and a missing file gives undefined', () => {
     assert.strictEqual(createEpgPayload(() => '{broken')(null), '{}');
+    assert.strictEqual(createEpgPayload(() => '{"a":[')(null), '{}');
     assert.strictEqual(createEpgPayload(() => undefined)(null), undefined);
 });

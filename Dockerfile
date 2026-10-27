@@ -16,7 +16,7 @@
 # rebuilds just the final COPY. Cache mounts keep apt/npm downloads out of the
 # image and reuse them across local builds.
 
-ARG NODE_VERSION=18
+ARG NODE_VERSION=22
 ARG UBUNTU_VERSION=24.04
 
 # The full (non-slim) image already ships python3, make and g++, which node-gyp
@@ -46,6 +46,9 @@ ARG TARGETARCH
 ENV NVIDIA_DRIVER_CAPABILITIES=all
 ENV DEBIAN_FRONTEND=noninteractive
 ENV LD_LIBRARY_PATH=/usr/lib/jellyfin-ffmpeg/lib
+# Heap caps (MB): the server, and the worker thread that parses guides during a refresh. Override for huge libraries.
+ENV NODE_OPTIONS=--max-old-space-size=2048
+ENV VINIPLAY_EPG_HEAP_MB=2048
 
 # Jellyfin's signing key, ASCII-armored. apt reads .asc keyrings directly, so
 # neither curl nor gnupg has to be installed in the image.
