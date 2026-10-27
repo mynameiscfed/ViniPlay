@@ -41,16 +41,14 @@ const { cachedFile, writeFileAtomic } = require('./fileStore');
 const { sendJson } = require('./sendJson');
 const { createEpgPayload } = require('./epgPayload');
 const { applyProcessed } = require('./processedSettings');
-const { openMaybeGzip } = require('./compressedFile');
 const { planSourceRefreshes } = require('./sourceRefresh');
 const { ALLOWED_STREAM_PROTOCOLS, isAllowedStreamUrl, isPlaylistUrl } = require('./streamProtocols');
 const { parseM3U, displayNameFromExtinf } = require('./m3uParser');
-const { parseEpgTime } = require('./epgTime');
 const { resolveStreamIdentity } = require('./streamAuth');
 const { allowedSourcesFromUser, isChannelAllowed } = require('./accessControl');
 const { pipeline: pipelineAsync } = require('stream/promises');
-const { forEachProgramme, forEachChannel } = require('./epgStream');
-const { buildTargets, createSuggester, bestMatch, CONFIDENT } = require('./epgMatch');
+const { mergeEpgInWorker } = require('./epgMerge');
+const { createSuggester, bestMatch, CONFIDENT } = require('./epgMatch');
 const { createSuggestStore, suggestChunk, runMatchJob } = require('./epgSuggest');
 const { chat, pickWithLlm, listModels, searchModels, aiStatus, updateAiConfig } = require('./epgLlm');
 const webpush = require('web-push');
@@ -352,7 +350,8 @@ const suggestStore = createSuggestStore(
 );
 // Channel ids that already have guide data, for the match job's "unresolved" filter; parsed once per merge.
 const readEpgKeys = cachedFile(LIVE_EPG_JSON_PATH, (text) => { try { return Object.keys(JSON.parse(text)); } catch (e) { return []; } });
-const readEpgGuide = cachedFile(LIVE_EPG_JSON_PATH, (text) => { try { return JSON.parse(text); } catch (e) { return {}; } });
+// Not cached: the parsed guide takes several times the file's size, and only the DVR series sync (every 6h) needs it.
+const readEpgGuide = () => { try { return JSON.parse(fs.readFileSync(LIVE_EPG_JSON_PATH, 'utf-8')); } catch (e) { return {}; } };
 let epgSuggester; // [the list it was built from, its search]; rebuilt only when the file changes
 const suggestEpg = (name, k) => {
     const list = readEpgChannels() || NO_EPG_CHANNELS;
@@ -1876,7 +1875,6 @@ function fetchUrlContent(url, options = {}, asStream = false) { // asStream reso
 // Updates the status of the active EPG sources in `settings` and adds the ones that failed to `failedSources`.
 async function mergeEpg(req, settings, liveChannels, onlyIds, failedSources) {
     const activeEpgSources = settings.epgSources.filter(s => s.isActive);
-    const mergedProgramData = {};
     const timeZone = settings.timeZone || null;
     const timezoneOffset = settings.timezoneOffset || 0;
 
@@ -1888,10 +1886,6 @@ async function mergeEpg(req, settings, liveChannels, onlyIds, failedSources) {
     // A guide is resolved to a file once (a URL is downloaded and kept on disk, so refreshing another source can
     // re-merge it without downloading it again); the channel pass and the programme pass both read that file.
     const epgFiles = new Map();
-    const openEpg = (source) => {
-        // The guide is parsed as a stream: big ones don't fit in a single string.
-        return openMaybeGzip(epgFiles.get(source.id));
-    };
     const failEpg = (source, error) => {
         const errorMsg = `Failed to process source "${source.name}" from ${source.path}: ${error.message}`;
         console.error(`[EPG] ${errorMsg}`);
@@ -1901,9 +1895,7 @@ async function mergeEpg(req, settings, liveChannels, onlyIds, failedSources) {
         source.statusMessage = `Processing failed: ${error.message.substring(0, 100)}...`;
     };
 
-    // Pass 1: make every guide readable and list the channels it declares, so channels can be matched by name.
-    const epgChannels = new Map(); // XMLTV channel id -> {id, names}, across all guides
-    const syntheticChannelIds = new Set(); // guide channels whose <channel id=""> had to be synthesized from the name
+    // Make every guide readable (network and disk, which don't block the event loop); parsing happens in a worker.
     const fallbackEpgSources = new Set(); // guides that failed to refresh and are re-merged from their cache
     for (const source of activeEpgSources) {
         console.log(`[EPG] Processing source: "${source.name}" (ID: ${source.id}, Type: ${source.type}, Path: ${sourcePathForLog(source.path)})`);
@@ -1939,13 +1931,6 @@ async function mergeEpg(req, settings, liveChannels, onlyIds, failedSources) {
                 source.cachedRawPath = cachePath;
                 epgFiles.set(source.id, cachePath);
             }
-            if (epgFiles.has(source.id)) {
-                await forEachChannel(openEpg(source), ({ id, names, synthetic }) => {
-                    if (synthetic) syntheticChannelIds.add(id);
-                    const known = epgChannels.get(id);
-                    epgChannels.set(id, { id, names: known ? [...new Set([...known.names, ...names])] : names });
-                });
-            }
         } catch (error) {
             epgFiles.delete(source.id);
             failEpg(source, error);
@@ -1955,73 +1940,40 @@ async function mergeEpg(req, settings, liveChannels, onlyIds, failedSources) {
         }
     }
 
-    // Which playlist channels each XMLTV channel feeds: manual overrides, then exact ids, then unambiguous names.
-    const targets = buildTargets({ channels: liveChannels, overrides: settings.epgOverrides, epgChannels: [...epgChannels.values()] });
-    if (syntheticChannelIds.size) {
-        sendProcessingStatus(req, `Warning: ${syntheticChannelIds.size} guide channels had an empty channel id and were matched by name only.`, 'info');
+    const sources = activeEpgSources.filter(s => epgFiles.has(s.id)).map(s => ({ id: s.id, name: s.name, file: epgFiles.get(s.id) }));
+    let merged;
+    try {
+        merged = await mergeEpgInWorker({
+            sources, liveChannels, overrides: settings.epgOverrides, timeZone, offsetHours: timezoneOffset,
+            epgPath: LIVE_EPG_JSON_PATH, channelsPath: EPG_CHANNELS_JSON_PATH,
+        }, {
+            status: (message, type) => sendProcessingStatus(req, message, type),
+            log: (message) => console.log(message),
+        });
+    } catch (error) { // the worker died (out of memory, ...): the previous guide files are untouched
+        console.error(`[EPG] Merge worker failed: ${error.message}`);
+        merged = { sources: Object.fromEntries(sources.map(s => [s.id, { error: error.message }])) };
     }
-    const sample = new Map(); // XMLTV channel id -> one programme title, so the picker can show what a channel airs
-    const titleOf = (prog) => (prog.title && prog.title._cdata ? prog.title._cdata : (prog.title?._text || 'No Title')).trim();
-
-    // Pass 2: programmes, for the channels that have a target.
     for (const source of activeEpgSources) {
-        if (!epgFiles.has(source.id)) continue;
-        try {
-            let programCount = 0;
-            let epgAddedCount = 0; // programmes added to the live guide (one per target channel)
-
-            await forEachProgramme(openEpg(source), (prog) => {
-                const channelId = prog._attributes?.channel;
-                if (!channelId) return;
-                programCount++;
-                if (!sample.has(channelId)) sample.set(channelId, titleOf(prog));
-                const ids = targets.get(channelId);
-                if (!ids) return;
-
-                const descNode = prog.desc && prog.desc._cdata ? prog.desc._cdata : (prog.desc?._text || '');
-                const entry = {
-                    start: parseEpgTime(prog._attributes.start, { timeZone, offsetHours: timezoneOffset }).toISOString(),
-                    stop: parseEpgTime(prog._attributes.stop, { timeZone, offsetHours: timezoneOffset }).toISOString(),
-                    title: titleOf(prog),
-                    desc: descNode.trim()
-                };
-                for (const id of ids) {
-                    (mergedProgramData[id] ||= []).push(entry);
-                    epgAddedCount++;
-                }
-            });
-
-            if (programCount === 0) {
-                sendProcessingStatus(req, `Warning: No programs found in "${source.name}".`, 'info');
-            }
-            if (fallbackEpgSources.has(source.id)) {
-                source.status = 'Error';
-                source.statusMessage = 'Refresh failed; kept the last cached guide.';
-            } else {
-                source.status = 'Success';
-                source.statusMessage = `Processed ${programCount} programs, added ${epgAddedCount} to live guide.`;
-            }
-            console.log(`[EPG] Source "${source.name}" processed successfully from ${sourcePathForLog(source.path)}.`);
-            sendProcessingStatus(req, ` -> Processed ${programCount} programs, added ${epgAddedCount} to live guide from "${source.name}".`, 'info');
-        } catch (error) {
-            failEpg(source, error);
+        const result = merged.sources[source.id];
+        if (!result) continue;
+        if (result.error) {
+            failEpg(source, new Error(result.error));
+            continue;
         }
-    }
-    for (const channelId in mergedProgramData) {
-        mergedProgramData[channelId].sort((a, b) => new Date(a.start) - new Date(b.start));
-    }
-    try { // Try block for saving EPG JSON
-        writeFileAtomic(LIVE_EPG_JSON_PATH, JSON.stringify(mergedProgramData));
-        console.log(`[EPG] Merged EPG JSON content saved to ${LIVE_EPG_JSON_PATH}.`);
-        sendProcessingStatus(req, `Successfully merged all EPG data for live channels.`, 'success');
-    } catch (writeErr) { // Catch block for saving EPG JSON
-        console.error(`[EPG] Error writing merged EPG JSON file: ${writeErr.message}`);
-        sendProcessingStatus(req, `Error writing merged EPG JSON file: ${writeErr.message}`, 'error');
-    }
-    try { // What the guides offer, for the manual EPG picker
-        writeFileAtomic(EPG_CHANNELS_JSON_PATH, JSON.stringify([...epgChannels.values()].map(c => ({ ...c, sample: sample.get(c.id) }))));
-    } catch (writeErr) {
-        console.error(`[EPG] Error writing EPG channel index: ${writeErr.message}`);
+        const { programCount, epgAddedCount } = result;
+        if (programCount === 0) {
+            sendProcessingStatus(req, `Warning: No programs found in "${source.name}".`, 'info');
+        }
+        if (fallbackEpgSources.has(source.id)) {
+            source.status = 'Error';
+            source.statusMessage = 'Refresh failed; kept the last cached guide.';
+        } else {
+            source.status = 'Success';
+            source.statusMessage = `Processed ${programCount} programs, added ${epgAddedCount} to live guide.`;
+        }
+        console.log(`[EPG] Source "${source.name}" processed successfully from ${sourcePathForLog(source.path)}.`);
+        sendProcessingStatus(req, ` -> Processed ${programCount} programs, added ${epgAddedCount} to live guide from "${source.name}".`, 'info');
     }
 }
 

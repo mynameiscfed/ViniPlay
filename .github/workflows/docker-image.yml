@@ -51,7 +51,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '18' # Matches the Node.js version installed in the Dockerfile
+          node-version: '22' # Matches the Node.js version installed in the Dockerfile
           cache: npm
 
       # Tests that load server modules (e.g. sqlite3) need the dependencies.

@@ -72,7 +72,7 @@ ViniPlay is designed for easy deployment using Docker.
 
 -   Docker
 -   Docker Compose (Recommended)
--   Node.js 18+ and npm only if you want to run the tests or rebuild the Tailwind CSS locally
+-   Node.js 22+ and npm only if you want to run the tests or rebuild the Tailwind CSS locally
 
 ### Method 1: Using Docker Compose (Recommended)
 
@@ -170,6 +170,8 @@ Once the container is running, open `http://localhost:8998` (replace `localhost`
 The container drops root privileges at startup and runs ViniPlay (and every FFmpeg process it starts) as an unprivileged `viniplay` user, UID/GID `1000` by default. On startup it hands ownership of `/data` and `/dvr` to that user, so existing installs that were written as root keep working.
 
 To match the owner of your host folders, set `PUID` and `PGID` in your `.env` file (for example `PUID=1001` and `PGID=1001`). If you map `/dev/dri` for Intel QSV / VA-API, the user is added to the group that owns the render device automatically. Setting `PUID=0` restores the old run-as-root behaviour, which is not recommended.
+
+Memory caps default to 2048 MB for the server (`NODE_OPTIONS=--max-old-space-size=...`) and for the worker thread that parses guides during a refresh (`VINIPLAY_EPG_HEAP_MB`). Raise them in `.env` for very large libraries or guides.
 
 ### Hardware transcoding
 
