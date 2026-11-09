@@ -96,6 +96,8 @@ export function setupPalette() {
 
     input.addEventListener('input', () => {
         clearTimeout(timer);
+        // Emptying the box clears an active guide filter; otherwise closing the palette would leave it stuck.
+        if (!input.value.trim() && !$('guide-search-status')?.classList.contains('hidden')) applyGuideSearch();
         timer = setTimeout(renderResults, TYPE_DELAY_MS);
     });
     input.addEventListener('keydown', (e) => {
